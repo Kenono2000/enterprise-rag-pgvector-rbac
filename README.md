@@ -1,31 +1,29 @@
-# Enterprise RAG Microservice 🔐🤖
+# Enterprise Zero-Trust RAG Microservice
+### High-Throughput Retrieval-Augmented Generation with In-Database RBAC & pgvector
+**Architect:** Ken Wong | [LinkedIn](https://linkedin.com/in/kenwong-architect)
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688.svg)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-pgvector-336791.svg)
-![Docker](https://img.shields.io/badge/Docker-Enabled-2496ED.svg)
+---
 
-A production-ready Retrieval-Augmented Generation (RAG) microservice designed for enterprise environments. This project demonstrates how to securely bridge Large Language Models with private organizational data by enforcing **Zero-Trust Role-Based Access Control (RBAC)** at the database layer, combined with highly efficient vector search optimizations.
+## 🏛️ Architecture Blueprint
 
-## 🏗 Architecture Blueprint
+![Zero-Trust Enterprise AI Architecture Blueprint](THE%20ZERO-TRUST%20ENTERPRISE%20AI%20ARCHITECTURE%20BLUEPRINT.drawio.svg)
 
-![Architecture Diagram](https://raw.githubusercontent.com/Kenono2000/enterprise-rag-pgvector-rbac/main/Architecture%20Blueprint%20%20Secure%20Enterprise%20RAG%20Microservice%20(pgvector%20%2B%20Matryoshka%20%2B%20Zero-Trust%20RBAC).drawio.svg)
+---
 
-## ✨ Key Features
+## 🔑 Core Problem Solved
 
-* **Hard Data Isolation (RBAC):** Row-level security and access control enforced directly at the PostgreSQL layer using JSONB queries `WHERE allowed_roles ?| ARRAY[claims.roles]`.
-* **Matryoshka Embedding Truncation:** Optimizes storage and compute by dynamically truncating 1536-dimensional embeddings without sacrificing retrieval accuracy.
-* **HNSW Vector Indexing:** Utilizes `pgvector` with Hierarchical Navigable Small World (HNSW) indexes for sub-millisecond semantic similarity search.
-* **Strict Data Contracts:** Built on FastAPI with Pydantic Data Transfer Objects (DTOs) to guarantee structured, deterministic inputs and outputs.
-* **Dockerized Infrastructure:** Containerized PostgreSQL environment with `pgvector` pre-configured for immediate deployment.
+Standard RAG architectures retrieve sensitive context chunks and filter user permissions in application memory, creating data-leakage and compliance risks in multi-tenant enterprise environments.
 
-## 📂 Core Project Structure
+This reference architecture implements **Shift-Left Security**:
+* **Auth0 Identity Integration:** Extracts validated JWT claims (roles, tenant ID) via OAuth 2.0 PKCE.
+* **In-Database RBAC Filtering:** Passes JWT roles directly into PostgreSQL using the JSONB existence operator (`?|`), ensuring the database only returns authorized chunks during the HNSW vector search.
+* **Matryoshka Truncation (1536d):** Compresses 3072d vectors to 1536d to respect `pgvector`'s 2000-dimension HNSW indexing ceiling while retaining >98% semantic accuracy.
+* **Deterministic API Contracts:** Synthesizes LLM responses into typed Pydantic DTOs with grounded citations and cosine confidence scores.
 
-```text
-.
-├── app/
-│   ├── client.py        # FastAPI routing and strict Pydantic DTO schema contracts
-│   ├── database.py      # SQL execution (CREATE EXTENSION vector, JSONB role filtering)
-│   └── retriever.py     # Embedding generation and Matryoshka truncation logic
-├── docker-compose.yml   # PostgreSQL + pgvector infrastructure
-└── main.py              # Application entry point
+---
+
+## 🛠️ Technology Stack
+* **API Gateway:** Python (FastAPI, Pydantic)
+* **Vector Database:** PostgreSQL 16 + `pgvector` (HNSW Cosine Indexing)
+* **Identity & Access Management:** Auth0 (OAuth 2.0 / PKCE / JWT Scopes)
+* **Orchestration:** Asynchronous Non-Blocking I/O
