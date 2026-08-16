@@ -1,12 +1,20 @@
 # Enterprise Zero-Trust RAG Microservice 🛡️
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://enterprise-rag-pgvector-rbac.streamlit.app)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791.svg?logo=postgresql)](https://www.postgresql.org/)
 [![pgvector](https://img.shields.io/badge/pgvector-Supported-success.svg)](https://github.com/pgvector/pgvector)
 [![Auth0](https://img.shields.io/badge/Auth0-Secured-EB5424.svg?logo=auth0)](https://auth0.com/)
 
-**High-Throughput Retrieval-Augmented Generation with In-Database RBAC & pgvector** **Architect:** Ken Wong | [Connect on LinkedIn](https://linkedin.com/in/kenwong-architect)
+**High-Throughput Retrieval-Augmented Generation with In-Database RBAC & pgvector**  
+**Architect:** Ken Wong | [Connect on LinkedIn](https://linkedin.com/in/kenwong-architect)
+
+---
+
+> 🚀 **Interactive Live Demo:**  
+> Test the Zero-Trust Shift-Left RBAC filtering in real-time directly in your browser:  
+> **[👉 Launch Live Demo on Streamlit](https://enterprise-rag-pgvector-rbac.streamlit.app)**
 
 ---
 
@@ -34,6 +42,7 @@ This reference architecture solves this by implementing **Shift-Left Security**:
 * **API Gateway:** Python (FastAPI, Pydantic)
 * **Vector Database:** PostgreSQL 16 + `pgvector` (HNSW Cosine Indexing)
 * **Identity & Access Management:** Auth0 (OAuth 2.0 / PKCE / JWT Scopes)
+* **Frontend Demo:** Streamlit Cloud
 * **Orchestration:** Asynchronous Non-Blocking I/O
 
 ---
@@ -45,4 +54,5 @@ enterprise-rag-pgvector-rbac/
 ├── docker-compose.yml       # Runs PostgreSQL 16 with pgvector extension
 ├── init.sql                 # DDL schema, HNSW index & sample enterprise data
 ├── requirements.txt         # Python dependencies
-└── main.py                  # FastAPI microservice (RBAC + Matryoshka + RAG)
+├── main.py                  # FastAPI microservice (RBAC + Matryoshka + RAG)
+└── app.py                   # Streamlit live interactive demo dashboard
