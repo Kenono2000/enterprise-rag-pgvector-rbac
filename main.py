@@ -1,7 +1,18 @@
 """
 Enterprise Zero-Trust RAG Microservice
 Author: Ken Wong | Senior AI Solutions Architect
+
+ARCHITECTURE OVERVIEW:
+This microservice implements a "Shift-Left" Zero-Trust RAG (Retrieval-Augmented Generation) pattern.
+Key Features:
+1. In-Database RBAC: Security filtering happens at the database level using PostgreSQL JSONB operators (?|),
+   ensuring users never even see metadata for documents they aren't authorized to access.
+2. Matryoshka Vector Indexing: Uses OpenAI's text-embedding-3-large model with native truncation 
+   to 1536d to balance search performance (HNSW index) with high semantic precision.
+3. Asynchronous Execution: Built on FastAPI and asyncpg for high-concurrency enterprise workloads.
+4. Grounded Synthesis: LLM prompts are strictly constrained to authorized retrieved context to prevent hallucinations.
 """
+
 import os
 import json
 import asyncpg
@@ -67,7 +78,12 @@ app = FastAPI(
 # -----------------------------------------------------------------------------
 # Security Layer: JWT Scope / Role Extraction (Auth0 Simulation)
 # -----------------------------------------------------------------------------
+# SHIFT-LEFT SECURITY: This layer extracts user identity/roles early in the request 
+# lifecycle. In a production environment, this would validate a JWT from an Identity 
+# Provider (IdP) like Auth0 or Azure AD. The extracted roles are then passed 
+# down to the database query to enforce row-level security.
 async def get_current_user_roles(
+
     x_user_roles: Optional[str] = Header(
         default='["finance_executive"]', 
         description="Simulated Auth0 JWT role claims array"
@@ -91,7 +107,12 @@ async def get_current_user_roles(
 # -----------------------------------------------------------------------------
 # Vector Service: Matryoshka Truncation & Embeddings
 # -----------------------------------------------------------------------------
+# MATRYOSHKA EMBEDDINGS: We use 1536d truncation of the 3072d text-embedding-3-large 
+# model. This "Russian Doll" technique allows us to store smaller vectors (saving 
+# 50% storage/memory) while maintaining nearly identical retrieval accuracy. 
+# 1536d is also the limit for standard HNSW indexes in many managed pgvector environments.
 async def generate_matryoshka_embedding(text: str) -> List[float]:
+
     """
     Generates embeddings and truncates 3072d vectors to 1536d (Matryoshka Truncation)
     to respect pgvector's HNSW index ceiling while preserving semantic intelligence.
@@ -129,8 +150,11 @@ async def query_rag(
     vector_str = f"[{','.join(map(str, query_vector))}]"
     roles_json = json.dumps(user_roles)
 
-    # In-Database RBAC query using PostgreSQL ?| JSONB operator
+        # In-Database RBAC query using PostgreSQL ?| JSONB operator
+    # The ?| operator checks if any of the user's roles exist in the document's allowed_roles array.
+    # This ensures that semantic search is performed ONLY on authorized data subsets.
     sql_query = """
+
         SELECT 
             document_id,
             title,
@@ -176,8 +200,12 @@ async def query_rag(
     ]
     avg_confidence = round(sum(c.similarity_score for c in citations) / len(citations), 3)
 
-    # Synthesize answer from grounded, authorized chunks
+        # Synthesize answer from grounded, authorized chunks
+    # GROUNDED SYNTHESIS: We provide only the authorized snippets to the LLM.
+    # The prompt explicitly tells the model to stay within these bounds, 
+    # preventing information leakage from its internal training data.
     context_chunks = "\n---\n".join([f"Source [{r['title']}]: {r['content']}" for r in rows])
+
     
     if openai_client:
         prompt = f"Answer the user's question strictly using the provided context:\n\n{context_chunks}\n\nQuestion: {request.question}"
@@ -202,8 +230,13 @@ async def ingest_document(
     doc: IngestDocumentRequest,
     user_roles: List[str] = Depends(get_current_user_roles)
 ):
-    """Ingests a new enterprise document with strict JSONB RBAC permissions."""
+    """
+    Ingests a new enterprise document with strict JSONB RBAC permissions.
+    1. Generates the Matryoshka embedding for the content.
+    2. Persists the document, metadata, and role-based ACLs in one atomic operation.
+    """
     embedding = await generate_matryoshka_embedding(doc.content)
+
     vector_str = f"[{','.join(map(str, embedding))}]"
     roles_json = json.dumps(doc.allowed_roles)
 

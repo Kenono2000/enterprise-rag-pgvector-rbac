@@ -17,7 +17,9 @@ st.caption("Architected by **Ken Wong** | [LinkedIn Profile](https://linkedin.co
 
 st.divider()
 
-# 1. Identity Selector
+# 1. Identity Selector (IAM Simulation)
+# In a production environment, this would be a JWT (JSON Web Token) 
+# parsed from an Authorization header (e.g., Auth0, Azure AD).
 st.subheader("1. Identity & Access Management (IAM)")
 role_choice = st.selectbox(
     "Select Simulated Auth0 Role Claim:",
@@ -32,7 +34,9 @@ role_choice = st.selectbox(
 
 st.info(f"🔑 Active JWT Scope Claims: `['{role_choice}']`")
 
-# 2. Database Documents Knowledge Base
+# 2. Database Documents Knowledge Base (Simulating a Vector Database)
+# Each document record contains metadata (allowed_roles) used for Row-Level Security (RLS).
+# This prevents unauthorized data from ever leaving the database.
 DOCUMENTS_DB = [
     {
         "id": "FIN-2026-001",
@@ -57,26 +61,32 @@ DOCUMENTS_DB = [
     }
 ]
 
-# 3. Query Section
+# 3. Query Section (The RAG Pipeline)
 st.subheader("2. Secure Grounded Retrieval")
 question = st.text_input("Enter Question:", value="What were the Q3 financial results and margins?")
 
 if st.button("🚀 Execute Zero-Trust Vector Search", type="primary"):
     st.write("---")
     
-    # In-Database RBAC Simulation (?| JSONB Intersection)
+    # --- ZERO-TRUST FILTERING LOGIC ---
+    # This mimics 'In-Database RBAC'. We filter the context BEFORE 
+    # it is sent to the LLM. This is known as "Shift-Left Security".
     authorized_docs = [
         doc for doc in DOCUMENTS_DB 
         if role_choice in doc["allowed_roles"] or "public" in doc["allowed_roles"]
     ]
 
+    # Displaying the raw SQL that would be executed in a real PGVector/Postgres DB.
+    # The '?|' operator checks for intersections between user roles and document permissions.
     st.markdown("#### 🔍 Database Execution Trace")
     st.code(f"""SELECT title, content, similarity \nFROM enterprise_documents \nWHERE allowed_roles ?| ARRAY['{role_choice}'] \nORDER BY embedding <=> query_vector LIMIT 3;""", language="sql")
 
+    # Final Security Check: If no docs are found or if the persona is unauthorized for the topic.
     if not authorized_docs or (role_choice not in ["finance_executive", "compliance_auditor"] and "financial" in question.lower()):
         st.error("🚫 Access Denied: No authorized records found matching your JWT role permissions.")
-        st.warning("Shift-Left Security prevented unauthorized data from reaching the LLM context.")
+        st.warning("Security Note: The backend blocked this request because the user's role claim is insufficient.")
     else:
+        # Grounding: Use only the top authorized document to provide the answer.
         top_doc = authorized_docs[0]
         st.success("✅ Authorization Verified: Document Grounded Successfully")
         
@@ -89,6 +99,7 @@ if st.button("🚀 Execute Zero-Trust Vector Search", type="primary"):
         with col2:
             st.metric("Cosine Similarity Score", f"{top_doc['similarity']}")
             
+        # Providing an Audit Trail for compliance (SOC2/ISO27001 requirement).
         with st.expander("View Audit Citation & Scopes"):
             st.json({
                 "document_id": top_doc["id"],
