@@ -7,7 +7,7 @@ st.set_page_config(
     layout="centered"
 )
 st.title("🛡️ Zero-Trust Enterprise RAG")
-st.markdown("
+st.markdown("This demo showcases how to enforce row-level security (RLS) policies on vector embeddings using PostgreSQL and pgvector, ensuring only authorized roles can retrieve sensitive information.")
 st.caption("Architected by **Ken Wong** | [LinkedIn Profile](https://linkedin.com/in/kenwong-architect) | [GitHub Repository](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac)")
 st.divider()
 st.subheader("1. Identity & Access Management (IAM)")
@@ -26,10 +26,10 @@ st.info("💡 Data and Security Logic are decoupled from this UI, allowing the s
 st.subheader("2. Secure Grounded Retrieval")
 question = st.text_input("Enter Question:", value="What were the Q3 financial results and margins?")
 if st.button("🚀 Execute Zero-Trust Vector Search", type="primary"):
-    st.write("
+    st.write("Executing search...")
     authorized_docs, error_msg = secure_search(question, role_choice)
-    st.markdown("
-    st.code(f, language="sql")
+    st.markdown("### Search Results")
+    st.code("SELECT * FROM documents WHERE...", language="sql")
     if error_msg:
         st.error(error_msg)
         st.warning("Security Note: The backend blocked this request because the user's role claim is insufficient.")
