@@ -1,9 +1,12 @@
-fastapi>=0.110.0
-uvicorn>=0.28.0
-pydantic>=2.6.0
+# To install: pip install -r requirements.txt
+
 asyncpg>=0.29.0
+fastapi>=0.110.0
+fastmcp
+mcp
 openai>=1.14.0
+pydantic>=2.6.0
 python-dotenv>=1.0.1
 streamlit
-mcp
-fastmcp
+uvicorn>=0.28.0
+
