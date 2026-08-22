@@ -42,4 +42,11 @@ def audit_prompt():
 def finance_prompt(company_quarter: str = "Q3"):
     return f
 if __name__ == "__main__":
-    mcp.run()
+    import os
+    # Use SSE transport if PORT is provided (for cloud deployment), otherwise use stdio
+    if "PORT" in os.environ:
+        port = int(os.environ.get("PORT", 8000))
+        print(f"Starting MCP SSE server on port {port}...")
+        mcp.run(transport="sse", host="0.0.0.0", port=port)
+    else:
+        mcp.run()
