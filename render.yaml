@@ -1,15 +1,15 @@
 services:
   - type: web
-    name: enterprise-rag-mcp
+    name: enterprise-rag-api
     env: python
     region: oregon
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python mcp_server.py
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
       - key: DATABASE_URL
-        sync: false # You will paste this in the Render dashboard
-      - key: PORT
-        value: 8000
+        sync: false # You will paste your Neon URL in the Render dashboard
+      - key: OPENAI_API_KEY
+        sync: false # Optional: Paste your key, or leave blank to use the mock fallback
