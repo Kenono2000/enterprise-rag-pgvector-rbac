@@ -1,12 +1,9 @@
 # Enterprise Zero-Trust RAG Microservice 🛡️
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://enterprise-rag-pgvector-rbac.streamlit.app)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791.svg?logo=postgresql)](https://www.postgresql.org/)
-[![pgvector](https://img.shields.io/badge/pgvector-Supported-success.svg)](https://github.com/pgvector/pgvector)
-[![MCP](https://img.shields.io/badge/MCP-Ready-orange.svg)](https://modelcontextprotocol.io/)
-[![Auth0](https://img.shields.io/badge/Auth0-Secured-EB5424.svg?logo=auth0)](https://auth0.com/)
+[![MCP Ready](https://img.shields.io/badge/MCP-Agent--Ready-purple?logo=modelcontextprotocol)](https://modelcontextprotocol.io)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![pgvector](https://img.shields.io/badge/Database-pgvector-336791?logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector)
 
 **High-Throughput Retrieval-Augmented Generation with In-Database RBAC & pgvector**  
 **Architect:** Ken Wong | [Connect on LinkedIn](https://linkedin.com/in/kenwong-architect)
@@ -21,7 +18,19 @@
 
 ## 🏛️ Architecture Blueprint
 
-![Zero-Trust Enterprise AI Architecture Blueprint](THE%20ZERO-TRUST%20ENTERPRISE%20AI%20ARCHITECTURE%20BLUEPRINT.drawio.svg)
+sequenceDiagram
+    participant User as AI Agent / Client
+    participant API as FastAPI (main.py)
+    participant DB as PostgreSQL + pgvector
+    participant LLM as OpenAI (gpt-4o)
+
+    User->>API: POST /api/v1/query (Question + JWT Roles)
+    API->>API: Generate 1536d Matryoshka Embedding
+    API->>DB: Query with `?|` JSONB Role Filter + Vector Search
+    DB-->>API: Return ONLY Authorized Chunks (Shift-Left Security)
+    API->>LLM: Synthesize Answer with Grounded Context
+    LLM-->>API: Deterministic JSON Response
+    API-->>User: RAGResponse (Answer + Citations + Confidence)
 
 ---
 
