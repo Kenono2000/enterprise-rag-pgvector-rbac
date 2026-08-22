@@ -11,10 +11,11 @@
 ---
 
 > 🚀 **Live Interactive Demos:**  
-> - **⚡ Live API & Swagger UI:** Test the Shift-Left RBAC filtering in real-time:  
->   👉 **[https://enterprise-rag-api.onrender.com/docs](https://enterprise-rag-api.onrender.com/docs)**  
->   *(Try querying with `["finance_executive"]` vs `["public_guest"]` in the `x-user-roles` header!)*
-> - **🤖 Live AI Agent Endpoint:** Connect your MCP client (e.g., Prefect Horizon) to our secure SSE gateway:  
+> - **🎨 Visual UI Demo:** Test the Shift-Left RBAC filtering in a user-friendly interface:  
+>   👉 **[Launch Live Streamlit Demo](https://enterprise-rag-pgvector-rbac.streamlit.app/)**  
+> - **⚡ Live API & Swagger UI:** Test the raw microservice endpoints:  
+>   👉 **[https://enterprise-rag-api-ksez.onrender.com/docs](https://enterprise-rag-api-ksez.onrender.com/docs)**  
+> - **🤖 Live AI Agent Endpoint:** Connect your MCP client to our secure SSE gateway:  
 >   👉 **`https://enterprise-rag-mcp.onrender.com/sse`**
 
 ---
