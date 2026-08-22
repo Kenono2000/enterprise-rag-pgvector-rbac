@@ -6,9 +6,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Header, status
 from pydantic import BaseModel, Field
 from openai import AsyncOpenAI
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-load_dotenv()
+# Load environment variables from .env file if it exists, searching upwards from the current file.
+# override=True ensures that values in .env take precedence over existing environment variables.
+load_dotenv(find_dotenv(), override=True)
 
 openai_api_key = os.getenv("OPENAI_API_KEY")
 database_url = os.getenv("DATABASE_URL")

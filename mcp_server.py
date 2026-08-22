@@ -4,6 +4,18 @@ import os
 import asyncpg
 from typing import List
 
+from dotenv import load_dotenv, find_dotenv
+
+# Load environment variables from .env file if it exists, searching upwards from the current file.
+# override=True ensures that values in .env take precedence over existing environment variables.
+load_dotenv(find_dotenv(), override=True)
+
+# FAIL LOUDLY: Ensure the database URL is actually present
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise ValueError("❌ CRITICAL: DATABASE_URL environment variable is not set in Prefect Horizon.")
+
 # Initialize FastMCP
 mcp = FastMCP("Zero-Trust RAG")
 
