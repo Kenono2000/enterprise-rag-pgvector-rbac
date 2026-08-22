@@ -50,3 +50,5 @@ if st.button("🚀 Execute Zero-Trust Vector Search", type="primary"):
                 "evaluated_user_role": role_choice,
                 "data_leakage_prevented": True
             })
+
+# uvicorn api:app --reload
