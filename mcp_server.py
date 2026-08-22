@@ -93,3 +93,5 @@ if __name__ == "__main__":
     else:
         print("🖥️ Starting MCP server in stdio mode (for local Claude Desktop)...")
         mcp.run()
+
+# fastmcp run .\mcp_server.py --no-banner --reload
