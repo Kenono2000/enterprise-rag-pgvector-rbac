@@ -1,3 +1,4 @@
+# engine.py
 DOCUMENTS_DB = [
     {
         "id": "FIN-2026-001",
@@ -21,15 +22,20 @@ DOCUMENTS_DB = [
         "similarity": 0.910
     }
 ]
-def secure_search(question: str, role_choice: str):
-    authorized_docs = [
-        doc for doc in DOCUMENTS_DB 
-        if role_choice in doc["allowed_roles"] or "public" in doc["allowed_roles"]
-    ]
-    is_financial_query = "financial" in question.lower()
-    is_authorized_for_finance = role_choice in ["finance_executive", "compliance_auditor"]
-    if is_financial_query and not is_authorized_for_finance:
-        return None, "🚫 Access Denied: No authorized records found matching your JWT role permissions."
+
+def secure_search(question: str, user_role: str) -> tuple[list, str]:
+    """
+    Simulates in-database RBAC filtering for the MCP demo.
+    In production, this is replaced by the asyncpg query in main.py.
+    """
+    authorized_docs = []
+    for doc in DOCUMENTS_DB:
+        if user_role in doc["allowed_roles"] or "public" in doc["allowed_roles"]:
+            authorized_docs.append(doc)
+            
     if not authorized_docs:
-        return None, "🚫 Access Denied: No authorized records found matching your JWT role permissions."
-    return authorized_docs, None
+        return [], f"User role '{user_role}' is not authorized to view any matching documents."
+        
+    # Sort by mock similarity
+    authorized_docs.sort(key=lambda x: x["similarity"], reverse=True)
+    return authorized_docs, ""

@@ -51,4 +51,4 @@ if st.button("🚀 Execute Zero-Trust Vector Search", type="primary"):
                 "data_leakage_prevented": True
             })
 
-# uvicorn api:app --reload
+# streamlit run app.py
