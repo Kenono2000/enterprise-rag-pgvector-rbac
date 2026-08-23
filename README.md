@@ -2,7 +2,7 @@
 
 **High-Throughput Retrieval-Augmented Generation with In-Database RBAC & `pgvector`**
 
-**Architect:** [Ken Wong](https://www.linkedin.com/in/ken-wong)  
+**Architect:** [Ken Wong](https://www.linkedin.com/in/kenwong-architect/)  
 **Target Stack:** Python, FastAPI, PostgreSQL, `pgvector`, FastMCP, Auth0
 
 ---
@@ -12,7 +12,7 @@
 > ⚠️ **Note on Demos vs. Production:** The Streamlit UI (`app.py`) uses a lightweight, mocked dataset to allow zero-friction local demonstration of the RBAC filtering logic. However, the core microservice (`main.py`) is a **production-grade, real vector database implementation** designed for enterprise deployment (see [Real Vector DB Implementation](#-real-vector-database--indexed-rag-implementation) below).
 
 - **🎨 Visual UI Demo (Mocked Data):** Test the Shift-Left RBAC filtering in a user-friendly interface:  
-  👉 **[Launch Live Streamlit Demo](#-real-vector-database--indexed-rag-implementation)** *(Link to your deployed Streamlit app)*
+  👉 **[https://enterprise-rag-pgvector-rbac.streamlit.app/](https://enterprise-rag-pgvector-rbac.streamlit.app/)**
 - **⚡ Live API & Swagger UI:** Test the raw, production-ready microservice endpoints:  
   👉 **[https://enterprise-rag-api-ksez.onrender.com/docs](https://enterprise-rag-api-ksez.onrender.com/docs)**
 - **🤖 Live AI Agent Endpoint:** Connect your MCP client to our secure SSE gateway:  
