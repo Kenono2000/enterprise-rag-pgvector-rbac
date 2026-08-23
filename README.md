@@ -16,7 +16,7 @@
 > - **⚡ Live API & Swagger UI:** Test the raw microservice endpoints:  
 >   👉 **<a href="https://enterprise-rag-api-ksez.onrender.com/docs" target="_blank">https://enterprise-rag-api-ksez.onrender.com/docs</a>**      
 > - **🤖 Live AI Agent Endpoint:** Connect your MCP client to our secure SSE gateway:  
->   👉 **`https://enterprise-rag-mcp.onrender.com/sse`**
+>   👉 **`https://enterprise-rag-mcp.fastmcp.app/mcp`**
 
 ---
 
