@@ -9,7 +9,7 @@
 
 ## 🚀 Live Interactive Demos
 
-> ⚠️ **Note on Demos vs. Production:** The Streamlit UI (`app.py`) uses a lightweight, mocked dataset to allow zero-friction local demonstration of the RBAC filtering logic. However, the core microservice (`main.py`) is a **production-grade, real vector database implementation** designed for enterprise deployment (see [Real Vector DB Implementation](#-real-vector-database--indexed-rag-implementation) below).
+> ⚠️ **Note on Demos vs. Production:** The Streamlit UI (`app.py`) uses a lightweight, mocked dataset to allow zero-friction local demonstration of the RBAC filtering logic. However, the core microservice (`main.py`) is a **production-grade, real vector database implementation** designed for enterprise deployment (see [Real Vector DB Implementation](#real-vector-database--indexed-rag-implementation) below).
 
 - **🎨 Visual UI Demo (Mocked Data):** Test the Shift-Left RBAC filtering in a user-friendly interface:  
   👉 **[https://enterprise-rag-pgvector-rbac.streamlit.app/](https://enterprise-rag-pgvector-rbac.streamlit.app/)**
