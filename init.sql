@@ -45,7 +45,7 @@ VALUES
     'ENG-2026-105',
     'Public Engineering Guidelines',
     'All backend microservices must implement asynchronous non-blocking I/O and Pydantic DTO validation.',
-    '["public", "engineer", "finance_executive", "hr_manager"]'::jsonb,
+    '["engineer", "finance_executive", "hr_manager"]'::jsonb,
     (SELECT array_agg(0.015 * (i % 4))::vector(1536) FROM generate_series(1, 1536) i)
 )
 ON CONFLICT (document_id) DO NOTHING;
