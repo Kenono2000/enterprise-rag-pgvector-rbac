@@ -12,7 +12,7 @@
 > ⚠️ **Note on Demos vs. Production:** The Streamlit UI (`app.py`) uses a lightweight, mocked dataset to allow zero-friction local demonstration of the RBAC filtering logic. However, the core microservice (`main.py`) is a **production-grade, real vector database implementation** designed for enterprise deployment (see [Real Vector DB Implementation](#-real-vector-database--indexed-rag-implementation) below).
 
 - **🎨 Visual UI Demo (Mocked Data):** Test the Shift-Left RBAC filtering in a user-friendly interface:  
-  👉 **[Launch Live Streamlit Demo](#)** *(Link to your deployed Streamlit app)*
+  👉 **[Launch Live Streamlit Demo](#-real-vector-database--indexed-rag-implementation)** *(Link to your deployed Streamlit app)*
 - **⚡ Live API & Swagger UI:** Test the raw, production-ready microservice endpoints:  
   👉 **[https://enterprise-rag-api-ksez.onrender.com/docs](https://enterprise-rag-api-ksez.onrender.com/docs)**
 - **🤖 Live AI Agent Endpoint:** Connect your MCP client to our secure SSE gateway:  
@@ -46,3 +46,17 @@ While `app.py` provides a frictionless mocked demo, **`main.py` is a genuine, pr
 ---
 
 ## 🏛️ Architecture Blueprint
+
+```mermaid
+sequenceDiagram
+    participant Agent as AI Agent / Client
+    participant API as FastAPI / MCP Server
+    participant DB as PostgreSQL + pgvector
+    participant LLM as OpenAI (gpt-4o)
+
+    Agent->>API: Query (Question + JWT Role Array)
+    API->>API: Generate 1536d Matryoshka Embedding
+    API->>DB: Query with `?|` JSONB Role Filter + Vector Search
+    DB-->>API: Return ONLY Authorized Chunks (Shift-Left Security)
+    API->>LLM: Synthesize Answer with Grounded Context
+    LLM-->>API: Deterministic JSON Response
