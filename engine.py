@@ -14,28 +14,43 @@ DOCUMENTS_DB = [
         "allowed_roles": ["hr_manager", "executive"],
         "similarity": 0.862
     },
-    {
+        {
         "id": "ENG-2026-105",
         "title": "Public Engineering Standards",
         "content": "All backend microservices must implement asynchronous non-blocking I/O and Pydantic DTO contracts.",
-        "allowed_roles": ["public", "engineer", "finance_executive", "hr_manager", "public_guest"],
+        "allowed_roles": ["engineer", "finance_executive", "hr_manager"],
         "similarity": 0.910
     }
+
 ]
 
-def secure_search(question: str, user_role: str) -> tuple[list, str]:
+def secure_search(question: str, user_role: str) -> dict:
     """
-    Simulates in-database RBAC filtering for the MCP demo.
-    In production, this is replaced by the asyncpg query in main.py.
+    Simulates the RAGResponse from main.py
     """
     authorized_docs = []
     for doc in DOCUMENTS_DB:
+        # Simulate JSONB overlap logic: ?| ARRAY[...]
         if user_role in doc["allowed_roles"] or "public" in doc["allowed_roles"]:
             authorized_docs.append(doc)
             
     if not authorized_docs:
-        return [], f"User role '{user_role}' is not authorized to view any matching documents."
+        return {
+            "answer": "No authorized documentation found matching your security credentials.",
+            "citations": [],
+            "confidence_score": 0.0,
+            "error": f"User role '{user_role}' is not authorized."
+        }
         
     # Sort by mock similarity
     authorized_docs.sort(key=lambda x: x["similarity"], reverse=True)
-    return authorized_docs, ""
+    top_docs = authorized_docs[:3]
+    
+    avg_conf = sum(d["similarity"] for d in top_docs) / len(top_docs)
+    
+    return {
+        "answer": f"Based on the authorized documents ({', '.join([d['title'] for d in top_docs])}), the system confirms that security protocols and operational metrics are within expected parameters.",
+        "citations": top_docs,
+        "confidence_score": round(avg_conf, 3),
+        "error": None
+    }

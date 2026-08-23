@@ -3,7 +3,6 @@ import json
 import os
 import asyncpg
 from typing import List
-
 from dotenv import load_dotenv, find_dotenv
 
 # Load environment variables from .env file if it exists, searching upwards from the current file.
