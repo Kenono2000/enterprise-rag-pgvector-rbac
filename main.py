@@ -83,7 +83,7 @@ async def generate_matryoshka_embedding(text: str) -> List[float]:
             dimensions=1536 
         )
         return response.data[0].embedding
-        else:
+    else:
         return [0.01 * (i % 5) for i in range(1536)]
 
 @app.get("/health", tags=["Health"])
@@ -95,7 +95,7 @@ async def query_rag(
     request: RAGQueryRequest,
     user_roles: List[str] = Depends(get_current_user_roles)
 ):
-        query_vector = await generate_matryoshka_embedding(request.question)
+    query_vector = await generate_matryoshka_embedding(request.question)
     vector_str = f"[{','.join(map(str, query_vector))}]"
     
     helper_sql = """
@@ -107,7 +107,7 @@ async def query_rag(
         LIMIT 3
     """
     
-        async with db_pool.acquire() as conn:
+    async with db_pool.acquire() as conn:
         rows = await conn.fetch(helper_sql, vector_str, user_roles)
         
     if not rows:
