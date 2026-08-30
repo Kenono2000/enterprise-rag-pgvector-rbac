@@ -8,14 +8,11 @@ from pydantic import BaseModel, Field
 from openai import AsyncOpenAI
 from dotenv import load_dotenv, find_dotenv
 
-# Load environment variables from .env file if it exists, searching upwards from the current file.
-# override=True ensures that values in .env take precedence over existing environment variables.
 load_dotenv(find_dotenv(), override=True)
 
 openai_api_key = os.getenv("OPENAI_API_KEY")
 database_url = os.getenv("DATABASE_URL")
 
-# FAIL LOUDLY: Ensure the database URL is actually present
 if not database_url:
     raise ValueError("❌ CRITICAL: DATABASE_URL environment variable is not set. Please configure it in Render.")
 
@@ -86,8 +83,7 @@ async def generate_matryoshka_embedding(text: str) -> List[float]:
             dimensions=1536 
         )
         return response.data[0].embedding
-    else:
-        # Mock embedding for local demo without API key
+        else:
         return [0.01 * (i % 5) for i in range(1536)]
 
 @app.get("/health", tags=["Health"])
@@ -99,11 +95,9 @@ async def query_rag(
     request: RAGQueryRequest,
     user_roles: List[str] = Depends(get_current_user_roles)
 ):
-    query_vector = await generate_matryoshka_embedding(request.question)
+        query_vector = await generate_matryoshka_embedding(request.question)
     vector_str = f"[{','.join(map(str, query_vector))}]"
     
-    # SHIFT-LEFT SECURITY: The ?| operator ensures the DB only returns chunks 
-    # where at least one role in the JSONB array matches the user's roles.
     helper_sql = """
         SELECT document_id, title, content, allowed_roles, 
                1 - (embedding <=> $1::vector) as similarity
@@ -113,8 +107,7 @@ async def query_rag(
         LIMIT 3
     """
     
-    async with db_pool.acquire() as conn:
-        # Pass user_roles directly as a Python list, asyncpg maps it to text[]
+        async with db_pool.acquire() as conn:
         rows = await conn.fetch(helper_sql, vector_str, user_roles)
         
     if not rows:
