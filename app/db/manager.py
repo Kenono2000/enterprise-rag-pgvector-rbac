@@ -1,4 +1,5 @@
 import os
+import asyncio
 import asyncpg
 import json
 from typing import Optional, List
@@ -22,22 +23,45 @@ def get_db_url():
 
 class DatabaseManager:
     _pool: Optional[asyncpg.Pool] = None
+    _loop: Optional[asyncio.AbstractEventLoop] = None
 
     @classmethod
     async def get_pool(cls) -> asyncpg.Pool:
-        if cls._pool is None:
+        # Streamlit may run each script rerun on a different event loop.
+        # asyncpg binds connections to the loop they were created on, so a
+        # cached pool from a previous (now-closed/different) loop is unusable.
+        try:
+            current_loop = asyncio.get_event_loop()
+        except RuntimeError:
+            current_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(current_loop)
+
+        needs_recreate = (
+            cls._pool is None
+            or cls._loop is None
+            or cls._loop is not current_loop
+            or cls._loop.is_closed()
+        )
+        if needs_recreate:
+            if cls._pool is not None:
+                try:
+                    await cls._pool.close()
+                except Exception:
+                    pass
+
             db_url = get_db_url()
             if not db_url:
                 raise ValueError("❌ DATABASE_URL is not set in Env or Streamlit Secrets")
-            
+
             # Use SSL if connecting to a cloud provider (common requirement)
             # Most hosted DBs require SSL; 'require' is a safe default for production.
             cls._pool = await asyncpg.create_pool(
-                db_url, 
-                min_size=1, 
+                db_url,
+                min_size=1,
                 max_size=5,
                 ssl="require" if "localhost" not in db_url else None
             )
+            cls._loop = current_loop
         return cls._pool
 
     @classmethod
