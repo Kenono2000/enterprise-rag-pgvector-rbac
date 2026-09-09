@@ -53,6 +53,81 @@ An event-driven orchestration engine that transforms Jira/GitHub feature specifi
 *   **Automated Quality Gates:** Integrated automated test-repair loops, AST validation, and secret scanning before opening pull requests for human review.
 *   **Cost-Aware Orchestration:** Implemented a state machine with hard step-limits and token budgets to prevent runaway agent execution and ensure predictable operational costs.
 
+### Running the SDLC workflow locally
+
+The end-to-end workflow is exposed at `POST /webhooks/github`. It verifies an optional GitHub webhook signature, parses the issue, invokes the typed patch agent, applies patches inside `SDLC_SANDBOX_ROOT`, runs the configured test command, evaluates security guardrails, commits the branch, and optionally pushes it and opens a GitHub pull request.
+
+Create an untracked `.env` file in the project root:
+
+```dotenv
+SDLC_SANDBOX_ROOT=.
+SDLC_TEST_COMMAND=python -m pytest -q
+SDLC_PUSH=true
+GITHUB_TOKEN=<token>
+```
+
+`SDLC_PUSH` and `GITHUB_TOKEN` are optional. Leave `SDLC_PUSH=false` or omit it to create only a local branch and commit. Set `GITHUB_WEBHOOK_SECRET` as well when validating signed GitHub webhook deliveries.
+
+### Manual end-to-end test
+
+Use two PowerShell terminals. The first terminal runs the API; the second sends a fake GitHub issue event to it.
+
+In terminal 1, from the project directory, make sure `.env` contains these safe local-test values:
+
+```dotenv
+SDLC_SANDBOX_ROOT=.
+SDLC_TEST_COMMAND=python -m pytest -q
+SDLC_PUSH=false
+```
+
+Start PostgreSQL because the API initializes its database pool at startup:
+
+```powershell
+cd C:\src\enterprise-rag-pgvector-rbac
+docker compose up -d postgres
+python -m uvicorn sdlc_harness_main:app --reload --port 8000
+```
+
+Leave that terminal running. In terminal 2, send a test issue containing one typed patch. This patch adds a harmless Python constant, so the existing test suite should remain green:
+
+```powershell
+cd C:\src\enterprise-rag-pgvector-rbac
+$payload = @'
+{
+  "issue": {"number": 987654, "title": "Manual SDLC smoke test", "body": "Verify the local workflow."},
+  "repository": {"full_name": "owner/repository"},
+  "patches": [{"file_path": "sdlc_smoke_test.py", "content": "VALUE = 2\n"}]
+}
+'@
+
+Invoke-RestMethod `
+  -Uri http://localhost:8000/webhooks/github `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body $payload
+```
+
+A successful response includes `"status": "completed"`, a branch named `feature/AGENT-987654-manual-sdlc-smoke-test`, and `"pushed": false`. Verify the result with:
+
+```powershell
+git status
+git branch --show-current
+git log -1 --oneline
+python -m pytest -q
+```
+
+The workflow created a local branch, applied the patch, ran tests, and committed the change. It did not push or create a pull request because `SDLC_PUSH=false`. Delete the smoke-test branch and file after inspection if this was only a demonstration:
+
+```powershell
+git checkout main
+git branch -D feature/AGENT-987654-manual-sdlc-smoke-test
+Remove-Item sdlc_smoke_test.py -ErrorAction SilentlyContinue
+```
+
+Only after the local flow works should you set `SDLC_PUSH=true` and provide `GITHUB_TOKEN`; that pushes the branch and enables automatic pull-request creation. The `repository.full_name` must then be the real `owner/repository` value.
+
+For GitHub delivery validation, set `GITHUB_WEBHOOK_SECRET`; the endpoint then requires `X-Hub-Signature-256`. A failed test can be repaired when the injected agent returns `repair_patches`. Run `python -m pytest -q` to validate the complete local workflow.
+
 ---
 
 ## 🎙️ Interview Positioning

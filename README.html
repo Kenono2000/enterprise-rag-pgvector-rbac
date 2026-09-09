@@ -43,6 +43,56 @@
 <li><strong>Automated Quality Gates:</strong> Integrated automated test-repair loops, AST validation, and secret scanning before opening pull requests for human review.</li>
 <li><strong>Cost-Aware Orchestration:</strong> Implemented a state machine with hard step-limits and token budgets to prevent runaway agent execution and ensure predictable operational costs.</li>
 </ul>
+<h3 id="running-the-sdlc-workflow-locally">Running the SDLC workflow locally</h3>
+<p>The end-to-end workflow is exposed at <code>POST /webhooks/github</code>. It verifies an optional GitHub webhook signature, parses the issue, invokes the typed patch agent, applies patches inside <code>SDLC_SANDBOX_ROOT</code>, runs the configured test command, evaluates security guardrails, commits the branch, and optionally pushes it and opens a GitHub pull request.</p>
+<p>Create an untracked <code>.env</code> file in the project root:</p>
+<pre><code class="language-dotenv">SDLC_SANDBOX_ROOT=.
+SDLC_TEST_COMMAND=python -m pytest -q
+SDLC_PUSH=true
+GITHUB_TOKEN=&lt;token&gt;
+</code></pre>
+<p><code>SDLC_PUSH</code> and <code>GITHUB_TOKEN</code> are optional. Leave <code>SDLC_PUSH=false</code> or omit it to create only a local branch and commit. Set <code>GITHUB_WEBHOOK_SECRET</code> as well when validating signed GitHub webhook deliveries.</p>
+<h3 id="manual-end-to-end-test">Manual end-to-end test</h3>
+<p>Use two PowerShell terminals. The first terminal runs the API; the second sends a fake GitHub issue event to it.</p>
+<p>In terminal 1, from the project directory, make sure <code>.env</code> contains these safe local-test values:</p>
+<pre><code class="language-dotenv">SDLC_SANDBOX_ROOT=.
+SDLC_TEST_COMMAND=python -m pytest -q
+SDLC_PUSH=false
+</code></pre>
+<p>Start PostgreSQL because the API initializes its database pool at startup:</p>
+<pre><code class="language-powershell"><span class="hljs-built_in">cd</span> C:\src\enterprise<span class="hljs-literal">-rag-pgvector-rbac</span>
+docker compose up <span class="hljs-literal">-d</span> postgres
+python <span class="hljs-literal">-m</span> uvicorn sdlc_harness_main:app <span class="hljs-literal">--reload</span> <span class="hljs-literal">--port</span> <span class="hljs-number">8000</span>
+</code></pre>
+<p>Leave that terminal running. In terminal 2, send a test issue containing one typed patch. This patch adds a harmless Python constant, so the existing test suite should remain green:</p>
+<pre><code class="language-powershell"><span class="hljs-built_in">cd</span> C:\src\enterprise<span class="hljs-literal">-rag-pgvector-rbac</span>
+<span class="hljs-variable">$payload</span> = <span class="hljs-string">@&#x27;
+{
+  &quot;issue&quot;: {&quot;number&quot;: 987654, &quot;title&quot;: &quot;Manual SDLC smoke test&quot;, &quot;body&quot;: &quot;Verify the local workflow.&quot;},
+  &quot;repository&quot;: {&quot;full_name&quot;: &quot;owner/repository&quot;},
+  &quot;patches&quot;: [{&quot;file_path&quot;: &quot;sdlc_smoke_test.py&quot;, &quot;content&quot;: &quot;VALUE = 2\n&quot;}]
+}
+&#x27;@</span>
+
+<span class="hljs-built_in">Invoke-RestMethod</span> `
+  <span class="hljs-literal">-Uri</span> http://localhost:<span class="hljs-number">8000</span>/webhooks/github `
+  <span class="hljs-literal">-Method</span> Post `
+  <span class="hljs-literal">-ContentType</span> <span class="hljs-string">&quot;application/json&quot;</span> `
+  <span class="hljs-literal">-Body</span> <span class="hljs-variable">$payload</span>
+</code></pre>
+<p>A successful response includes <code>&quot;status&quot;: &quot;completed&quot;</code>, a branch named <code>feature/AGENT-987654-manual-sdlc-smoke-test</code>, and <code>&quot;pushed&quot;: false</code>. Verify the result with:</p>
+<pre><code class="language-powershell">git status
+git branch <span class="hljs-literal">--show-current</span>
+git log <span class="hljs-literal">-1</span> <span class="hljs-literal">--oneline</span>
+python <span class="hljs-literal">-m</span> pytest <span class="hljs-literal">-q</span>
+</code></pre>
+<p>The workflow created a local branch, applied the patch, ran tests, and committed the change. It did not push or create a pull request because <code>SDLC_PUSH=false</code>. Delete the smoke-test branch and file after inspection if this was only a demonstration:</p>
+<pre><code class="language-powershell">git checkout main
+git branch <span class="hljs-literal">-D</span> feature/AGENT<span class="hljs-literal">-987654-manual-sdlc-smoke-test</span>
+<span class="hljs-built_in">Remove-Item</span> sdlc_smoke_test.py <span class="hljs-literal">-ErrorAction</span> SilentlyContinue
+</code></pre>
+<p>Only after the local flow works should you set <code>SDLC_PUSH=true</code> and provide <code>GITHUB_TOKEN</code>; that pushes the branch and enables automatic pull-request creation. The <code>repository.full_name</code> must then be the real <code>owner/repository</code> value.</p>
+<p>For GitHub delivery validation, set <code>GITHUB_WEBHOOK_SECRET</code>; the endpoint then requires <code>X-Hub-Signature-256</code>. A failed test can be repaired when the injected agent returns <code>repair_patches</code>. Run <code>python -m pytest -q</code> to validate the complete local workflow.</p>
 <hr>
 <h2 id="️-interview-positioning">🎙️ Interview Positioning</h2>
 <p><strong>The Narrative:</strong></p>

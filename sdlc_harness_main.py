@@ -1,7 +1,10 @@
-from fastapi import FastAPI
+import json
+import os
 from contextlib import asynccontextmanager
+from fastapi import FastAPI, Header, HTTPException, Request
 from app.api.rag import router as rag_router
 from app.db.manager import DatabaseManager
+from sdlc_harness.lifecycle import SDLCWorkflow, verify_github_signature
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -16,6 +19,23 @@ app = FastAPI(
 )
 
 app.include_router(rag_router)
+
+
+@app.post("/webhooks/github")
+async def github_webhook(
+    request: Request,
+    x_hub_signature_256: str | None = Header(default=None),
+):
+    body = await request.body()
+    if not verify_github_signature(
+        body, x_hub_signature_256, os.getenv("GITHUB_WEBHOOK_SECRET")
+    ):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    try:
+        payload = json.loads(body)
+        return await SDLCWorkflow().run(payload)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 @app.get("/")
 async def root():
