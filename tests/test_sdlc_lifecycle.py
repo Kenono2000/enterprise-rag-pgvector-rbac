@@ -37,6 +37,8 @@ async def test_workflow_applies_tests_and_commits(tmp_path):
 
     assert result["status"] == "completed"
     assert result["branch"] == "feature/AGENT-123-fix-value"
+    assert result["pushed"] is False
+    assert result["pull_request_created"] is False
     assert "Fix value" in git(tmp_path, "log", "-1", "--format=%s").stdout
 
 

@@ -53,6 +53,21 @@ An event-driven orchestration engine that transforms Jira/GitHub feature specifi
 *   **Automated Quality Gates:** Integrated automated test-repair loops, AST validation, and secret scanning before opening pull requests for human review.
 *   **Cost-Aware Orchestration:** Implemented a state machine with hard step-limits and token budgets to prevent runaway agent execution and ensure predictable operational costs.
 
+### Custom SDLC code vs. GitHub Actions
+
+The custom harness and GitHub Actions solve different parts of the delivery problem:
+
+| Capability | Custom SDLC harness | GitHub Actions |
+|---|---|---|
+| Agent planning and repair loops | Customizable agent, RAG context, typed patch proposals, token and step budgets | Usually delegated to a service or action step |
+| Security and architectural policy | Repository-specific AST, secret, ADR, and RBAC checks | Workflow permissions, environment protection, and required checks |
+| Repository execution | Must manage sandboxing, concurrency, cleanup, and retries | Isolated hosted or self-hosted runners with logs and artifacts |
+| Git and pull requests | Implemented manually through Git and the GitHub API | Built-in checkout, credentials, branch, status, and PR integrations |
+| Triggers and delivery | Requires an API endpoint, webhook authentication, and job persistence | Native issue, push, pull-request, schedule, and manual triggers |
+| Operational maturity | Must be built and maintained | Provides timeouts, secrets, permissions, logs, and reruns |
+
+GitHub Actions should generally provide the execution and delivery plumbing, while the custom harness should provide the differentiated agent, RAG, and governance logic. The current harness is useful as a reference implementation and local prototype; a production deployment should move long-running execution into a GitHub Actions workflow or another durable job runner. The two approaches are complementary rather than mutually exclusive.
+
 ### Running the SDLC workflow locally
 
 The end-to-end workflow is exposed at `POST /webhooks/github`. It verifies an optional GitHub webhook signature, parses the issue, invokes the typed patch agent, applies patches inside `SDLC_SANDBOX_ROOT`, runs the configured test command, evaluates security guardrails, commits the branch, and optionally pushes it and opens a GitHub pull request.
@@ -100,14 +115,19 @@ $payload = @'
 }
 '@
 
-Invoke-RestMethod `
-  -Uri http://localhost:8000/webhooks/github `
-  -Method Post `
-  -ContentType "application/json" `
-  -Body $payload
+try {
+  Invoke-RestMethod `
+    -Uri http://localhost:8000/webhooks/github `
+    -Method Post `
+    -ContentType "application/json" `
+    -Body $payload
+}
+catch {
+  $_.ErrorDetails.Message
+}
 ```
 
-A successful response includes `"status": "completed"`, a branch named `feature/AGENT-987654-manual-sdlc-smoke-test`, and `"pushed": false`. Verify the result with:
+A successful local response includes `"status": "completed"`, a branch named `feature/AGENT-987654-manual-sdlc-smoke-test`, and `"pushed": false`. For remote delivery, restart Uvicorn after changing `.env`, set `SDLC_PUSH=true`, configure a valid `GITHUB_TOKEN`, and use a real repository name. The response should then include `"pushed": true`, `"pull_request_created": true`, and a `pull_request_url`. Verify the result with:
 
 ```powershell
 git status
@@ -124,7 +144,7 @@ git branch -D feature/AGENT-987654-manual-sdlc-smoke-test
 Remove-Item sdlc_smoke_test.py -ErrorAction SilentlyContinue
 ```
 
-Only after the local flow works should you set `SDLC_PUSH=true` and provide `GITHUB_TOKEN`; that pushes the branch and enables automatic pull-request creation. The `repository.full_name` must then be the real `owner/repository` value.
+Only after the local flow works should you set `SDLC_PUSH=true` and provide `GITHUB_TOKEN`; restart Uvicorn so the updated `.env` is loaded. The token needs permission to write repository contents and pull requests, and `repository.full_name` must be the real `owner/repository` value.
 
 For GitHub delivery validation, set `GITHUB_WEBHOOK_SECRET`; the endpoint then requires `X-Hub-Signature-256`. A failed test can be repaired when the injected agent returns `repair_patches`. Run `python -m pytest -q` to validate the complete local workflow.
 

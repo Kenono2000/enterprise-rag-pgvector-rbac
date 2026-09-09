@@ -27,6 +27,7 @@ class SDLCWorkflow:
         max_repairs: int = 2,
         push: Optional[bool] = None,
     ):
+        load_dotenv(override=False)
         self.root = Path(
             sandbox_root or os.getenv("SDLC_SANDBOX_ROOT", os.getcwd())
         ).resolve()
@@ -55,14 +56,23 @@ class SDLCWorkflow:
             test_result = await asyncio.to_thread(self._run_tests)
             if test_result.returncode == 0:
                 break
+            if test_result.returncode in (2, 130) and "^C" in test_result.output:
+                raise RuntimeError(
+                    "Test command was interrupted. Run the test command manually "
+                    "and retry the webhook without pressing Ctrl+C."
+                )
             if attempt == self.max_repairs:
                 raise RuntimeError(
                     f"Tests failed after {self.max_repairs} repair attempts: "
                     f"{test_result.output[-2000:]}"
                 )
-            patches = await self.agent.repair(payload, test_result.output[-6000:])
+            test_output = test_result.output[-6000:]
+            patches = await self.agent.repair(payload, test_output)
             if not patches:
-                raise RuntimeError("Agent produced no repair patches")
+                raise RuntimeError(
+                    "Agent produced no repair patches. "
+                    f"Test output:\n{test_output[-2000:]}"
+                )
         else:
             raise RuntimeError("SDLC workflow exhausted without a test result")
 
@@ -77,6 +87,7 @@ class SDLCWorkflow:
             "tests": self.test_command,
             "pushed": pushed,
             "pull_request_url": pr_url,
+            "pull_request_created": pr_url is not None,
         }
 
     async def _audit(self, patches: list[PatchProposal]) -> list[str]:
