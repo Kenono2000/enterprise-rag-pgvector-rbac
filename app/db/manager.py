@@ -6,7 +6,19 @@ from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv(), override=True)
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+def get_db_url():
+    # Priority: OS Env -> Streamlit Secrets
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        try:
+            import streamlit as st
+            url = st.secrets.get("DATABASE_URL")
+        except Exception:
+            pass
+    
+    if url and url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return url
 
 class DatabaseManager:
     _pool: Optional[asyncpg.Pool] = None
@@ -14,12 +26,17 @@ class DatabaseManager:
     @classmethod
     async def get_pool(cls) -> asyncpg.Pool:
         if cls._pool is None:
-            if not DATABASE_URL:
-                raise ValueError("❌ DATABASE_URL is not set")
+            db_url = get_db_url()
+            if not db_url:
+                raise ValueError("❌ DATABASE_URL is not set in Env or Streamlit Secrets")
+            
+            # Use SSL if connecting to a cloud provider (common requirement)
+            # Most hosted DBs require SSL; 'require' is a safe default for production.
             cls._pool = await asyncpg.create_pool(
-                DATABASE_URL, 
-                min_size=2, 
-                max_size=10
+                db_url, 
+                min_size=1, 
+                max_size=5,
+                ssl="require" if "localhost" not in db_url else None
             )
         return cls._pool
 
