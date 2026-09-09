@@ -1,3 +1,9 @@
+import sys
+import os
+
+# Add the project root (2 levels up from this file) to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
 from fastmcp import FastMCP
 from app.db.manager import DatabaseManager
 import json

@@ -112,5 +112,3 @@ if st.button("🚀 Execute Zero-Trust Vector Search", type="primary"):
                     "engine": "pgvector-rls-production",
                     "timestamp": "2024-05-20T10:00:00Z"
                 })
-
-# streamlit run streamlit_app.py
