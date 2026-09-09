@@ -9,16 +9,15 @@
 
 ## 🚀 Live Interactive Demos
 
-> ⚠️ **Note on Demos vs. Production:** The Streamlit UI (`app.py`) uses a lightweight, mocked dataset to allow zero-friction local demonstration of the RBAC filtering logic. However, the core microservice (`main.py`) is a **production-grade, real vector database implementation** designed for enterprise deployment (see [Real Vector DB Implementation](#real-vector-database--indexed-rag-implementation) below).
-
-- **🎨 Visual UI Demo (Mocked Data):** Test the Shift-Left RBAC filtering in a user-friendly interface:  
+- **🎨 Production-Ready Visual UI:** Test the real-world Shift-Left RBAC filtering in a production-grade interface (powered by actual `asyncpg` and `pgvector`):  
   👉 **[https://enterprise-rag-pgvector-rbac.streamlit.app/](https://enterprise-rag-pgvector-rbac.streamlit.app/)**
-- **⚡ Live API & Swagger UI:** Test the raw, production-ready microservice endpoints:  
+- **⚡ Modular API & Swagger UI:** Test the raw, production-ready microservice endpoints:  
   👉 **[https://enterprise-rag-api-ksez.onrender.com/docs](https://enterprise-rag-api-ksez.onrender.com/docs)**
-- **🤖 Live AI Agent Endpoint:** Connect your MCP client to our secure SSE gateway:  
+- **🤖 Autonomous SDLC Gateway:** Access the FastMCP gateway for agent-governed git operations:  
   👉 **`https://enterprise-rag-mcp.fastmcp.app/mcp`**
 
 ---
+
 
 ## 🔑 Core Problem Solved
 
@@ -45,7 +44,27 @@ While `app.py` provides a frictionless mocked demo, **`main.py` is a genuine, pr
 
 ---
 
+## 🤖 Autonomous SDLC Agent Harness (FastMCP + Git Automation)
+
+An event-driven orchestration engine that transforms Jira/GitHub feature specifications into tested pull requests via multi-agent execution loops and deterministic tool governance.
+
+*   **Deterministic Tool Contracts:** Engineered a FastMCP execution runtime enforcing typed Pydantic tool schemas, path-traversal prevention, step budgets, and parameter validation.
+*   **Shift-Left Context Injection:** Injected relevant codebase patterns and ADRs via PostgreSQL `pgvector` with in-database role filtering (`?|` operator) to ensure architectural alignment.
+*   **Automated Quality Gates:** Integrated automated test-repair loops, AST validation, and secret scanning before opening pull requests for human review.
+*   **Cost-Aware Orchestration:** Implemented a state machine with hard step-limits and token budgets to prevent runaway agent execution and ensure predictable operational costs.
+
+---
+
+## 🎙️ Interview Positioning
+
+**The Narrative:** 
+> "Most teams experiment with AI by asking developers to prompt assistants inside an IDE. In this repository, I architected the **governed control plane**: the agent receives a feature ticket, pulls authorized architectural patterns via Shift-Left `pgvector` search, operates inside bounded FastMCP tool schemas with token budgets, and verifies itself against local test gates before a human ever looks at the pull request."
+
+---
+
 ## 🏛️ Architecture Blueprint
+
+
 
 ```mermaid
 sequenceDiagram

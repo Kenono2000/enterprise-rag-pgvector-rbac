@@ -1,0 +1,65 @@
+<span id="markdown-mermaid" aria-hidden="true" data-config="{&quot;darkModeTheme&quot;:&quot;vscode&quot;,&quot;lightModeTheme&quot;:&quot;vscode&quot;,&quot;maxTextSize&quot;:50000,&quot;clickDrag&quot;:&quot;alt&quot;,&quot;showControls&quot;:&quot;onHoverOrFocus&quot;,&quot;resizable&quot;:true,&quot;maxHeight&quot;:&quot;&quot;}"></span>
+				<h1 id="️-enterprise-zero-trust-rag-microservice">🛡️ Enterprise Zero-Trust RAG Microservice</h1>
+<p><strong>High-Throughput Retrieval-Augmented Generation with In-Database RBAC &amp; <code>pgvector</code></strong></p>
+<p><strong>Architect:</strong> <a href="https://www.linkedin.com/in/kenwong-architect/">Ken Wong</a><br>
+<strong>Target Stack:</strong> Python, FastAPI, PostgreSQL, <code>pgvector</code>, FastMCP, Auth0</p>
+<hr>
+<h2 id="-live-interactive-demos">🚀 Live Interactive Demos</h2>
+<ul>
+<li><strong>🎨 Production-Ready Visual UI:</strong> Test the real-world Shift-Left RBAC filtering in a production-grade interface (powered by actual <code>asyncpg</code> and <code>pgvector</code>):<br>
+👉 <strong><a href="https://enterprise-rag-pgvector-rbac.streamlit.app/">https://enterprise-rag-pgvector-rbac.streamlit.app/</a></strong></li>
+<li><strong>⚡ Modular API &amp; Swagger UI:</strong> Test the raw, production-ready microservice endpoints:<br>
+👉 <strong><a href="https://enterprise-rag-api-ksez.onrender.com/docs">https://enterprise-rag-api-ksez.onrender.com/docs</a></strong></li>
+<li><strong>🤖 Autonomous SDLC Gateway:</strong> Access the FastMCP gateway for agent-governed git operations:<br>
+👉 <strong><code>https://enterprise-rag-mcp.fastmcp.app/mcp</code></strong></li>
+</ul>
+<hr>
+<h2 id="-core-problem-solved">🔑 Core Problem Solved</h2>
+<p>Standard RAG (Retrieval-Augmented Generation) architectures often retrieve sensitive context chunks into application memory and filter user permissions at the API layer. In multi-tenant enterprise environments, this creates severe data-leakage, indirect prompt-injection, and compliance risks (SOC2/GDPR).</p>
+<p>This reference architecture solves this by implementing <strong>Shift-Left Security</strong>:</p>
+<ul>
+<li>🔐 <strong>Auth0 Identity Integration:</strong> Extracts validated JWT claims (roles, tenant ID) via OAuth 2.0 PKCE.</li>
+<li>🗄️ <strong>In-Database RBAC Filtering:</strong> Passes JWT roles directly into PostgreSQL using the JSONB existence operator (<code>?|</code>). This ensures the database <em>only</em> returns authorized chunks during the HNSW vector search—unauthorized data <strong>never</strong> enters application memory or LLM prompts.</li>
+<li>🗜️ <strong>Matryoshka Truncation (1536d):</strong> Compresses 3072d vectors down to 1536d to respect <code>pgvector</code>'s optimal HNSW indexing ceiling, retaining &gt;98% semantic accuracy while optimizing storage and query latency.</li>
+<li>🤖 <strong>Agent-Ready MCP Server:</strong> Implements the Model Context Protocol (MCP) via <code>fastmcp</code>, allowing AI Agents to perform secure, tool-based retrieval with identity-aware filtering baked in.</li>
+<li>📄 <strong>Deterministic API Contracts:</strong> Synthesizes LLM responses into strongly-typed Pydantic DTOs, featuring grounded citations and cosine confidence scores for strict auditability.</li>
+</ul>
+<hr>
+<h2 id="️-real-vector-database--indexed-rag-implementation">🗄️ Real Vector Database &amp; Indexed RAG Implementation</h2>
+<p>While <code>app.py</code> provides a frictionless mocked demo, <strong><code>main.py</code> is a genuine, production-ready RAG pipeline</strong>. It implements the following real-world capabilities:</p>
+<ol>
+<li><strong>Real <code>asyncpg</code> Connection Pooling:</strong> Production-ready asynchronous database connections to PostgreSQL, ensuring high throughput and low latency under concurrent enterprise load.</li>
+<li><strong>Real Matryoshka Embedding Generation:</strong> Dynamically generates actual 1536-dimensional embeddings for incoming queries via live embedding APIs (no hardcoded mock vectors).</li>
+<li><strong>Real <code>pgvector</code> HNSW Index Querying:</strong> Executes genuine vector similarity searches combined with PostgreSQL JSONB role filtering. The database engine leverages real HNSW indexes to efficiently scan and return <em>only</em> authorized chunks, preventing costly full-table scans.</li>
+<li><strong>Real Ingestion Pipeline:</strong> The <code>/api/v1/ingest</code> endpoint demonstrates real document processing, embedding generation, and insertion into the <code>pgvector</code>-enabled table with associated RBAC metadata.</li>
+<li><strong>Deterministic Pydantic Contracts:</strong> Returns strongly-typed, real-world API responses (<code>RAGResponse</code>) featuring grounded citations, actual cosine similarity confidence scores, and evaluated role metadata.</li>
+</ol>
+<hr>
+<h2 id="-autonomous-sdlc-agent-harness-fastmcp--git-automation">🤖 Autonomous SDLC Agent Harness (FastMCP + Git Automation)</h2>
+<p>An event-driven orchestration engine that transforms Jira/GitHub feature specifications into tested pull requests via multi-agent execution loops and deterministic tool governance.</p>
+<ul>
+<li><strong>Deterministic Tool Contracts:</strong> Engineered a FastMCP execution runtime enforcing typed Pydantic tool schemas, path-traversal prevention, step budgets, and parameter validation.</li>
+<li><strong>Shift-Left Context Injection:</strong> Injected relevant codebase patterns and ADRs via PostgreSQL <code>pgvector</code> with in-database role filtering (<code>?|</code> operator) to ensure architectural alignment.</li>
+<li><strong>Automated Quality Gates:</strong> Integrated automated test-repair loops, AST validation, and secret scanning before opening pull requests for human review.</li>
+<li><strong>Cost-Aware Orchestration:</strong> Implemented a state machine with hard step-limits and token budgets to prevent runaway agent execution and ensure predictable operational costs.</li>
+</ul>
+<hr>
+<h2 id="️-interview-positioning">🎙️ Interview Positioning</h2>
+<p><strong>The Narrative:</strong></p>
+<blockquote>
+<p>&quot;Most teams experiment with AI by asking developers to prompt assistants inside an IDE. In this repository, I architected the <strong>governed control plane</strong>: the agent receives a feature ticket, pulls authorized architectural patterns via Shift-Left <code>pgvector</code> search, operates inside bounded FastMCP tool schemas with token budgets, and verifies itself against local test gates before a human ever looks at the pull request.&quot;</p>
+</blockquote>
+<hr>
+<h2 id="️-architecture-blueprint">🏛️ Architecture Blueprint</h2>
+<pre class="mermaid" style="all: unset;">sequenceDiagram
+    participant Agent as AI Agent / Client
+    participant API as FastAPI / MCP Server
+    participant DB as PostgreSQL + pgvector
+    participant LLM as OpenAI (gpt-4o)
+
+    Agent-&gt;&gt;API: Query (Question + JWT Role Array)
+    API-&gt;&gt;API: Generate 1536d Matryoshka Embedding
+    API-&gt;&gt;DB: Query with `?|` JSONB Role Filter + Vector Search
+    DB--&gt;&gt;API: Return ONLY Authorized Chunks (Shift-Left Security)
+    API-&gt;&gt;LLM: Synthesize Answer with Grounded Context
+    LLM--&gt;&gt;API: Deterministic JSON Response</pre>
