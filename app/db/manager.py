@@ -80,6 +80,7 @@ class DatabaseManager:
                    1 - (embedding <=> $1::vector) as similarity
             FROM enterprise_documents
             WHERE allowed_roles ?| $2::text[]
+              AND (embedding_model = 'text-embedding-3-large' OR embedding_model IS NULL)
             ORDER BY embedding <=> $1::vector
             LIMIT $3
         """

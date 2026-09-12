@@ -56,10 +56,10 @@ async def main():
             
             # Execute the tool call
             result = await client.call_tool(
-                "search_knowledge_base",
+                "search_sdlc_context",
                 {
                     "question": "What were the Q3 financial results?",
-                    "user_role": "finance_executive"
+                    "user_role": '["finance_executive"]'
                 }
             )
             print(f"Result: {result}")

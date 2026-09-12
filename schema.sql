@@ -11,8 +11,10 @@ CREATE TABLE IF NOT EXISTS enterprise_documents (
     content TEXT NOT NULL, 
     allowed_roles JSONB NOT NULL DEFAULT '[]'::jsonb,
     embedding vector(1536) NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    embedding_model VARCHAR(100) DEFAULT 'text-embedding-3-large'
 );
+
 
 -- 3. Create indexes (Idempotent)
 CREATE INDEX IF NOT EXISTS idx_docs_allowed_roles 

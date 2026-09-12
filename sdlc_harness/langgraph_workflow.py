@@ -3,6 +3,7 @@ from typing import Annotated, Any, Dict, List, Optional, TypedDict, Union, Liter
 
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, Field
 
 from .agents.patch_agent import PatchProposal, PayloadPatchAgent
@@ -43,6 +44,7 @@ class LangGraphSDLCWorkflow:
         self.max_repairs = max_repairs
         self.push = push
         self.agent = PayloadPatchAgent()
+        self.checkpointer = MemorySaver()
         self.workflow = self._create_workflow()
 
     def _create_workflow(self):
@@ -84,7 +86,7 @@ class LangGraphSDLCWorkflow:
         workflow.add_edge("repair_patches", "apply_patches")
         workflow.add_edge("finalize", END)
 
-        return workflow.compile()
+        return workflow.compile(checkpointer=self.checkpointer)
 
     async def initialize(self, state: AgentState) -> Dict[str, Any]:
         event = parse_github_webhook(state["payload"])
@@ -175,7 +177,10 @@ class LangGraphSDLCWorkflow:
         return result.stdout.strip()
 
     def _apply_patches_logic(self, patches: list[PatchProposal]) -> None:
+        max_size = int(os.getenv("SDLC_MAX_PATCH_SIZE", "1048576"))  # Default 1MB
         for patch in patches:
+            if len(patch.content) > max_size:
+                raise ValueError(f"Patch content exceeds size limit: {len(patch.content)} bytes")
             relative = Path(patch.file_path)
             if (
                 relative.is_absolute()
@@ -191,10 +196,13 @@ class LangGraphSDLCWorkflow:
 
     def _run_tests_logic(self) -> Any:
         from .lifecycle import TestResult
+        import shlex
+        
+        cmd = shlex.split(self.test_command)
         result = subprocess.run(
-            self.test_command,
+            cmd,
             cwd=self.root,
-            shell=True,
+            shell=False,
             capture_output=True,
             text=True,
             check=False,
@@ -225,6 +233,24 @@ class LangGraphSDLCWorkflow:
             }
         ).encode()
         url = f"https://api.github.com/repos/{event.repository}/pulls"
+        
+        # Check for existing PR to maintain idempotency
+        check_req = request.Request(
+            f"{url}?head={event.repository.split('/')[0]}:{branch}&state=open",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token}",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        try:
+            with request.urlopen(check_req, timeout=20) as response:
+                existing_prs = json.loads(response.read().decode())
+                if existing_prs:
+                    return existing_prs[0]["html_url"]
+        except Exception:
+            pass
+
         req = request.Request(
             url,
             data=body,
@@ -243,6 +269,10 @@ class LangGraphSDLCWorkflow:
             return None
 
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        event = parse_github_webhook(payload)
+        thread_id = f"sdlc-{event.repository}-{event.issue_id}"
+        config = {"configurable": {"thread_id": thread_id}}
+        
         initial_state: AgentState = {
             "payload": payload,
             "event": None, # type: ignore
@@ -257,7 +287,7 @@ class LangGraphSDLCWorkflow:
             "pushed": False
         }
         
-        final_state = await self.workflow.ainvoke(initial_state)
+        final_state = await self.workflow.ainvoke(initial_state, config=config)
         
         if final_state.get("error"):
             raise ValueError(final_state["error"])
