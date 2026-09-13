@@ -11,11 +11,12 @@ class SDLCEvent(BaseModel):
 
 def parse_github_webhook(payload: dict) -> SDLCEvent:
     # Logic to transform GitHub webhook to internal SDLCEvent
+    action = payload.get("action", "opened")
     return SDLCEvent(
         source="github",
-        event_type="issue_opened",
+        event_type=f"issue_{action}",
         issue_id=str(payload["issue"]["number"]),
         title=payload["issue"]["title"],
-        description=payload["issue"]["body"],
+        description=payload["issue"]["body"] or "",
         repository=payload["repository"]["full_name"]
     )

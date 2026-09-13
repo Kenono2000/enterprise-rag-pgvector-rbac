@@ -29,6 +29,45 @@ flowchart LR
 - FastMCP tools for identity-aware retrieval and governed code changes.
 - A bounded SDLC workflow with patch validation, tests, Git commits, and optional PR creation.
 
+## Autonomous SDLC Lifecycle
+
+This project demonstrates a full-lifecycle autonomous development workflow, from issue ingestion to production deployment with security gates.
+
+```mermaid
+flowchart TD
+    A[Developer opens issue] --> B[GitHub webhook]
+    B --> C[LangGraph SDLC Harness]
+    
+    subgraph Loop [Autonomous SDLC Loop]
+        direction LR
+        D[propose] --> E[apply]
+        E --> F[audit]
+        F --> G[test]
+        G -- retry loop --> D
+    end
+    
+    C --> Loop
+    Loop --> H[Push branch + open PR]
+    
+    H --> I[GitHub Actions CI fires on the PR]
+    
+    subgraph CI [CI Security & Build]
+        direction TB
+        J[CodeQL SAST]
+        K[Snyk SCA]
+        L[Docker matrix build]
+        M[DAST ZAP against preview env]
+    end
+    
+    I --> J
+    I --> K
+    I --> L
+    I --> M
+    
+    CI --> N[GitHub Environment gate\nHuman reviewer]
+    N --> O[Deploy to prod\nOIDC auth]
+```
+
 ## Local development
 
 Install dependencies and run the tests:
@@ -49,7 +88,7 @@ python -m uvicorn sdlc_harness_main:app --reload --port 8000
 
 The API is available at `http://localhost:8000`; interactive documentation is at `/docs`.
 
-## SDLC workflow
+## SDLC Harness Internals
 
 The custom harness accepts `POST /webhooks/github`, validates typed patch proposals, runs security checks and tests, then creates a branch and commit. Set `SDLC_PUSH=true`, `GITHUB_TOKEN`, and `GITHUB_BASE_BRANCH` in an untracked `.env` file only when you want to push and open a PR. Keep `SDLC_PUSH=false` for local testing.
 

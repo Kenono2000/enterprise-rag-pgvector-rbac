@@ -22,16 +22,25 @@ app = FastAPI(
 app.include_router(rag_router)
 
 
+@app.post("/")
 @app.post("/webhooks/github")
 async def github_webhook(
     request: Request,
+    x_github_event: str | None = Header(default=None),
     x_hub_signature_256: str | None = Header(default=None),
 ):
+    if x_github_event == "ping":
+        return {"message": "pong"}
+
     body = await request.body()
     if not verify_github_signature(
         body, x_hub_signature_256, os.getenv("GITHUB_WEBHOOK_SECRET")
     ):
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    
+    if x_github_event != "issues" and x_github_event is not None:
+        return {"message": f"Skipping event: {x_github_event}"}
+
     try:
         payload = json.loads(body)
         return await LangGraphSDLCWorkflow().run(payload)
