@@ -277,7 +277,7 @@ class LangGraphSDLCWorkflow:
         self._git("push", "-u", "origin", branch)
         return True
 
-        def _create_pr(self, event: SDLCEvent, branch: str) -> Optional[str]:
+    def _create_pr(self, event: SDLCEvent, branch: str) -> Optional[str]:
         from urllib import request
         import json
         token = os.getenv("GITHUB_TOKEN")
