@@ -1,1 +1,12 @@
-# Add any necessary dependencies here
+asyncpg==0.31.0
+fastapi==0.141.1
+fastmcp==4.0.3
+langchain_openai==1.6.2
+langgraph==1.2.11
+openai==3.13.0
+pydantic==2.13.5
+pytest==8.3.5
+python-dotenv==1.2.3
+Requests==2.34.2
+streamlit==1.63.0
+uvicorn==0.52.4
