@@ -1,11 +1,19 @@
 import json
 import os
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Request
 from app.api.rag import router as rag_router
 from app.db.manager import DatabaseManager
 from sdlc_harness.langgraph_workflow import LangGraphSDLCWorkflow
 from sdlc_harness.lifecycle import verify_github_signature
+
+# Configure logging to show in console
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:     %(name)s:%(message)s"
+)
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
