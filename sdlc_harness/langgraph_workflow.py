@@ -93,7 +93,7 @@ class LangGraphSDLCWorkflow:
 
         return workflow.compile(checkpointer=self.checkpointer)
 
-        async def initialize(self, state: AgentState) -> Dict[str, Any]:
+    async def initialize(self, state: AgentState) -> Dict[str, Any]:
         event = parse_github_webhook(state["payload"])
         branch = self._branch_name(event)
         logger.info(f"Initializing workflow for issue {event.issue_id} on branch {branch}")
