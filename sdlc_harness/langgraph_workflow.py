@@ -13,6 +13,9 @@ import os
 import subprocess
 from pathlib import Path
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 class AgentState(TypedDict):
     event: SDLCEvent
@@ -88,9 +91,10 @@ class LangGraphSDLCWorkflow:
 
         return workflow.compile(checkpointer=self.checkpointer)
 
-    async def initialize(self, state: AgentState) -> Dict[str, Any]:
+        async def initialize(self, state: AgentState) -> Dict[str, Any]:
         event = parse_github_webhook(state["payload"])
         branch = self._branch_name(event)
+        logger.info(f"🚀 Initializing SDLC workflow for issue #{event.issue_id} on branch {branch}")
         self._git("checkout", "-b", branch)
         return {
             "event": event,
@@ -102,32 +106,49 @@ class LangGraphSDLCWorkflow:
         }
 
     async def propose_patches(self, state: AgentState) -> Dict[str, Any]:
+        logger.info("🧠 Proposing patches...")
         patches = await self.agent.propose(state["payload"])
         if not patches:
+            logger.error("❌ Agent produced no patch proposals")
             return {"error": "Agent produced no patch proposals"}
+        logger.info(f"✅ Proposed {len(patches)} patches")
         return {"patches": patches}
 
     async def apply_patches(self, state: AgentState) -> Dict[str, Any]:
+        logger.info("🛠️ Applying patches...")
         self._apply_patches_logic(state["patches"])
         return {}
 
     async def audit_patches(self, state: AgentState) -> Dict[str, Any]:
+        logger.info("🛡️ Auditing patches against security policies...")
         violations: List[str] = []
         for patch in state["patches"]:
             result = await PolicyEngine.evaluate_patch(
                 patch.file_path, patch.content, [], "pending"
             )
             violations.extend(result.violations)
+        
+        if violations:
+            logger.warning(f"⚠️ Security violations found: {violations}")
+        else:
+            logger.info("✅ Security audit passed")
         return {"violations": violations}
+
 
     def check_audit_results(self, state: AgentState) -> Literal["failed", "passed"]:
         if state["violations"]:
             return "failed"
         return "passed"
 
-    async def run_tests(self, state: AgentState) -> Dict[str, Any]:
+        async def run_tests(self, state: AgentState) -> Dict[str, Any]:
+        logger.info(f"🧪 Running tests (attempt {state['attempt'] + 1}/{state['max_attempts'] + 1})...")
         result = await asyncio.to_thread(self._run_tests_logic)
+        if result.returncode == 0:
+            logger.info("✅ Tests passed")
+        else:
+            logger.warning(f"❌ Tests failed with return code {result.returncode}")
         return {"test_result": {"returncode": result.returncode, "output": result.output}}
+
 
     def check_test_results(self, state: AgentState) -> Literal["passed", "failed", "max_attempts_reached"]:
         test_result = state["test_result"]
@@ -139,11 +160,14 @@ class LangGraphSDLCWorkflow:
         
         return "failed"
 
-    async def repair_patches(self, state: AgentState) -> Dict[str, Any]:
+        async def repair_patches(self, state: AgentState) -> Dict[str, Any]:
+        logger.info("🔧 Attempting to repair patches...")
         test_output = state["test_result"]["output"][-6000:]
         patches = await self.agent.repair(state["payload"], test_output)
         if not patches:
+            logger.error("❌ Agent produced no repair patches")
             return {"error": "Agent produced no repair patches", "attempt": state["attempt"] + 1}
+        logger.info(f"✅ Produced {len(patches)} repair patches")
         return {"patches": patches, "attempt": state["attempt"] + 1}
 
     async def finalize(self, state: AgentState) -> Dict[str, Any]:
@@ -151,16 +175,23 @@ class LangGraphSDLCWorkflow:
         branch = state["branch"]
         patches = state["patches"]
         
+        logger.info("🏁 Finalizing workflow...")
         self._git("add", "--", *(patch.file_path for patch in patches))
         self._git("commit", "-m", f"Implement {event.title}")
         pushed = self._push(branch)
+        if pushed:
+            logger.info(f"📤 Pushed branch {branch} to origin")
+        
         pr_url = self._create_pr(event, branch) if pushed else None
+        if pr_url:
+            logger.info(f"🔗 Pull request created: {pr_url}")
         
         return {
             "status": "completed",
             "pushed": pushed,
             "pr_url": pr_url
         }
+
 
     # Helper methods (copied and adapted from SDLCWorkflow)
     def _branch_name(self, event: SDLCEvent) -> str:
@@ -199,15 +230,23 @@ class LangGraphSDLCWorkflow:
         import shlex
         
         cmd = shlex.split(self.test_command)
-        result = subprocess.run(
-            cmd,
-            cwd=self.root,
-            shell=False,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return TestResult(result.returncode, result.stdout + result.stderr)
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.root,
+                shell=False,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60, # 1 minute timeout
+            )
+            return TestResult(result.returncode, result.stdout + result.stderr)
+        except subprocess.TimeoutExpired as e:
+            logger.error("🛑 Test command timed out after 60 seconds")
+            return TestResult(1, f"Test timed out: {e.stdout.decode() if e.stdout else ''}")
+        except Exception as e:
+            logger.error(f"🛑 Error running tests: {str(e)}")
+            return TestResult(1, f"Error running tests: {str(e)}")
 
     def _push(self, branch: str) -> bool:
         should_push = self.push

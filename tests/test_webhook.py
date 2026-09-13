@@ -35,9 +35,16 @@ if SECRET:
     headers["X-Hub-Signature-256"] = signature
 
 # Send Request
-print(f"Sending request to {URL}...")
-response = requests.post(URL, data=body, headers=headers)
+def run_test():
+    print(f"Sending request to {URL}...")
+    try:
+        response = requests.post(URL, data=body, headers=headers)
+        print(f"Status Code: {response.status_code}")
+        print("Response Body:")
+        print(json.dumps(response.json(), indent=2))
+    except requests.exceptions.ConnectionError:
+        print(f"Error: Could not connect to the server at {URL}.")
+        print("Make sure the server is running (e.g., run 'python sdlc_harness_main.py').")
 
-print(f"Status Code: {response.status_code}")
-print("Response Body:")
-print(json.dumps(response.json(), indent=2))
+if __name__ == "__main__":
+    run_test()
