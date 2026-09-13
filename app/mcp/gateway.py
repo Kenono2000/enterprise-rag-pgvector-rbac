@@ -1,7 +1,15 @@
+import sys
+from pathlib import Path
+
+# Add the project root to sys.path to allow absolute imports of the 'app' package
+# when this file is run as a standalone script (e.g., by fastmcp inspect).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from fastmcp import FastMCP
 from app.db.manager import DatabaseManager
 from app.db.llm import generate_embedding, chat_completion
 import json
+
 
 mcp = FastMCP("SDLC-Harness-Gateway")
 
