@@ -11,14 +11,20 @@ from sdlc_harness.lifecycle import verify_github_signature
 # Configure logging to show in console
 logging.basicConfig(
     level=logging.INFO,
-    format="%(levelname)s:     %(name)s:%(message)s"
+    format="%(levelname)s:     %(name)s - %(message)s",
+    force=True
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("sdlc_harness")
+logger.setLevel(logging.INFO)
+logging.getLogger().setLevel(logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("Starting Enterprise SDLC Harness...")
     await DatabaseManager.get_pool()
+    logger.info("Database pool initialized.")
     yield
+    logger.info("Shutting down Enterprise SDLC Harness...")
     await DatabaseManager.close()
 
 app = FastAPI(
@@ -37,6 +43,7 @@ async def github_webhook(
     x_github_event: str | None = Header(default=None),
     x_hub_signature_256: str | None = Header(default=None),
 ):
+    logger.info(f"Received GitHub webhook event: {x_github_event}")
     if x_github_event == "ping":
         return {"message": "pong"}
 
@@ -44,15 +51,21 @@ async def github_webhook(
     if not verify_github_signature(
         body, x_hub_signature_256, os.getenv("GITHUB_WEBHOOK_SECRET")
     ):
+        logger.warning("Invalid webhook signature")
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
     
     if x_github_event != "issues" and x_github_event is not None:
+        logger.info(f"Skipping non-issue event: {x_github_event}")
         return {"message": f"Skipping event: {x_github_event}"}
 
     try:
         payload = json.loads(body)
-        return await LangGraphSDLCWorkflow().run(payload)
+        logger.info(f"Processing issue event for repository: {payload.get('repository', {}).get('full_name')}")
+        result = await LangGraphSDLCWorkflow().run(payload)
+        logger.info("Workflow completed successfully")
+        return result
     except (ValueError, RuntimeError) as exc:
+        logger.error(f"Workflow failed: {str(exc)}")
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 @app.get("/")

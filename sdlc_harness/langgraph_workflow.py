@@ -1,5 +1,7 @@
 import operator
 from typing import Annotated, Any, Dict, List, Optional, TypedDict, Union, Literal
+import logging
+
 
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
@@ -14,7 +16,10 @@ import subprocess
 from pathlib import Path
 import asyncio
 
+logger = logging.getLogger(__name__)
+
 class AgentState(TypedDict):
+
     event: SDLCEvent
     payload: Dict[str, Any]
     branch: str
@@ -88,11 +93,37 @@ class LangGraphSDLCWorkflow:
 
         return workflow.compile(checkpointer=self.checkpointer)
 
-    async def initialize(self, state: AgentState) -> Dict[str, Any]:
+        async def initialize(self, state: AgentState) -> Dict[str, Any]:
         event = parse_github_webhook(state["payload"])
         branch = self._branch_name(event)
-        self._git("checkout", "-b", branch)
+        logger.info(f"Initializing workflow for issue {event.issue_id} on branch {branch}")
+        
+        # Check if branch exists and create only if it doesn't
+        try:
+            # Check local branches
+            local_branches = self._git("branch", "--list", branch)
+            if local_branches:
+                logger.info(f"Branch {branch} already exists locally. Switching to it.")
+                self._git("checkout", branch)
+            else:
+                # Check remote branches if local doesn't exist
+                try:
+                    self._git("fetch", "origin", branch)
+                    logger.info(f"Branch {branch} exists on origin. Checking it out.")
+                    self._git("checkout", branch)
+                except RuntimeError:
+                    logger.info(f"Creating new branch {branch}")
+                    self._git("checkout", "-b", branch)
+        except Exception as e:
+            logger.warning(f"Error checking for existing branch: {e}. Attempting to create anyway.")
+            try:
+                self._git("checkout", "-b", branch)
+            except Exception:
+                # If it already existed and we tried to create -b, just checkout
+                self._git("checkout", branch)
+
         return {
+
             "event": event,
             "branch": branch,
             "attempt": 0,
@@ -102,23 +133,34 @@ class LangGraphSDLCWorkflow:
         }
 
     async def propose_patches(self, state: AgentState) -> Dict[str, Any]:
+        logger.info("Generating patch proposals...")
         patches = await self.agent.propose(state["payload"])
         if not patches:
+            logger.error("Agent produced no patch proposals")
             return {"error": "Agent produced no patch proposals"}
+        logger.info(f"Proposed {len(patches)} patches")
         return {"patches": patches}
 
     async def apply_patches(self, state: AgentState) -> Dict[str, Any]:
+        logger.info(f"Applying {len(state['patches'])} patches...")
         self._apply_patches_logic(state["patches"])
         return {}
 
     async def audit_patches(self, state: AgentState) -> Dict[str, Any]:
+        logger.info("Auditing patches for policy violations...")
         violations: List[str] = []
         for patch in state["patches"]:
             result = await PolicyEngine.evaluate_patch(
                 patch.file_path, patch.content, [], "pending"
             )
             violations.extend(result.violations)
+        
+        if violations:
+            logger.warning(f"Policy violations found: {violations}")
+        else:
+            logger.info("No policy violations found")
         return {"violations": violations}
+
 
     def check_audit_results(self, state: AgentState) -> Literal["failed", "passed"]:
         if state["violations"]:
@@ -126,24 +168,32 @@ class LangGraphSDLCWorkflow:
         return "passed"
 
     async def run_tests(self, state: AgentState) -> Dict[str, Any]:
+        logger.info(f"Running tests (Attempt {state['attempt'] + 1}/{state['max_attempts'] + 1})...")
         result = await asyncio.to_thread(self._run_tests_logic)
+        logger.info(f"Test result: returncode={result.returncode}")
         return {"test_result": {"returncode": result.returncode, "output": result.output}}
 
     def check_test_results(self, state: AgentState) -> Literal["passed", "failed", "max_attempts_reached"]:
         test_result = state["test_result"]
         if test_result["returncode"] == 0:
+            logger.info("Tests passed!")
             return "passed"
         
         if state["attempt"] >= state["max_attempts"]:
+            logger.error("Tests failed and max repair attempts reached")
             return "max_attempts_reached"
         
+        logger.warning(f"Tests failed. Attempting repair {state['attempt'] + 1}/{state['max_attempts']}")
         return "failed"
 
     async def repair_patches(self, state: AgentState) -> Dict[str, Any]:
         test_output = state["test_result"]["output"][-6000:]
+        logger.info("Asking agent to repair patches based on test failure...")
         patches = await self.agent.repair(state["payload"], test_output)
         if not patches:
+            logger.error("Agent produced no repair patches")
             return {"error": "Agent produced no repair patches", "attempt": state["attempt"] + 1}
+        logger.info(f"Agent proposed {len(patches)} repaired patches")
         return {"patches": patches, "attempt": state["attempt"] + 1}
 
     async def finalize(self, state: AgentState) -> Dict[str, Any]:
@@ -151,16 +201,25 @@ class LangGraphSDLCWorkflow:
         branch = state["branch"]
         patches = state["patches"]
         
+        logger.info("Finalizing: committing and pushing changes")
         self._git("add", "--", *(patch.file_path for patch in patches))
         self._git("commit", "-m", f"Implement {event.title}")
         pushed = self._push(branch)
-        pr_url = self._create_pr(event, branch) if pushed else None
+        
+        pr_url = None
+        if pushed:
+            logger.info(f"Changes pushed to branch {branch}. Creating/checking PR...")
+            pr_url = self._create_pr(event, branch)
+            logger.info(f"PR URL: {pr_url}")
+        else:
+            logger.info("Push disabled or failed, skipping PR creation")
         
         return {
             "status": "completed",
             "pushed": pushed,
             "pr_url": pr_url
         }
+
 
     # Helper methods (copied and adapted from SDLCWorkflow)
     def _branch_name(self, event: SDLCEvent) -> str:
@@ -218,25 +277,25 @@ class LangGraphSDLCWorkflow:
         self._git("push", "-u", "origin", branch)
         return True
 
-    def _create_pr(self, event: SDLCEvent, branch: str) -> Optional[str]:
+        def _create_pr(self, event: SDLCEvent, branch: str) -> Optional[str]:
         from urllib import request
         import json
         token = os.getenv("GITHUB_TOKEN")
         if not token:
+            logger.warning("GITHUB_TOKEN not set, skipping PR creation")
             return None
-        body = json.dumps(
-            {
-                "title": event.title,
-                "head": branch,
-                "base": os.getenv("GITHUB_BASE_BRANCH", "main"),
-                "body": event.description,
-            }
-        ).encode()
+        
         url = f"https://api.github.com/repos/{event.repository}/pulls"
         
         # Check for existing PR to maintain idempotency
+        # Format for head is 'owner:branch' or just 'branch'
+        owner = event.repository.split('/')[0]
+        check_url = f"{url}?head={owner}:{branch}&state=open"
+        
+        logger.info(f"Checking for existing PR: {check_url}")
+        
         check_req = request.Request(
-            f"{url}?head={event.repository.split('/')[0]}:{branch}&state=open",
+            check_url,
             headers={
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"Bearer {token}",
@@ -247,9 +306,21 @@ class LangGraphSDLCWorkflow:
             with request.urlopen(check_req, timeout=20) as response:
                 existing_prs = json.loads(response.read().decode())
                 if existing_prs:
-                    return existing_prs[0]["html_url"]
-        except Exception:
-            pass
+                    pr_url = existing_prs[0]["html_url"]
+                    logger.info(f"Existing PR found: {pr_url}")
+                    return pr_url
+        except Exception as e:
+            logger.warning(f"Error checking for existing PR: {e}")
+
+        logger.info(f"No existing PR found. Creating new PR for branch {branch}")
+        body = json.dumps(
+            {
+                "title": event.title,
+                "head": branch,
+                "base": os.getenv("GITHUB_BASE_BRANCH", "main"),
+                "body": event.description,
+            }
+        ).encode()
 
         req = request.Request(
             url,
@@ -264,9 +335,13 @@ class LangGraphSDLCWorkflow:
         )
         try:
             with request.urlopen(req, timeout=20) as response:
-                return json.loads(response.read().decode())["html_url"]
-        except Exception:
+                pr_url = json.loads(response.read().decode())["html_url"]
+                logger.info(f"PR created successfully: {pr_url}")
+                return pr_url
+        except Exception as e:
+            logger.error(f"Failed to create PR: {e}")
             return None
+
 
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
         event = parse_github_webhook(payload)

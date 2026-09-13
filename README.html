@@ -1,0 +1,191 @@
+<span id="markdown-mermaid" aria-hidden="true" data-config="{&quot;darkModeTheme&quot;:&quot;vscode&quot;,&quot;lightModeTheme&quot;:&quot;vscode&quot;,&quot;maxTextSize&quot;:50000,&quot;clickDrag&quot;:&quot;alt&quot;,&quot;showControls&quot;:&quot;onHoverOrFocus&quot;,&quot;resizable&quot;:true,&quot;maxHeight&quot;:&quot;&quot;}"></span>
+				<h1 id="️-enterprise-zero-trust-rag-microservice">🛡️ Enterprise Zero-Trust RAG Microservice</h1>
+<div align="center">
+  <img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL" />
+  <img src="https://img.shields.io/badge/pgvector-enabled-00B8D9?logo=postgresql&logoColor=white" alt="pgvector" />
+  <img src="https://img.shields.io/badge/Auth0-SSO-EB5424?logo=auth0&logoColor=white" alt="Auth0" />
+</div>
+<p><strong>High-throughput retrieval-augmented generation with in-database RBAC and <code>pgvector</code>.</strong></p>
+<p><strong>Architect:</strong> <a href="https://www.linkedin.com/in/kenwong-architect/">Ken Wong</a><br>
+<strong>Target stack:</strong> Python, FastAPI, PostgreSQL, <code>pgvector</code>, FastMCP, Auth0</p>
+<hr>
+<h2 id="-live-architecture-artifacts">🚀 Live Architecture Artifacts</h2>
+<table>
+<thead>
+<tr>
+<th>Artifact</th>
+<th>Link</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Visual UI (shift-left RBAC)</strong></td>
+<td><a href="https://enterprise-rag-pgvector-rbac.streamlit.app">enterprise-rag-pgvector-rbac.streamlit.app</a></td>
+</tr>
+<tr>
+<td><strong>Live microservice API (OpenAPI / Swagger)</strong></td>
+<td><a href="https://enterprise-rag-api-ksez.onrender.com/docs">enterprise-rag-api-ksez.onrender.com/docs</a></td>
+</tr>
+<tr>
+<td><strong>Auditable source repository</strong></td>
+<td><a href="https://github.com/Kenono2000/enterprise-rag-pgvector-rbac">github.com/Kenono2000/enterprise-rag-pgvector-rbac</a></td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="️-system-architecture">🏛️ System Architecture</h2>
+<pre class="mermaid" style="all: unset;">flowchart LR
+  user[User or service] --&gt; auth[Auth0 identity and role claims]
+  auth --&gt; api[FastAPI RAG API\nPOST /api/v1/query]
+  api --&gt; embed[Generate query embedding]
+  embed --&gt; search[Secure vector search]
+  search --&gt; db[(PostgreSQL + pgvector\nrow-level role filtering)]
+  db --&gt; context[Authorized context and citations]
+  context --&gt; llm[LLM answer generation]
+  llm --&gt; response[Typed response\nanswer, citations, confidence]
+  response --&gt; user
+
+  mcp[FastMCP gateway\nidentity-aware tools] -. governed access .-&gt; search</pre>
+<p><strong>Core flow:</strong> Auth0 issues identity and role claims → FastAPI generates a query embedding → <code>pgvector</code> performs a similarity search filtered by row-level role metadata → the LLM receives only authorized context → a typed response returns with citations and a confidence score.</p>
+<hr>
+<h2 id="-what-this-project-demonstrates">✨ What This Project Demonstrates</h2>
+<ul>
+<li><strong>Secure RAG retrieval</strong> with PostgreSQL, <code>pgvector</code>, and database-side role filtering.</li>
+<li><strong>Typed FastAPI endpoints</strong> that emit citations and confidence scores.</li>
+<li><strong>Identity-aware FastMCP tools</strong> for governed retrieval and code changes.</li>
+<li><strong>A bounded SDLC workflow</strong> with patch validation, security gates, tests, Git commits, and optional PR creation.</li>
+</ul>
+<hr>
+<h2 id="️-key-technical-findings">🏗️ Key Technical Findings</h2>
+<h3 id="1-in-database-zero-trust-rbac">1. In-Database Zero-Trust RBAC</h3>
+<p>Retrieval is not just about similarity; it is about authority.</p>
+<ul>
+<li><strong>Level:</strong> Row-level security (RLS) simulation via metadata filtering.</li>
+<li><strong>Mechanism:</strong> PostgreSQL <code>JSONB</code> indexing and the <code>?|</code> operator match JWT role claims against document <code>allowed_roles</code> <strong>inside the vector search query itself</strong>.</li>
+<li><strong>Benefit:</strong> Prevents unauthorized data leakage because the LLM never sees context outside the caller's access domain.</li>
+</ul>
+<h3 id="2-autonomous-sdlc-with-langgraph">2. Autonomous SDLC with LangGraph</h3>
+<p>The project implements a self-healing development loop.</p>
+<ul>
+<li><strong>State machine:</strong> Uses <strong>LangGraph</strong> to manage the cycle of <code>propose → apply → audit → test → repair</code>.</li>
+<li><strong>Security gate:</strong> An automated <strong>Policy Engine</strong> audits every proposed patch for secret leakage or unsafe imports before execution.</li>
+<li><strong>Resilience:</strong> If tests fail, the agent receives the traceback and attempts to repair the code automatically up to a configurable limit.</li>
+</ul>
+<h3 id="3-high-performance-vector-search">3. High-Performance Vector Search</h3>
+<ul>
+<li><strong>Engine:</strong> <code>pgvector</code> with HNSW (Hierarchical Navigable Small World) indexing.</li>
+<li><strong>Optimized I/O:</strong> Uses <code>asyncpg</code> for non-blocking database calls, critical for high-throughput microservices.</li>
+<li><strong>Validation:</strong> Pydantic DTOs enforce strict schema validation for all RAG inputs and outputs.</li>
+</ul>
+<h3 id="4-enterprise-ready-architecture">4. Enterprise-Ready Architecture</h3>
+<ul>
+<li><strong>Identity-aware MCP:</strong> FastMCP integration lets external tools and agents interact with the RAG system while respecting the same RBAC rules.</li>
+<li><strong>Modular design:</strong> Clear separation between the RAG microservice (<code>app/</code>) and the SDLC orchestration layer (<code>sdlc_harness/</code>).</li>
+</ul>
+<hr>
+<h2 id="-autonomous-sdlc-lifecycle">🔁 Autonomous SDLC Lifecycle</h2>
+<p>This project demonstrates a full lifecycle autonomous development workflow, from issue ingestion to production deployment with security gates.</p>
+<pre class="mermaid" style="all: unset;">flowchart TD
+    A[Developer opens issue] --&gt; B[GitHub webhook]
+    B --&gt; C[LangGraph SDLC Harness]
+    
+    subgraph Loop [Autonomous SDLC Loop]
+        direction LR
+        D[propose] --&gt; E[apply]
+        E --&gt; F[audit]
+        F --&gt; G[test]
+        G -- retry loop --&gt; D
+    end
+    
+    C --&gt; Loop
+    Loop --&gt; H[Push branch + open PR]
+    
+    H --&gt; I[GitHub Actions CI fires on the PR]
+    
+    subgraph CI [CI Security &amp; Build]
+        direction TB
+        J[CodeQL SAST]
+        K[Snyk SCA]
+        L[Docker matrix build]
+        M[DAST ZAP against preview env]
+    end
+    
+    I --&gt; J
+    I --&gt; K
+    I --&gt; L
+    I --&gt; M
+    
+    CI --&gt; N[GitHub Environment gate\nHuman reviewer]
+    N --&gt; O[Deploy to prod\nOIDC auth]</pre>
+<hr>
+<h2 id="-local-development">🧪 Local Development</h2>
+<h3 id="install-dependencies-and-run-tests">Install dependencies and run tests</h3>
+<pre><code class="language-powershell">python <span class="hljs-literal">-m</span> venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install <span class="hljs-literal">-r</span> requirements.txt
+python <span class="hljs-literal">-m</span> pytest <span class="hljs-literal">-q</span>
+</code></pre>
+<h3 id="start-postgresql-and-the-api">Start PostgreSQL and the API</h3>
+<pre><code class="language-powershell">docker compose up <span class="hljs-literal">-d</span> postgres
+python <span class="hljs-literal">-m</span> uvicorn sdlc_harness_main:app <span class="hljs-literal">--reload</span> <span class="hljs-literal">--port</span> <span class="hljs-number">8000</span>
+</code></pre>
+<blockquote>
+<p>The API is available at <code>http://localhost:8000</code>, and interactive documentation is at <code>/docs</code>.</p>
+</blockquote>
+<hr>
+<h2 id="-sdlc-harness-internals">🧩 SDLC Harness Internals</h2>
+<p>The custom harness accepts <code>POST /webhooks/github</code>, validates typed patch proposals, runs security checks and tests, then creates a branch and commit.</p>
+<blockquote>
+<p><strong>⚠️ Push control:</strong> Set <code>SDLC_PUSH=true</code>, <code>GITHUB_TOKEN</code>, and <code>GITHUB_BASE_BRANCH</code> in an untracked <code>.env</code> file only when you want to push and open a PR. Keep <code>SDLC_PUSH=false</code> for local testing.</p>
+</blockquote>
+<pre class="mermaid" style="all: unset;">flowchart TD
+  github[GitHub issue or webhook] --&gt; verify[Verify GitHub signature]
+  verify --&gt; parse[Parse typed SDLC event]
+  parse --&gt; branch[Create feature branch]
+  branch --&gt; propose[Agent proposes patches]
+  propose --&gt; apply[Apply patches inside sandbox]
+  apply --&gt; audit{Security gate\nsecrets and AST checks}
+  audit -- violations --&gt; reject[Reject workflow]
+  audit -- passed --&gt; tests[Run test command]
+  tests --&gt; result{Tests pass?}
+  result -- no --&gt; repairs{Repair attempts remaining?}
+  repairs -- yes --&gt; repair[Agent repairs from test output]
+  repair --&gt; apply
+  repairs -- no --&gt; fail[Fail workflow]
+  result -- yes --&gt; commit[Git add and commit]
+  commit --&gt; push{SDLC_PUSH enabled?}
+  push -- no --&gt; complete[Completed locally]
+  push -- yes --&gt; remote[Push branch]
+  remote --&gt; pr{GITHUB_TOKEN available?}
+  pr -- no --&gt; complete
+  pr -- yes --&gt; create[Create GitHub pull request]
+  create --&gt; complete</pre>
+<blockquote>
+<p><strong>Note:</strong> GitHub Actions is a better production runner for checkout, secrets, isolation, retries, logs, and PR integration. The custom harness remains useful for the agent, RAG context, and organization-specific governance logic.</p>
+</blockquote>
+<h3 id="example-payload">Example Payload</h3>
+<pre><code class="language-json"><span class="hljs-punctuation">{</span>
+  <span class="hljs-attr">&quot;issue&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-punctuation">{</span><span class="hljs-attr">&quot;number&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-number">125</span><span class="hljs-punctuation">,</span> <span class="hljs-attr">&quot;title&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;Fix value&quot;</span><span class="hljs-punctuation">,</span> <span class="hljs-attr">&quot;body&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;Update the value.&quot;</span><span class="hljs-punctuation">}</span><span class="hljs-punctuation">,</span>
+  <span class="hljs-attr">&quot;repository&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-punctuation">{</span><span class="hljs-attr">&quot;full_name&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;Kenono2000/enterprise-rag-pgvector-rbac&quot;</span><span class="hljs-punctuation">}</span><span class="hljs-punctuation">,</span>
+  <span class="hljs-attr">&quot;patches&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-punctuation">[</span><span class="hljs-punctuation">{</span><span class="hljs-attr">&quot;file_path&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;src/value.py&quot;</span><span class="hljs-punctuation">,</span> <span class="hljs-attr">&quot;content&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;VALUE = 2\n&quot;</span><span class="hljs-punctuation">}</span><span class="hljs-punctuation">]</span>
+<span class="hljs-punctuation">}</span>
+</code></pre>
+<h3 id="example-response">Example Response</h3>
+<pre><code class="language-json"><span class="hljs-punctuation">{</span>
+    <span class="hljs-attr">&quot;status&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;completed&quot;</span><span class="hljs-punctuation">,</span>
+    <span class="hljs-attr">&quot;issue_id&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;125&quot;</span><span class="hljs-punctuation">,</span>
+    <span class="hljs-attr">&quot;branch&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;feature/AGENT-125-fix-value&quot;</span><span class="hljs-punctuation">,</span>
+    <span class="hljs-attr">&quot;tests&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;python -m pytest -q&quot;</span><span class="hljs-punctuation">,</span>
+    <span class="hljs-attr">&quot;pushed&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-keyword">true</span><span class="hljs-punctuation">,</span>
+    <span class="hljs-attr">&quot;pull_request_url&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;https://github.com/Kenono2000/enterprise-rag-pgvector-rbac/pull/1&quot;</span><span class="hljs-punctuation">,</span>
+    <span class="hljs-attr">&quot;pull_request_created&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-keyword">true</span>
+<span class="hljs-punctuation">}</span>
+</code></pre>
+<hr>
+<h2 id="-github-workflow-evidence">📸 GitHub Workflow Evidence</h2>
+<h3 id="generated-branch">Generated Branch</h3>
+<p><img src="file:///c:\src\enterprise-rag-pgvector-rbac\docs\screenshots\github-branch.jpg" alt="Generated GitHub branch"></p>
+<h3 id="pull-request">Pull Request</h3>
+<p><img src="file:///c:\src\enterprise-rag-pgvector-rbac\docs\screenshots\pull-request.jpg" alt="Generated pull request"></p>
