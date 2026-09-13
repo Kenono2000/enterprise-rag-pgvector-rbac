@@ -34,10 +34,12 @@ if SECRET:
     signature = "sha256=" + hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
     headers["X-Hub-Signature-256"] = signature
 
-# Send Request
-print(f"Sending request to {URL}...")
-response = requests.post(URL, data=body, headers=headers)
+if __name__ == "__main__":
+    # Send Request
+    print(f"Sending request to {URL}...")
+    response = requests.post(URL, data=body, headers=headers)
 
-print(f"Status Code: {response.status_code}")
-print("Response Body:")
-print(json.dumps(response.json(), indent=2))
+    print(f"Status Code: {response.status_code}")
+    print("Response Body:")
+    print(json.dumps(response.json(), indent=2))
+
