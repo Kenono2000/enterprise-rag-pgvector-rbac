@@ -82,10 +82,15 @@ flowchart TB
 
 ## ✨ Key Features
 
-- **🔒 Secure RAG Retrieval:** Powered by PostgreSQL, `pgvector`, and database-side role filtering.
-- **📝 Typed Citations:** FastAPI endpoints emit structured citations and confidence scores.
-- **🛠️ Identity-Aware Tools:** FastMCP integration for governed retrieval and code changes.
-- **🤖 Autonomous SDLC:** Self-healing workflow with patch validation, security gates, and automated testing.
+### Governed Tool-Calling & CI/CD Evaluation Harness
+
+An exploratory testbed evaluating the operational boundaries and failure modes of agentic tool-calling within software delivery pipelines.
+
+#### Key Focus Areas
+* **Bounded FastMCP Tool Contracts:** Exposing strictly typed schemas to LLM clients, preventing arbitrary shell command execution.
+* **Context Hydration via pgvector:** Retrieving architecture decision records (ADRs) and interface specs deterministically via in-database RBAC rather than saturating context windows.
+* **Automated Failure Triage:** Testing closed-loop failure triage by piping failing `pytest` logs and AST checks into the model to evaluate real-world code repair versus hallucinated fixes.
+* **Token Budgeting & Auditability:** Tracking request IDs, token usage, and latency across all tool-calling invocations.
 
 ---
 
