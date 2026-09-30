@@ -43,11 +43,15 @@ load_dotenv(find_dotenv(), override=True)
 
 import streamlit as st
 
-from app.auth.jwks import verify_google_token
-from app.auth.pkce import build_authorization_url, decode_pkce_state, exchange_code_for_tokens_sync
-from app.auth.role_mapper import extract_roles
-from app.db.llm import chat_completion, generate_embedding
-from app.db.manager import DatabaseManager
+from app.auth import (
+    verify_google_token,
+    build_authorization_url,
+    decode_pkce_state,
+    exchange_code_for_tokens_sync,
+    extract_roles,
+)
+from app.db import DatabaseManager, generate_embedding, chat_completion
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
