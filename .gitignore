@@ -101,3 +101,4 @@ marimo/_lsp/
 __marimo__/
 .streamlit/
 .abstra/
+service_account.json
