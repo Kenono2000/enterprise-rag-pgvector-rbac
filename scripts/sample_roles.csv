@@ -1,0 +1,5 @@
+email,roles
+alice@acme.com,"engineer,hr_manager"
+bob@acme.com,finance_executive
+carol@acme.com,"finance_executive,compliance_auditor"
+dave@acme.com,engineer
