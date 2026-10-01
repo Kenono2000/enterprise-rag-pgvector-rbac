@@ -137,6 +137,61 @@ def decode_pkce_state(state: str, max_age_seconds: int = 300) -> Optional[str]:
         return None
 
 
+def encode_session_cookie(data: dict, ttl_seconds: int = 43200) -> str:
+    """
+    Encode session data into a compressed, HMAC-SHA256 signed, URL-safe base64 string
+    suitable for HTTP cookies. Default TTL is 12 hours (43200s).
+    """
+    import json
+    import time
+    import zlib
+    now = int(time.time())
+    payload = {
+        "d": data,
+        "iat": now,
+        "exp": now + ttl_seconds,
+    }
+    raw_json = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    compressed = zlib.compress(raw_json)
+    b64_data = base64.urlsafe_b64encode(compressed).rstrip(b"=").decode("ascii")
+    sig = hmac.new(_get_hmac_secret(), b64_data.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{b64_data}.{sig}"
+
+
+def decode_session_cookie(cookie_str: str) -> Optional[dict]:
+    """
+    Verify the HMAC signature, decompression, and expiration timestamp of a session cookie string.
+    Returns the decoded session data dict if valid and unexpired, or None otherwise.
+    """
+    import json
+    import time
+    import zlib
+    if not cookie_str or "." not in cookie_str:
+        return None
+
+    b64_data, sig = cookie_str.rsplit(".", 1)
+    expected_sig = hmac.new(_get_hmac_secret(), b64_data.encode("ascii"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
+        return None
+
+    # Restore base64 padding
+    rem = len(b64_data) % 4
+    if rem:
+        b64_data += "=" * (4 - rem)
+
+    try:
+        compressed = base64.urlsafe_b64decode(b64_data.encode("ascii"))
+        raw_json = zlib.decompress(compressed).decode("utf-8")
+        payload = json.loads(raw_json)
+        if not isinstance(payload, dict):
+            return None
+        if time.time() > payload.get("exp", 0):
+            return None  # expired
+        return payload.get("d")
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Authorization URL builder
 # ---------------------------------------------------------------------------

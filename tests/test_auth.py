@@ -24,8 +24,10 @@ import pytest
 from app.auth.pkce import (
     build_authorization_url,
     decode_pkce_state,
+    decode_session_cookie,
     derive_code_challenge,
     encode_pkce_state,
+    encode_session_cookie,
     generate_code_verifier,
 )
 
@@ -175,3 +177,40 @@ class TestExtractRoles:
         """Sanity check: all KNOWN_ROLES match the DB schema values."""
         expected = {"finance_executive", "compliance_auditor", "hr_manager", "executive", "engineer"}
         assert KNOWN_ROLES == expected
+
+
+class TestSessionCookie:
+    def test_roundtrip_valid_payload(self):
+        data = {
+            "sub": "user-12345",
+            "email": "analyst@example.com",
+            "name": "Jane Analyst",
+            "roles": ["finance_executive", "compliance_auditor"],
+            "id_token": "mock.id.token",
+            "refresh_token": "mock.refresh.token",
+        }
+        cookie = encode_session_cookie(data, ttl_seconds=3600)
+        assert isinstance(cookie, str)
+        assert "." in cookie
+
+        restored = decode_session_cookie(cookie)
+        assert restored == data
+
+    def test_tampered_signature_rejected(self):
+        data = {"sub": "user-12345", "roles": ["engineer"]}
+        cookie = encode_session_cookie(data)
+        b64, sig = cookie.rsplit(".", 1)
+        tampered = f"{b64}.{'0' * len(sig)}"
+        assert decode_session_cookie(tampered) is None
+
+    def test_expired_cookie_rejected(self):
+        data = {"sub": "user-12345"}
+        # Negative TTL ensures immediate expiration
+        cookie = encode_session_cookie(data, ttl_seconds=-10)
+        assert decode_session_cookie(cookie) is None
+
+    def test_malformed_cookie_rejected(self):
+        assert decode_session_cookie("") is None
+        assert decode_session_cookie("invalid_string_without_dot") is None
+        assert decode_session_cookie("invalid.sig") is None
+

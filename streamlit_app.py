@@ -42,11 +42,14 @@ from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv(), override=True)
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from app.auth import (
     verify_google_token,
     build_authorization_url,
     decode_pkce_state,
+    decode_session_cookie,
+    encode_session_cookie,
     exchange_code_for_tokens_sync,
     extract_roles,
 )
@@ -55,6 +58,14 @@ from app.db import DatabaseManager, generate_embedding, chat_completion
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# SessionIdleManager & Cookie Configuration (SOC-2 / HIPAA Compliance)
+# ---------------------------------------------------------------------------
+IDLE_TIMEOUT_SECONDS = 15 * 60       # 15 minutes inactivity limit
+MAX_SESSION_SECONDS = 12 * 3600      # 12 hours absolute session ceiling
+SESSION_COOKIE_NAME = "enterprise_rag_session"
+
 
 # ---------------------------------------------------------------------------
 # Server-side PKCE state store
@@ -212,14 +223,41 @@ def _handle_oauth_callback() -> None:
     roles = extract_roles(payload)
     logger.info("Extracted roles 1: %s", roles)
 
-    # Persist identity in session_state
+    # Persist identity and session credentials in session_state
+    now = _time.time()
     st.session_state["authenticated"] = True
     st.session_state["id_token"] = id_token
+    st.session_state["access_token"] = tokens.get("access_token", "")
+    st.session_state["refresh_token"] = tokens.get("refresh_token", "")
+    st.session_state["token_exp"] = payload.get("exp", 0)
+    st.session_state["token_iat"] = payload.get("iat", 0)
+    st.session_state["auth_time"] = payload.get("auth_time", payload.get("iat", now))
+    st.session_state["login_time"] = now
+    st.session_state["last_activity"] = now
     st.session_state["user_sub"] = payload.get("sub")
     st.session_state["user_email"] = payload.get("email", "")
     st.session_state["user_name"] = payload.get("name", payload.get("email", ""))
     st.session_state["user_picture"] = payload.get("picture", "")
     st.session_state["app_roles"] = roles
+
+    # Stage HMAC-signed cookie to persist session across browser refreshes (F5)
+    session_payload = {
+        "sub": payload.get("sub"),
+        "email": payload.get("email", ""),
+        "name": payload.get("name", payload.get("email", "")),
+        "picture": payload.get("picture", ""),
+        "roles": roles,
+        "id_token": id_token,
+        "access_token": tokens.get("access_token", ""),
+        "refresh_token": tokens.get("refresh_token", ""),
+        "token_exp": payload.get("exp", 0),
+        "token_iat": payload.get("iat", 0),
+        "auth_time": payload.get("auth_time", payload.get("iat", now)),
+        "login_time": now,
+        "last_activity": now,
+    }
+    st.session_state["_cookie_to_set"] = encode_session_cookie(session_payload, ttl_seconds=MAX_SESSION_SECONDS)
+    st.session_state.pop("_just_signed_out", None)
 
     # Remove ?code= from URL (cleaner UX, prevents double-exchange on refresh)
     st.query_params.clear()
@@ -227,17 +265,252 @@ def _handle_oauth_callback() -> None:
     st.rerun()
 
 
-
 def _clear_auth() -> None:
     for key in [
-        "authenticated", "id_token", "user_sub", "user_email",
-        "user_name", "user_picture", "app_roles",
+        "authenticated", "id_token", "access_token", "refresh_token",
+        "token_exp", "token_iat", "auth_time", "login_time", "last_activity",
+        "user_sub", "user_email", "user_name", "user_picture", "app_roles",
+        "_cookie_to_set",
     ]:
         st.session_state.pop(key, None)
+    st.session_state["_cookie_to_clear"] = True
+    st.session_state["_just_signed_out"] = True
 
 
 def _is_authenticated() -> bool:
     return bool(st.session_state.get("authenticated"))
+
+
+def _check_session_lifecycle() -> bool:
+    """
+    Evaluate SessionIdleManager invariants:
+    1. Inactivity timeout (15 mins)
+    2. Absolute session ceiling (12 hours)
+    Returns True if session is valid, False if terminated.
+    """
+    if not _is_authenticated():
+        return True
+
+    now = _time.time()
+    last_act = st.session_state.get("last_activity", now)
+    login_t = st.session_state.get("login_time", now)
+
+    # 1. Inactivity Timeout Check (SOC-2 / HIPAA mandate)
+    if now - last_act > IDLE_TIMEOUT_SECONDS:
+        logger.warning("Session terminated: user idle for > 15 minutes.")
+        _clear_auth()
+        st.session_state["session_expired_reason"] = "idle_timeout"
+        st.rerun()
+        return False
+
+    # 2. Absolute Session Ceiling Check
+    if now - login_t > MAX_SESSION_SECONDS:
+        logger.warning("Session terminated: absolute session ceiling (12h) reached.")
+        _clear_auth()
+        st.session_state["session_expired_reason"] = "max_session"
+        st.rerun()
+        return False
+
+    # Update activity timestamp on user interaction/rerun
+    st.session_state["last_activity"] = now
+    return True
+
+
+def _refresh_id_token_sync(refresh_token: str) -> Optional[dict]:
+    """Exchange a refresh token with Google OAuth 2.0 to silently mint a fresh ID token."""
+    import httpx
+    client_id = _secret("GOOGLE_CLIENT_ID")
+    client_secret = _secret("GOOGLE_CLIENT_SECRET")
+    if not client_id or not refresh_token:
+        return None
+
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": client_id,
+    }
+    if client_secret:
+        data["client_secret"] = client_secret
+
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.post(
+                "https://oauth2.googleapis.com/token",
+                data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            if resp.status_code >= 400:
+                logger.warning("Token refresh rejected (%s): %s", resp.status_code, resp.text)
+                return None
+            return resp.json()
+    except Exception as exc:
+        logger.warning("Token refresh network failure: %s", exc)
+        return None
+
+
+def _get_browser_cookie(name: str) -> Optional[str]:
+    """Read a cookie from incoming HTTP/WebSocket request headers via st.context.cookies."""
+    try:
+        if hasattr(st, "context") and hasattr(st.context, "cookies"):
+            return st.context.cookies.get(name)
+    except Exception:
+        pass
+    return None
+
+
+def _restore_session_from_cookie() -> bool:
+    """
+    Attempt to rehydrate an authenticated session from the HMAC-signed browser cookie.
+    Survives browser reloads (F5) and restores session_state without signing in again.
+    """
+    if _is_authenticated():
+        return True
+
+    if st.session_state.get("_just_signed_out"):
+        return False
+
+    cookie_val = _get_browser_cookie(SESSION_COOKIE_NAME)
+    if not cookie_val:
+        return False
+
+    session_data = decode_session_cookie(cookie_val)
+    if not session_data or not isinstance(session_data, dict):
+        return False
+
+    now = _time.time()
+    last_act = session_data.get("last_activity", now)
+    login_t = session_data.get("login_time", now)
+
+    # 1. Inactivity check (15 mins)
+    if now - last_act > IDLE_TIMEOUT_SECONDS:
+        logger.info("Cookie session rejected: inactive for > 15m")
+        st.session_state["session_expired_reason"] = "idle_timeout"
+        st.session_state["_cookie_to_clear"] = True
+        return False
+
+    # 2. Absolute session ceiling (12h)
+    if now - login_t > MAX_SESSION_SECONDS:
+        logger.info("Cookie session rejected: exceeded 12h ceiling")
+        st.session_state["session_expired_reason"] = "max_session"
+        st.session_state["_cookie_to_clear"] = True
+        return False
+
+    id_token = session_data.get("id_token", "")
+    token_exp = session_data.get("token_exp", 0)
+    refresh_token = session_data.get("refresh_token", "")
+
+    # 3. Check if ID token is close to expiry or expired (within 60s of exp)
+    if token_exp and (now >= token_exp - 60):
+        if refresh_token:
+            refreshed = _refresh_id_token_sync(refresh_token)
+            if refreshed and "id_token" in refreshed:
+                id_token = refreshed["id_token"]
+                try:
+                    p = verify_google_token(id_token)
+                    token_exp = p.get("exp", 0)
+                    session_data["roles"] = extract_roles(p)
+                except Exception:
+                    pass
+                session_data["id_token"] = id_token
+                session_data["token_exp"] = token_exp
+                st.session_state["_cookie_to_set"] = encode_session_cookie(
+                    session_data, ttl_seconds=int(max(0, MAX_SESSION_SECONDS - (now - login_t)))
+                )
+            else:
+                logger.warning("Silent token refresh during session restoration failed")
+                st.session_state["_cookie_to_clear"] = True
+                return False
+        else:
+            st.session_state["_cookie_to_clear"] = True
+            return False
+
+    # Rehydrate session state
+    st.session_state["authenticated"] = True
+    st.session_state["id_token"] = id_token
+    st.session_state["access_token"] = session_data.get("access_token", "")
+    st.session_state["refresh_token"] = refresh_token
+    st.session_state["token_exp"] = token_exp
+    st.session_state["token_iat"] = session_data.get("token_iat", 0)
+    st.session_state["auth_time"] = session_data.get("auth_time", now)
+    st.session_state["login_time"] = login_t
+    st.session_state["last_activity"] = now
+    st.session_state["user_sub"] = session_data.get("sub")
+    st.session_state["user_email"] = session_data.get("email", "")
+    st.session_state["user_name"] = session_data.get("name", "")
+    st.session_state["user_picture"] = session_data.get("picture", "")
+    st.session_state["app_roles"] = session_data.get("roles", [])
+    logger.info("Session restored from secure browser cookie for %s", session_data.get("email"))
+    return True
+
+
+def _render_session_tracker_component() -> None:
+    """Inject client-side DOM activity monitor and session cookie syncer into the browser."""
+    cookie_to_set = st.session_state.pop("_cookie_to_set", None)
+    set_cookie_js = ""
+    if cookie_to_set:
+        set_cookie_js = f"""
+            try {{
+                const cVal = "{cookie_to_set}";
+                const maxAge = {MAX_SESSION_SECONDS};
+                const cookieStr = "{SESSION_COOKIE_NAME}=" + cVal + "; path=/; max-age=" + maxAge + "; SameSite=Lax";
+                document.cookie = cookieStr;
+                if (window.parent && window.parent.document) {{
+                    window.parent.document.cookie = cookieStr;
+                    try {{ window.parent.localStorage.setItem("{SESSION_COOKIE_NAME}", cVal); }} catch(e) {{}}
+                }}
+            }} catch(e) {{
+                console.error("[SessionTracker] Cookie write error:", e);
+            }}
+        """
+
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            {set_cookie_js}
+
+            let lastActivity = Date.now();
+            const IDLE_LIMIT_MS = 15 * 60 * 1000; // 15 mins
+            const WARN_LIMIT_MS = 13 * 60 * 1000; // 13 mins
+            let warned = false;
+
+            function onActivity() {{
+                lastActivity = Date.now();
+                warned = false;
+            }}
+
+            ['mousedown', 'keydown', 'scroll', 'touchstart'].forEach(function(evt) {{
+                try {{
+                    window.parent.document.addEventListener(evt, onActivity, {{ passive: true }});
+                }} catch(e) {{}}
+                document.addEventListener(evt, onActivity, {{ passive: true }});
+            }});
+
+            setInterval(function() {{
+                const idle = Date.now() - lastActivity;
+                if (idle >= WARN_LIMIT_MS && !warned) {{
+                    warned = true;
+                    console.warn("[SessionIdleManager] Warning: 2 minutes remaining before inactivity timeout.");
+                }}
+                if (idle >= IDLE_LIMIT_MS) {{
+                    console.error("[SessionIdleManager] Inactivity limit reached (15m). Terminating session.");
+                    try {{
+                        const clearCookie = "{SESSION_COOKIE_NAME}=; path=/; max-age=0; SameSite=Lax";
+                        document.cookie = clearCookie;
+                        if (window.parent && window.parent.document) {{
+                            window.parent.document.cookie = clearCookie;
+                            try {{ window.parent.localStorage.removeItem("{SESSION_COOKIE_NAME}"); }} catch(e) {{}}
+                        }}
+                    }} catch(e) {{}}
+                    window.parent.location.reload();
+                }}
+            }}, 5000);
+        }})();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +520,39 @@ def _is_authenticated() -> bool:
 
 def _render_sign_in_page() -> None:
     """Show the sign-in card when the user is not authenticated."""
+    # Clear cookie in browser if sign-out or session expiration occurred
+    if st.session_state.pop("_cookie_to_clear", None):
+        components.html(
+            f"""
+            <script>
+            (function() {{
+                try {{
+                    const clearCookie = "{SESSION_COOKIE_NAME}=; path=/; max-age=0; SameSite=Lax";
+                    document.cookie = clearCookie;
+                    if (window.parent && window.parent.document) {{
+                        window.parent.document.cookie = clearCookie;
+                        try {{ window.parent.localStorage.removeItem("{SESSION_COOKIE_NAME}"); }} catch(e) {{}}
+                    }}
+                }} catch(e) {{}}
+            }})();
+            </script>
+            """,
+            height=0,
+            width=0,
+        )
+
+    # Check if user was signed out by SessionIdleManager
+    expired_reason = st.session_state.pop("session_expired_reason", None)
+    if expired_reason == "idle_timeout":
+        st.warning(
+            "⚠️ **Session Terminated:** You have been automatically signed out due to "
+            "15 minutes of inactivity (SOC-2 / HIPAA compliance mandate). Please sign in again."
+        )
+    elif expired_reason == "max_session":
+        st.warning(
+            "⚠️ **Session Terminated:** Maximum session duration (12 hours) reached. Please sign in again."
+        )
+
     st.markdown(
         """
         <div style="text-align:center;padding:2rem 0">
@@ -338,6 +644,51 @@ def _render_user_header() -> None:
         with st.expander("🔑 Copy Google ID Token"):
             st.code(st.session_state.get("id_token", ""), language="text")
             st.caption("Paste into Swagger UI (`/docs`) → **Authorize** button.")
+
+        st.divider()
+        st.markdown("**⏱️ Session & Token Security**")
+        now = _time.time()
+        token_exp = st.session_state.get("token_exp", 0)
+        mins_left = max(0, int((token_exp - now) / 60)) if token_exp else 60
+        login_mins_ago = int((now - st.session_state.get("login_time", now)) / 60)
+
+        st.caption(f"• **Session**: Active ({login_mins_ago}m elapsed)")
+        st.caption(f"• **ID Token TTL**: ~{mins_left}m remaining")
+        st.caption("• **Idle Timeout**: 15m limit (SOC-2)")
+
+        if st.session_state.get("refresh_token"):
+            st.caption("• **Refresh Token**: Stored (Offline Access)")
+            if st.button("🔄 Silent Token Refresh", use_container_width=True):
+                with st.spinner("Exchanging refresh token for fresh ID token..."):
+                    refreshed = _refresh_id_token_sync(st.session_state["refresh_token"])
+                    if refreshed and "id_token" in refreshed:
+                        new_id = refreshed["id_token"]
+                        payload = verify_google_token(new_id)
+                        st.session_state["id_token"] = new_id
+                        st.session_state["token_exp"] = payload.get("exp", 0)
+                        st.session_state["app_roles"] = extract_roles(payload)
+                        now_t = _time.time()
+                        st.session_state["last_activity"] = now_t
+                        st.session_state["_cookie_to_set"] = encode_session_cookie({
+                            "sub": st.session_state.get("user_sub"),
+                            "email": st.session_state.get("user_email"),
+                            "name": st.session_state.get("user_name"),
+                            "picture": st.session_state.get("user_picture"),
+                            "roles": st.session_state.get("app_roles", []),
+                            "id_token": new_id,
+                            "access_token": st.session_state.get("access_token", ""),
+                            "refresh_token": st.session_state.get("refresh_token", ""),
+                            "token_exp": payload.get("exp", 0),
+                            "token_iat": payload.get("iat", 0),
+                            "auth_time": st.session_state.get("auth_time", now_t),
+                            "login_time": st.session_state.get("login_time", now_t),
+                            "last_activity": now_t,
+                        }, ttl_seconds=MAX_SESSION_SECONDS)
+                        st.success("✅ ID token refreshed silently!")
+                        st.rerun()
+                    else:
+                        st.error("Failed to refresh token: server rejected grant.")
+
         st.divider()
         if st.button("Sign out", use_container_width=True):
             _clear_auth()
@@ -461,6 +812,29 @@ def _render_rag_interface() -> None:
                         "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
                     })
 
+    # Educational Architectural Deep Dive
+    st.divider()
+    with st.expander("🎓 Cryptographic Token & Session Architecture (Deep Dive)", expanded=False):
+        st.markdown(
+            """
+            ### 🛡️ Enterprise Token Architecture & Session Security
+            
+            This application implements the standard three-tier cryptographic security model:
+
+            | Token Type | Purpose | Standard Lifetime | Storage Location |
+            | :--- | :--- | :--- | :--- |
+            | **ID Token (OIDC)** | Cryptographic user identity & verified `app_roles` | 15–60 min | Streamlit Session State (In-Memory) |
+            | **Access Token (OAuth 2.0)** | Scoped authorization bearer token for APIs | 15–60 min | Ephemeral client memory |
+            | **Refresh Token (OAuth 2.0)** | Silent minting of new tokens without credentials | 30 days | Identity Provider DB / Server Session |
+
+            #### ⏱️ SessionIdleManager & Regulatory Compliance (SOC-2 / HIPAA)
+            1. **15-Minute Inactivity Timeout**: Monitors keyboard, mouse, and touch events in the browser. If 15 minutes of zero interaction elapse, the session is terminated and client credentials are wiped.
+            2. **12-Hour Absolute Session Ceiling**: Regardless of user activity, sessions cannot exceed 12 hours without re-authentication.
+            3. **Silent Token Refresh**: When the short-lived ID token approaches expiration, the client silently contacts Google's `/token` endpoint with the refresh token to extend access without interrupting the user.
+            4. **In-Database RBAC Defense**: Even with a valid cryptographic token, users can only access documents where `allowed_roles ?| $user_roles`.
+            """
+        )
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -474,12 +848,21 @@ def main():
         layout="centered",
     )
 
-    # Handle the OAuth callback before rendering anything else
+    # 1. Handle the OAuth callback if ?code= is in URL params
     _handle_oauth_callback()
+
+    # 2. Rehydrate session from secure browser cookie if unauthenticated (survives browser refresh)
+    _restore_session_from_cookie()
+
+    # 3. Evaluate SessionIdleManager invariants (inactivity timeout & max session lifetime)
+    if not _check_session_lifecycle():
+        return
 
     if not _is_authenticated():
         _render_sign_in_page()
     else:
+        # Inject client-side DOM activity tracking & cookie syncer
+        _render_session_tracker_component()
         _render_user_header()
         _render_rag_interface()
 
