@@ -243,18 +243,21 @@ flowchart TD
     A --> B[Verify RS256 Signature via JWKS]
     B --> C{"Does payload contain 'app_roles'?"}
     C -->|Yes: Custom Claim| D["Use payload['app_roles'] directly"]
-    C -->|No: Standard Token| E["Extract user 'email' from payload"]
-    E --> F["Match env vars: ROLE_MAP_role = email"]
-    F --> G[Assign matched roles]
+    C -->|No: Standard Token| E["Lookup user custom claims via Firebase Admin SDK"]
+    E --> F{"Firebase claims found?"}
+    F -->|Yes: app_roles found| G["Use Firebase Admin claims"]
+    F -->|No claims| H["Match env vars: ROLE_MAP_role = email"]
+    H --> I[Assign matched roles from env]
     
-    AuthMode -->|false: Dev Fallback| H{"X-User-Roles header present?"}
-    H -->|Yes| J[Parse roles from header]
-    H -->|No| K[Default empty roles]
+    AuthMode -->|false: Dev Fallback| J{"X-User-Roles header present?"}
+    J -->|Yes| K[Parse roles from header]
+    J -->|No| L[Default empty roles]
     
     D --> UserIdentity[Construct Authenticated UserIdentity]
     G --> UserIdentity
-    J --> UserIdentity
+    I --> UserIdentity
     K --> UserIdentity
+    L --> UserIdentity
 ```
 
 1. **Primary: Custom JWT Claim (`payload["app_roles"]`)**:
@@ -269,15 +272,23 @@ flowchart TD
    ```
    `role_mapper.py` reads `payload.get("app_roles")` directly. If present, it bypasses external mapping.
 
-2. **Secondary: Server-Side Email Fallback (`ROLE_MAP_<ROLE>`)**:
-   For standard Google OAuth tokens lacking `app_roles`, `role_mapper.py` inspects `payload.get("email")` and matches against configured environment variables:
+2. **Secondary: Firebase Admin SDK Live Lookup (`_get_firebase_claims_by_email`)**:
+   When a user signs in via standard Google OAuth 2.0 (tokens issued by `accounts.google.com` which do not carry Firebase custom claims), `role_mapper.py` uses the initialized Firebase Admin SDK (`service_account.json` or `GOOGLE_APPLICATION_CREDENTIALS`) to query Firebase Auth for the user by email:
+   ```python
+   user = fb_auth.get_user_by_email(email)
+   raw_roles = user.custom_claims.get("app_roles", [])
+   ```
+   Any recognized roles matching `KNOWN_ROLES` are immediately returned without requiring environment variable mapping.
+
+3. **Tertiary: Server-Side Email Fallback (`ROLE_MAP_<ROLE>`)**:
+   For environments without Firebase Admin service account keys, `role_mapper.py` inspects `payload.get("email")` and matches against configured environment variables:
    ```env
    ROLE_MAP_engineer=kenono2000@gmail.com
    ROLE_MAP_finance_executive=kenono2000@gmail.com
    ROLE_MAP_hr_manager=kenono2000@gmail.com
    ```
 
-3. **Tertiary: Offline Developer Fallback (`X-User-Roles`)**:
+4. **Quaternary: Offline Developer Fallback (`X-User-Roles`)**:
    When `REQUIRE_GOOGLE_AUTH=false`, callers can pass roles via HTTP header (`X-User-Roles: ["engineer"]`) for automated testing.
 
 ---
