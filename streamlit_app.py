@@ -210,6 +210,7 @@ def _handle_oauth_callback() -> None:
         return
 
     roles = extract_roles(payload)
+    logger.info("Extracted roles 1: %s", roles)
 
     # Persist identity in session_state
     st.session_state["authenticated"] = True
@@ -319,6 +320,7 @@ def _render_user_header() -> None:
         roles = st.session_state.get("app_roles", [])
         if not roles and email:
             roles = extract_roles({"sub": st.session_state.get("user_sub", ""), "email": email})
+            logger.info("Extracted roles 2: %s", roles)
             st.session_state["app_roles"] = roles
 
         if picture:
@@ -346,7 +348,9 @@ def _render_rag_interface() -> None:
     """Main RAG search UI — only shown when authenticated."""
     roles: list[str] = st.session_state.get("app_roles", [])
     if not roles and st.session_state.get("user_email"):
-        roles = extract_roles({"sub": st.session_state.get("user_sub", ""), "email": st.session_state.get("user_email")})
+        roles = extract_roles({"sub": st.session_state.get("user_sub", ""), "email": st.session_state.get
+        ("user_email")})
+        logger.info("Extracted roles 3: %s", roles)
         st.session_state["app_roles"] = roles
 
 

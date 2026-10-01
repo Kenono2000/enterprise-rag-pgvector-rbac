@@ -25,6 +25,9 @@ import logging
 import os
 from typing import Any, Dict, List
 
+import firebase_admin
+from firebase_admin import auth as fb_auth, credentials
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -34,6 +37,58 @@ logger = logging.getLogger(__name__)
 KNOWN_ROLES = frozenset(
     ["finance_executive", "compliance_auditor", "hr_manager", "executive", "engineer"]
 )
+
+# ---------------------------------------------------------------------------
+# Firebase Admin SDK user claims helper
+# ---------------------------------------------------------------------------
+
+def _init_firebase_admin() -> bool:
+    """Initialize Firebase Admin SDK once if service credentials exist."""
+    if firebase_admin._apps:
+        return True
+
+    candidates = [
+        os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH"),
+        os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+        "service_account.json",
+        "firebase-service-account.json",
+        os.path.join(os.path.dirname(__file__), "..", "..", "service_account.json"),
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            try:
+                cred = credentials.Certificate(path)
+                firebase_admin.initialize_app(cred)
+                logger.info("Initialized Firebase Admin SDK with credentials from: %s", path)
+                return True
+            except Exception as exc:
+                logger.warning("Failed initializing Firebase with %s: %s", path, exc)
+
+    try:
+        firebase_admin.initialize_app()
+        return True
+    except Exception as exc:
+        logger.debug("Firebase default credentials not available: %s", exc)
+        return False
+
+
+def _get_firebase_claims_by_email(email: str) -> List[str]:
+    """Retrieve app_roles custom claims directly from Firebase by user email."""
+    if not _init_firebase_admin():
+        return []
+
+    try:
+        user = fb_auth.get_user_by_email(email)
+        claims = user.custom_claims or {}
+        raw_roles = claims.get("app_roles")
+        if raw_roles and isinstance(raw_roles, list):
+            roles = [r for r in raw_roles if isinstance(r, str) and r in KNOWN_ROLES]
+            if roles:
+                return roles
+    except Exception as exc:
+        logger.debug("Could not fetch Firebase claims for %s: %s", email, exc)
+
+    return []
 
 # ---------------------------------------------------------------------------
 # Fallback: email-domain / email-address → role mapping
@@ -116,7 +171,15 @@ def extract_roles(token_payload: Dict[str, Any]) -> List[str]:
             raw_roles,
         )
 
-    # 2 — Email-domain fallback
+    # 2 — Look up Firebase custom claims via Firebase Admin SDK
+    email = token_payload.get("email", "")
+    if email:
+        fb_roles = _get_firebase_claims_by_email(email)
+        if fb_roles:
+            logger.info("Roles from Firebase Admin SDK for %s: %s", email, fb_roles)
+            return fb_roles
+
+    # 3 — Email-domain fallback
     email = token_payload.get("email", "")
     if email:
         roles = _fallback_roles_from_email(email)

@@ -6,16 +6,15 @@ One-shot CLI tool to set (or clear) app_roles custom claims on a Firebase user.
 Usage
 -----
 # Assign roles to a user by UID
-python scripts/set_firebase_claims.py --uid abc123 --roles engineer hr_manager
-
+python scripts/set_firebase_claims.py --uid zblopHzxXgVkCE6e9mlRFWHeklt1 --roles finance_executive
 # Assign roles by email (looks up the UID automatically)
-python scripts/set_firebase_claims.py --email alice@acme.com --roles finance_executive
+python scripts/set_firebase_claims.py --email kenono2000@gmail.com --roles finance_executive
 
 # Show current claims for a user
-python scripts/set_firebase_claims.py --email alice@acme.com --show
+python scripts/set_firebase_claims.py --email kenono2000@gmail.com --show
 
 # Clear all app_roles claims for a user
-python scripts/set_firebase_claims.py --uid abc123 --clear
+python scripts/set_firebase_claims.py --uid zblopHzxXgVkCE6e9mlRFWHeklt1 --clear
 
 # Bulk-assign from a CSV file (see scripts/sample_roles.csv)
 python scripts/set_firebase_claims.py --csv scripts/sample_roles.csv
@@ -123,7 +122,7 @@ def bulk_from_csv(csv_path: str) -> None:
     """
     CSV format (with header row):
         email,roles
-        alice@acme.com,"engineer,hr_manager"
+        kenono2000@gmail.com,"engineer,hr_manager"
         bob@acme.com,finance_executive
     """
     with open(csv_path, newline="", encoding="utf-8") as f:
