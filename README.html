@@ -1,0 +1,515 @@
+<span id="markdown-mermaid" aria-hidden="true" data-config="{&quot;darkModeTheme&quot;:&quot;vscode&quot;,&quot;lightModeTheme&quot;:&quot;vscode&quot;,&quot;maxTextSize&quot;:50000,&quot;clickDrag&quot;:&quot;alt&quot;,&quot;showControls&quot;:&quot;onHoverOrFocus&quot;,&quot;resizable&quot;:true,&quot;maxHeight&quot;:&quot;&quot;}"></span>
+				<h1 id="️-enterprise-zero-trust-rag-microservice--autonomous-sdlc">🛡️ Enterprise Zero-Trust RAG Microservice &amp; Autonomous SDLC</h1>
+<h3 id="-architect">👤 Architect</h3>
+<p><strong><a href="https://www.linkedin.com/in/kenwong-architect/">Ken Wong</a></strong><br>
+<em>Target stack: Python 3.11+, PostgreSQL 16 + pgvector, FastAPI, Streamlit, Google OAuth 2.0 PKCE, Google JWKS, Firebase Identity, FastMCP, LangGraph</em></p>
+<hr>
+<h2 id="-live-architecture-artifacts">🚀 Live Architecture Artifacts</h2>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Component</th>
+<th style="text-align:left">Description</th>
+<th style="text-align:left">Access Link</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><strong>Visual UI</strong></td>
+<td style="text-align:left">Shift-Left In-Database RBAC Demo (Streamlit)</td>
+<td style="text-align:left"><a href="https://enterprise-rag-pgvector-rbac.streamlit.app">enterprise-rag-pgvector-rbac.streamlit.app</a></td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>API Docs</strong></td>
+<td style="text-align:left">Live OpenAPI / Interactive Swagger UI</td>
+<td style="text-align:left"><a href="https://enterprise-rag-api-ksez.onrender.com/docs">enterprise-rag-api-ksez.onrender.com/docs</a></td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Repository</strong></td>
+<td style="text-align:left">Auditable Source Code &amp; Test Suite</td>
+<td style="text-align:left"><a href="https://github.com/Kenono2000/enterprise-rag-pgvector-rbac">github.com/Kenono2000/enterprise-rag-pgvector-rbac</a></td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Technical Guide</strong></td>
+<td style="text-align:left">In-Depth Architecture &amp; Implementation Manual</td>
+<td style="text-align:left"><a href="project_technical_guide.html"><code>project_technical_guide.md</code></a></td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="-table-of-contents">📑 Table of Contents</h2>
+<ol>
+<li><a href="#1-executive-summary--core-value-proposition">Executive Summary &amp; Core Value Proposition</a></li>
+<li><a href="#2-end-to-end-system-architecture">End-to-End System Architecture</a></li>
+<li><a href="#3-architectural-philosophy-standard-rag-vs-zero-trust-in-database-rbac">Architectural Philosophy: Standard RAG vs. Zero-Trust In-Database RBAC</a></li>
+<li><a href="#4-consolidated-codebase-structure">Consolidated Codebase Structure</a></li>
+<li><a href="#5-layer-1-database--pgvector-indexing-schemasql--appdb">Layer 1: Database &amp; pgvector Indexing (<code>schema.sql</code> &amp; <code>app/db/</code>)</a></li>
+<li><a href="#6-layer-2-identity--cryptographic-security-appauth">Layer 2: Identity &amp; Cryptographic Security (<code>app/auth/</code>)</a>
+<ul>
+<li><a href="#61-rfc-7636-oauth-20-pkce-flow">6.1 RFC 7636 OAuth 2.0 PKCE Flow</a></li>
+<li><a href="#62-stateless-hmac-signed-oauth-state">6.2 Stateless HMAC-Signed OAuth State</a></li>
+<li><a href="#63-google-public-jwks-verification--clock-skew-leeway">6.3 Google Public JWKS Verification &amp; Clock Skew Leeway</a></li>
+<li><a href="#64-role-storage-in-tokens--resolution-pipeline">6.4 Role Storage in Tokens &amp; Resolution Pipeline</a></li>
+<li><a href="#65-enterprise-custom-role-provisioning">6.5 Enterprise Custom Role Provisioning</a></li>
+</ul>
+</li>
+<li><a href="#7-layer-3-api--interactive-frontend-appmainpy--streamlit_apppy">Layer 3: API &amp; Interactive Frontend (<code>app/main.py</code> &amp; <code>streamlit_app.py</code>)</a></li>
+<li><a href="#8-layer-4-model-context-protocol-gateway-appmcppy">Layer 4: Model Context Protocol Gateway (<code>app/mcp.py</code>)</a></li>
+<li><a href="#9-layer-5-autonomous-sdlc-agent-agent">Layer 5: Autonomous SDLC Agent (<code>agent/</code>)</a></li>
+<li><a href="#10-troubleshooting--solved-engineering-challenges">Troubleshooting &amp; Solved Engineering Challenges</a></li>
+<li><a href="#11-environment-configuration-reference-env">Environment Configuration Reference (<code>.env</code>)</a></li>
+<li><a href="#12-application-execution--verification-guide">Application Execution &amp; Verification Guide</a></li>
+<li><a href="#13-key-engineering-takeaways">Key Engineering Takeaways</a></li>
+</ol>
+<hr>
+<h2 id="1-executive-summary--core-value-proposition">1. Executive Summary &amp; Core Value Proposition</h2>
+<p>Standard enterprise RAG systems frequently suffer from <strong>context eviction</strong>, <strong>recall starvation</strong>, and <strong>process memory leaks</strong> due to post-retrieval authorization filtering.</p>
+<p>This project delivers an enterprise-grade, end-to-end reference implementation demonstrating:</p>
+<ol>
+<li><strong>Zero-Trust In-Database RBAC</strong>: Filtering rows directly in the PostgreSQL kernel (<code>allowed_roles ?| $user_roles</code>) prior to vector similarity scoring, ensuring unauthorized data never crosses into application memory or LLM contexts.</li>
+<li><strong>Sub-Millisecond Vector Search</strong>: Combining <code>pgvector</code> HNSW indexing with GIN JSONB path indexes over dense 1536-dimensional embeddings.</li>
+<li><strong>Stateless Google OAuth 2.0 PKCE</strong>: A zero-memory HMAC-SHA256 signed state mechanism that survives browser redirects and server restarts.</li>
+<li><strong>Governed FastMCP Gateway</strong>: Identity-aware Model Context Protocol tools for external AI agents (e.g. Cursor, Claude Desktop).</li>
+<li><strong>Autonomous Self-Healing SDLC Agent</strong>: A LangGraph state machine with deterministic AST security inspection and closed-loop test error repair.</li>
+</ol>
+<hr>
+<h2 id="2-end-to-end-system-architecture">2. End-to-End System Architecture</h2>
+<pre class="mermaid" style="all: unset;">flowchart TB
+    subgraph Client ["Client &amp; Consumer Layer"]
+        browser["User Browser / Streamlit UI&lt;br/&gt;(localhost:8501)"]
+        mcp_client["AI Agent / FastMCP Client"]
+    end
+
+    subgraph Identity ["Cryptographic Security &amp; Identity"]
+        google["Google Accounts (OAuth 2.0 PKCE)&lt;br/&gt;accounts.google.com"]
+        jwks["Google Public JWKS (RS256)&lt;br/&gt;certs with leeway=60s"]
+        firebase["Firebase Identity Platform&lt;br/&gt;Custom Claims: app_roles"]
+    end
+
+    subgraph Microservice ["FastAPI Zero-Trust Core (app/)"]
+        api["API Gateway (POST /api/v1/query)&lt;br/&gt;Dependency: get_current_user"]
+        embed["Embedding Engine&lt;br/&gt;text-embedding-3-large (1536-d)"]
+        pool["Loop-Aware asyncpg Pool"]
+    end
+
+    subgraph Data ["Data Layer (PostgreSQL 16)"]
+        db[("enterprise_documents&lt;br/&gt;• GIN: allowed_roles jsonb_path_ops&lt;br/&gt;• HNSW: embedding vector_cosine_ops")]
+    end
+
+    subgraph SDLC ["Autonomous SDLC Agent (agent/)"]
+        langgraph["LangGraph State Machine&lt;br/&gt;propose ➔ apply ➔ audit ➔ test ➔ repair"]
+        guardrails["PolicyEngine&lt;br/&gt;Deterministic AST + Secret Scanner"]
+    end
+
+    browser --&gt;|1. PKCE Auth Code| google
+    google --&gt;|2. RS256 ID Token| browser
+    browser --&gt;|3. Bearer Token Query| api
+    api --&gt;|4. Verify Signature &amp; Leeway| jwks
+    api --&gt;|5. Extract Roles / Claims| firebase
+    api --&gt;|6. Generate Embedding| embed
+    api --&gt;|7. In-Database RBAC SQL| pool
+    pool --&gt;|8. Cosine Distance + JSONB Filter| db
+    db --&gt;|9. Authorized Top-K Only| api
+    api --&gt;|10. Grounded Response + Citations| browser
+
+    mcp_client --&gt;|Governed Tool Call| api
+    SDLC --&gt;|Context Hydration| api
+
+    style db fill:#f9f,stroke:#333,stroke-width:2px
+    style Identity fill:#dfd,stroke:#333,stroke-width:2px
+    style Microservice fill:#f0f8ff,stroke:#007acc,stroke-dasharray: 5 5
+    style SDLC fill:#fff9c4,stroke:#fbc02d,stroke-width:2px</pre>
+<hr>
+<h2 id="3-architectural-philosophy-standard-rag-vs-zero-trust-in-database-rbac">3. Architectural Philosophy: Standard RAG vs. Zero-Trust In-Database RBAC</h2>
+<h3 id="the-flaw-in-post-filtering-rag">The Flaw in Post-Filtering RAG</h3>
+<p>In traditional RAG systems, access control is applied <strong>after</strong> vector retrieval:</p>
+<pre><code class="language-text">[User Query] ──► [Vector DB: Retrieve Top-K] ──► [Python App Filters by Role] ──► [LLM Context]
+                                                        │
+                                                        └─► Context Eviction &amp; Leakage
+</code></pre>
+<p>This design introduces two critical vulnerabilities:</p>
+<ol>
+<li><strong>Context Eviction / Recall Starvation</strong>: If an unauthorized user queries for financial documents, and the top-<span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>K</mi></mrow><annotation encoding="application/x-tex">K</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.6833em;"></span><span class="mord mathnormal" style="margin-right:0.07153em;">K</span></span></span></span> most semantically relevant documents belong to restricted executive tiers, application-level filtering removes all <span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>K</mi></mrow><annotation encoding="application/x-tex">K</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.6833em;"></span><span class="mord mathnormal" style="margin-right:0.07153em;">K</span></span></span></span> documents. The user receives 0 results, even if relevant tier-appropriate documents existed at rank <span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>K</mi><mo>+</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">K+1</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.7667em;vertical-align:-0.0833em;"></span><span class="mord mathnormal" style="margin-right:0.07153em;">K</span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right:0.2222em;"></span></span><span class="base"><span class="strut" style="height:0.6444em;"></span><span class="mord">1</span></span></span></span> through <span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>2</mn><mi>K</mi></mrow><annotation encoding="application/x-tex">2K</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.6833em;"></span><span class="mord">2</span><span class="mord mathnormal" style="margin-right:0.07153em;">K</span></span></span></span>.</li>
+<li><strong>Process Memory Leaks &amp; Prompt Injection</strong>: Sensitive documents are retrieved into application heap memory before filtering. Unredacted text enters heap caches, logs, and process memory, leaving confidential data exposed to prompt injection or crash dump leaks.</li>
+</ol>
+<h3 id="the-zero-trust-guarantee">The Zero-Trust Guarantee</h3>
+<p>In this architecture, role-based access control is evaluated <strong>directly inside the database engine</strong>:</p>
+<pre><code class="language-text">[User Query] ──► [Verified JWT] ──► [Extract Roles] ──► [PostgreSQL Engine] ──► [LLM Context]
+                                                               │
+                                  ┌────────────────────────────┴───────────────────────────┐
+                                  │ WHERE allowed_roles ?| $user_roles (GIN Index Filter) │
+                                  │ ORDER BY embedding &lt;=&gt; $query_vec  (HNSW Index Scan)  │
+                                  └────────────────────────────────────────────────────────┘
+</code></pre>
+<ul>
+<li>Unauthorized documents are <strong>never read from disk into the database buffer cache</strong>, <strong>never transmitted across the network TLS socket</strong>, and <strong>never loaded into Python heap memory</strong>.</li>
+<li>The pgvector HNSW index ranks <em>only</em> the documents that the user is cryptographically authorized to see.</li>
+</ul>
+<hr>
+<h2 id="4-consolidated-codebase-structure">4. Consolidated Codebase Structure</h2>
+<pre><code class="language-text">enterprise-rag-pgvector-rbac/
+├── app/                        # 🛡️ Core Zero-Trust RAG Microservice
+│   ├── __init__.py
+│   ├── main.py                 # Primary FastAPI entry point (/api/v1/query, /health)
+│   ├── auth/                   # Consolidated Auth (PKCE, Google JWKS, Role Mapper)
+│   │   ├── jwks.py             # RS256 JWKS verification with leeway=60s
+│   │   ├── pkce.py             # PKCE RFC 7636 + stateless HMAC signed state
+│   │   └── role_mapper.py      # Firebase claims &amp; email fallback role mapping
+│   ├── db/                     # Consolidated Database &amp; AI Services
+│   │   ├── manager.py          # asyncpg connection pool + Zero-Trust RBAC SQL search
+│   │   └── llm.py              # OpenAI text-embedding-3-large &amp; completions + local mock
+│   └── mcp.py                  # FastMCP Gateway with Google OAuth auth_token
+│
+├── agent/                      # 🤖 Autonomous SDLC Agent (Isolated from Core RAG)
+│   ├── __init__.py
+│   ├── workflow.py             # LangGraph state machine (patch, audit, test, PR)
+│   ├── guardrails.py           # Deterministic AST &amp; secret security inspection
+│   └── parser.py               # GitHub webhook parser &amp; HMAC-SHA256 signature verifier
+│
+├── scripts/                    # 🛠️ Administrative &amp; Operational Tooling
+│   └── set_user_roles.py       # Firebase custom claims CLI management script
+│
+├── tests/                      # 🧪 Consolidated 100% Passing Test Suite (37 tests)
+│   ├── test_rag.py             # FastAPI endpoints &amp; Zero-Trust RBAC tests
+│   ├── test_auth.py            # PKCE &amp; Google JWKS token tests
+│   ├── test_mcp_auth.py        # FastMCP OAuth auth_token verification tests
+│   └── test_agent.py           # SDLC LangGraph workflow &amp; guardrails tests
+│
+├── streamlit_app.py            # 🖥️ Interactive Demo UI (PKCE Sign-In + Live Search)
+├── main.py                     # Root entry point -&gt; runs app.main:app
+├── docker-compose.yml          # PostgreSQL + pgvector container
+├── requirements.txt            # Pinned production dependencies
+├── schema.sql                  # Database schema + seed document embeddings
+└── project_technical_guide.md  # Deep-dive architecture and troubleshooting manual
+</code></pre>
+<hr>
+<h2 id="5-layer-1-database--pgvector-indexing-schemasql--appdb">5. Layer 1: Database &amp; pgvector Indexing (<code>schema.sql</code> &amp; <code>app/db/</code>)</h2>
+<h3 id="schema--indexing-schemasql">Schema &amp; Indexing (<code>schema.sql</code>)</h3>
+<pre><code class="language-sql"><span class="hljs-keyword">CREATE</span> EXTENSION IF <span class="hljs-keyword">NOT</span> <span class="hljs-keyword">EXISTS</span> vector;
+
+<span class="hljs-keyword">CREATE</span> <span class="hljs-keyword">TABLE</span> IF <span class="hljs-keyword">NOT</span> <span class="hljs-keyword">EXISTS</span> enterprise_documents (
+    document_id <span class="hljs-type">VARCHAR</span>(<span class="hljs-number">64</span>) <span class="hljs-keyword">PRIMARY</span> KEY,
+    title <span class="hljs-type">VARCHAR</span>(<span class="hljs-number">255</span>) <span class="hljs-keyword">NOT</span> <span class="hljs-keyword">NULL</span>,
+    content TEXT <span class="hljs-keyword">NOT</span> <span class="hljs-keyword">NULL</span>,
+    allowed_roles JSONB <span class="hljs-keyword">NOT</span> <span class="hljs-keyword">NULL</span>,
+    embedding vector(<span class="hljs-number">1536</span>),
+    embedding_model <span class="hljs-type">VARCHAR</span>(<span class="hljs-number">64</span>) <span class="hljs-keyword">DEFAULT</span> <span class="hljs-string">&#x27;text-embedding-3-large&#x27;</span>,
+    created_at <span class="hljs-type">TIMESTAMP</span> <span class="hljs-keyword">WITH</span> <span class="hljs-type">TIME</span> ZONE <span class="hljs-keyword">DEFAULT</span> <span class="hljs-built_in">CURRENT_TIMESTAMP</span>,
+    updated_at <span class="hljs-type">TIMESTAMP</span> <span class="hljs-keyword">WITH</span> <span class="hljs-type">TIME</span> ZONE <span class="hljs-keyword">DEFAULT</span> <span class="hljs-built_in">CURRENT_TIMESTAMP</span>
+);
+
+<span class="hljs-comment">-- 1. HNSW Index for sub-millisecond approximate nearest neighbor search</span>
+<span class="hljs-keyword">CREATE</span> INDEX IF <span class="hljs-keyword">NOT</span> <span class="hljs-keyword">EXISTS</span> idx_enterprise_documents_embedding_hnsw 
+<span class="hljs-keyword">ON</span> enterprise_documents 
+<span class="hljs-keyword">USING</span> hnsw (embedding vector_cosine_ops)
+<span class="hljs-keyword">WITH</span> (m <span class="hljs-operator">=</span> <span class="hljs-number">16</span>, ef_construction <span class="hljs-operator">=</span> <span class="hljs-number">64</span>);
+
+<span class="hljs-comment">-- 2. GIN Index for constant-time JSONB role membership checks</span>
+<span class="hljs-keyword">CREATE</span> INDEX IF <span class="hljs-keyword">NOT</span> <span class="hljs-keyword">EXISTS</span> idx_enterprise_documents_roles_gin 
+<span class="hljs-keyword">ON</span> enterprise_documents 
+<span class="hljs-keyword">USING</span> gin (allowed_roles jsonb_path_ops);
+</code></pre>
+<h3 id="the-in-database-rbac-sql-query-appdbmanagerpy">The In-Database RBAC SQL Query (<code>app/db/manager.py</code>)</h3>
+<pre><code class="language-sql"><span class="hljs-keyword">SELECT</span> document_id, title, content, allowed_roles, 
+       <span class="hljs-number">1</span> <span class="hljs-operator">-</span> (embedding <span class="hljs-operator">&lt;=&gt;</span> $<span class="hljs-number">1</span>::vector) <span class="hljs-keyword">AS</span> similarity
+<span class="hljs-keyword">FROM</span> enterprise_documents
+<span class="hljs-keyword">WHERE</span> allowed_roles ?<span class="hljs-operator">|</span> $<span class="hljs-number">2</span>::text[]
+  <span class="hljs-keyword">AND</span> (embedding_model <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;text-embedding-3-large&#x27;</span> <span class="hljs-keyword">OR</span> embedding_model <span class="hljs-keyword">IS</span> <span class="hljs-keyword">NULL</span>)
+<span class="hljs-keyword">ORDER</span> <span class="hljs-keyword">BY</span> embedding <span class="hljs-operator">&lt;=&gt;</span> $<span class="hljs-number">1</span>::vector
+LIMIT $<span class="hljs-number">3</span>;
+</code></pre>
+<h4 id="sql-operator-semantics">SQL Operator Semantics:</h4>
+<ul>
+<li><strong><code>?|</code> (JSONB &quot;Exists Any&quot; Operator)</strong>: Evaluates a JSONB array on the left against a text array on the right (<code>$2::text[]</code>). Returns <code>TRUE</code> if <strong>any</strong> role matches <strong>any</strong> allowed role.</li>
+<li><strong><code>&lt;=&gt;</code> (Vector Cosine Distance)</strong>: Calculates <span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>1</mn><mo>−</mo><mi>cos</mi><mo>⁡</mo><mo stretchy="false">(</mo><mi>θ</mi><mo stretchy="false">)</mo></mrow><annotation encoding="application/x-tex">1 - \cos(\theta)</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.7278em;vertical-align:-0.0833em;"></span><span class="mord">1</span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right:0.2222em;"></span></span><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span><span class="mop">cos</span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right:0.02778em;">θ</span><span class="mclose">)</span></span></span></span> between the document embedding and query vector <code>$1</code>.</li>
+<li><strong><code>1 - (embedding &lt;=&gt; $1::vector)</code></strong>: Inverts distance into a normalized similarity score <span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false">[</mo><mn>0.0</mn><mo separator="true">,</mo><mn>1.0</mn><mo stretchy="false">]</mo></mrow><annotation encoding="application/x-tex">[0.0, 1.0]</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span><span class="mopen">[</span><span class="mord">0.0</span><span class="mpunct">,</span><span class="mspace" style="margin-right:0.1667em;"></span><span class="mord">1.0</span><span class="mclose">]</span></span></span></span>.</li>
+</ul>
+<h3 id="loop-aware-connection-pooling">Loop-Aware Connection Pooling</h3>
+<p><code>asyncpg</code> connection pools are bound to the specific <code>asyncio</code> event loop active at creation time. While FastAPI runs on a single persistent loop, Streamlit creates and tears down a new event loop on every interaction. <code>DatabaseManager.get_pool()</code> detects loop changes or closed loops, safely recycling the pool to prevent <code>RuntimeError: Event loop is closed</code>.</p>
+<hr>
+<h2 id="6-layer-2-identity--cryptographic-security-appauth">6. Layer 2: Identity &amp; Cryptographic Security (<code>app/auth/</code>)</h2>
+<h3 id="61-rfc-7636-oauth-20-pkce-flow">6.1 RFC 7636 OAuth 2.0 PKCE Flow</h3>
+<pre class="mermaid" style="all: unset;">sequenceDiagram
+    autonumber
+    actor User as User Browser / Streamlit
+    participant Google as accounts.google.com
+    participant API as FastAPI Gateway (app/main.py)
+    participant JWKS as Google Public JWKS
+
+    User-&gt;&gt;User: generate_code_verifier() &amp; derive_code_challenge()
+    User-&gt;&gt;User: encode_pkce_state(verifier) [HMAC-SHA256 Signed]
+    User-&gt;&gt;Google: Redirect with code_challenge &amp; signed state
+    Google-&gt;&gt;User: Renders Consent Screen
+    User-&gt;&gt;Google: Approves Login
+    Google-&gt;&gt;User: Redirects to localhost:8501/?code=XXX&amp;state=YYY
+    User-&gt;&gt;User: decode_pkce_state(state) -&gt; verifies HMAC &amp; extracts verifier
+    User-&gt;&gt;Google: POST /token (code, verifier, client_id, client_secret)
+    Google-&gt;&gt;User: Returns {id_token, access_token}
+    User-&gt;&gt;API: Calls /api/v1/query with Bearer &lt;id_token&gt;
+    API-&gt;&gt;JWKS: Fetches Google Public Certs (RS256)
+    API-&gt;&gt;API: Validates signature, audience, exp, leeway=60s
+    API-&gt;&gt;API: extract_roles(payload) -&gt; ['finance_executive', ...]</pre>
+<h3 id="62-stateless-hmac-signed-oauth-state">6.2 Stateless HMAC-Signed OAuth State</h3>
+<p>Traditional OAuth implementations store <code>state -&gt; code_verifier</code> in memory or in a server session. In Streamlit or serverless architectures, navigating the browser away to Google wipes the in-memory session, causing <code>&quot;OAuth state mismatch — possible CSRF&quot;</code>.</p>
+<p><strong>Our Solution</strong>: Stateless Signed OAuth State (<code>app/auth/pkce.py</code>):</p>
+<pre><code class="language-python"><span class="hljs-keyword">def</span> <span class="hljs-title function_">encode_pkce_state</span>(<span class="hljs-params">code_verifier: <span class="hljs-built_in">str</span>, nonce: <span class="hljs-type">Optional</span>[<span class="hljs-built_in">str</span>] = <span class="hljs-literal">None</span></span>) -&gt; <span class="hljs-built_in">str</span>:
+    payload = {<span class="hljs-string">&quot;v&quot;</span>: code_verifier, <span class="hljs-string">&quot;t&quot;</span>: <span class="hljs-built_in">int</span>(time.time()), <span class="hljs-string">&quot;n&quot;</span>: nonce <span class="hljs-keyword">or</span> secrets.token_hex(<span class="hljs-number">8</span>)}
+    b64_data = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(<span class="hljs-string">b&quot;=&quot;</span>).decode()
+    sig = hmac.new(_get_hmac_secret(), b64_data.encode(), hashlib.sha256).hexdigest()
+    <span class="hljs-keyword">return</span> <span class="hljs-string">f&quot;<span class="hljs-subst">{b64_data}</span>.<span class="hljs-subst">{sig}</span>&quot;</span>
+</code></pre>
+<ul>
+<li>Embedded verifier and timestamp signed with HMAC-SHA256.</li>
+<li>Validated on callback with constant-time <code>hmac.compare_digest()</code> and a 5-minute TTL.</li>
+<li>Zero memory footprint; immune to reloads, server restarts, and multi-worker scale-outs.</li>
+</ul>
+<h3 id="63-google-public-jwks-verification--clock-skew-leeway">6.3 Google Public JWKS Verification &amp; Clock Skew Leeway</h3>
+<p>Google ID tokens are signed with RS256. <code>app/auth/jwks.py</code> uses <code>PyJWKClient</code> to dynamically fetch and cache public signing keys from <code>https://www.googleapis.com/oauth2/v3/certs</code>. A configured <code>leeway=60</code> absorbs minor NTP clock drift between client machines and Google Cloud servers, eliminating <code>ImmatureSignatureError: The token is not yet valid (iat)</code>.</p>
+<h3 id="64-role-storage-in-tokens--resolution-pipeline">6.4 Role Storage in Tokens &amp; Resolution Pipeline</h3>
+<pre class="mermaid" style="all: unset;">flowchart TD
+    Req[Incoming Request] --&gt; AuthMode{REQUIRE_GOOGLE_AUTH?}
+    
+    AuthMode --&gt;|true: Enforced| A[Incoming Bearer ID Token]
+    A --&gt; B[Verify RS256 Signature via JWKS]
+    B --&gt; C{"Does payload contain 'app_roles'?"}
+    C --&gt;|Yes: Custom Claim| D["Use payload['app_roles'] directly"]
+    C --&gt;|No: Standard Token| E["Lookup user custom claims via Firebase Admin SDK"]
+    E --&gt; F{"Firebase claims found?"}
+    F --&gt;|Yes: app_roles found| G["Use Firebase Admin claims"]
+    F --&gt;|No claims| H["Match env vars: ROLE_MAP_role = email"]
+    H --&gt; I[Assign matched roles from env]
+    
+    AuthMode --&gt;|false: Dev Fallback| J{"X-User-Roles header present?"}
+    J --&gt;|Yes| K[Parse roles from header]
+    J --&gt;|No| L[Default empty roles]
+    
+    D --&gt; UserIdentity[Construct Authenticated UserIdentity]
+    G --&gt; UserIdentity
+    I --&gt; UserIdentity
+    K --&gt; UserIdentity
+    L --&gt; UserIdentity</pre>
+<ol>
+<li><strong>Primary: Custom JWT Claim (<code>payload[&quot;app_roles&quot;]</code>)</strong>: Embedded by Firebase / GCIP.</li>
+<li><strong>Secondary: Firebase Admin SDK Live Lookup (<code>_get_firebase_claims_by_email</code>)</strong>: For standard Google OAuth tokens, queries Firebase Auth for user custom claims by email.</li>
+<li><strong>Tertiary: Server-Side Email Fallback (<code>ROLE_MAP_&lt;ROLE&gt;</code>)</strong>: Matches email against server configuration in <code>.env</code>.</li>
+<li><strong>Quaternary: Offline Dev Fallback (<code>X-User-Roles</code>)</strong>: Enabled strictly when <code>REQUIRE_GOOGLE_AUTH=false</code>.</li>
+</ol>
+<h3 id="65-enterprise-custom-role-provisioning">6.5 Enterprise Custom Role Provisioning</h3>
+<p>Custom user claims are assigned via the provided CLI tool:</p>
+<pre><code class="language-powershell">python scripts/set_user_roles.py <span class="hljs-literal">--email</span> user@example.com <span class="hljs-literal">--roles</span> engineer finance_executive
+</code></pre>
+<p><em>(See <a href="project_technical_guide.html#46-implementation-guide-static-role-provisioning-via-admin-sdk"><code>project_technical_guide.md</code></a> for GCIP <code>beforeSignIn</code> blocking Cloud Functions and token refresh lifecycle).</em></p>
+<hr>
+<h2 id="7-layer-3-api--interactive-frontend-appmainpy--streamlit_apppy">7. Layer 3: API &amp; Interactive Frontend (<code>app/main.py</code> &amp; <code>streamlit_app.py</code>)</h2>
+<ul>
+<li><strong>FastAPI Dependency Injection (<code>get_current_user</code>)</strong>: Secures <code>/api/v1/query</code>. Unauthenticated callers receive HTTP 401 when <code>REQUIRE_GOOGLE_AUTH=true</code>.</li>
+<li><strong>Streamlit Demo UI (<code>streamlit_app.py</code>)</strong>:
+<ul>
+<li>Implements an iframe breakout button (<code>target=&quot;_top&quot;</code>) for reliable Google consent screen redirection.</li>
+<li>Features a <strong>Live RBAC SQL Inspector</strong> displaying decoded JWT claims, generated embeddings, and executed SQL query telemetry in real time.</li>
+<li>Includes a sidebar token copy box for direct testing in Swagger UI (<code>/docs</code>).</li>
+</ul>
+</li>
+</ul>
+<hr>
+<h2 id="8-layer-4-model-context-protocol-gateway-appmcppy">8. Layer 4: Model Context Protocol Gateway (<code>app/mcp.py</code>)</h2>
+<p>Exposes Zero-Trust RAG retrieval to AI agents via FastMCP:</p>
+<pre><code class="language-python"><span class="hljs-meta">@mcp.tool()</span>
+<span class="hljs-keyword">async</span> <span class="hljs-keyword">def</span> <span class="hljs-title function_">search_sdlc_context</span>(<span class="hljs-params">
+    question: <span class="hljs-built_in">str</span>,
+    auth_token: <span class="hljs-type">Optional</span>[<span class="hljs-built_in">str</span>] = <span class="hljs-literal">None</span>,
+    user_roles: <span class="hljs-type">Optional</span>[<span class="hljs-built_in">list</span>[<span class="hljs-built_in">str</span>]] = <span class="hljs-literal">None</span>,
+</span>) -&gt; <span class="hljs-built_in">str</span>:
+</code></pre>
+<p>External agents supply their Google ID token as <code>auth_token</code>, ensuring identical in-database RBAC enforcement across both human and agentic interfaces.</p>
+<hr>
+<h2 id="9-layer-5-autonomous-sdlc-agent-agent">9. Layer 5: Autonomous SDLC Agent (<code>agent/</code>)</h2>
+<pre class="mermaid" style="all: unset;">stateDiagram-v2
+    [*] --&gt; initialize : GitHub Issue Webhook
+    initialize --&gt; propose_patches : Feature Branch Created
+    propose_patches --&gt; apply_patches : Sandbox Path Defense
+    apply_patches --&gt; audit_patches : AST &amp; Secret Gate
+    
+    audit_patches --&gt; run_tests : Security Gate PASSED
+    audit_patches --&gt; [*] : Security Gate FAILED (Reject)
+    
+    run_tests --&gt; finalize : pytest PASSED
+    run_tests --&gt; repair_patches : pytest FAILED (Self-Correction)
+    run_tests --&gt; [*] : Max Retries Exceeded
+    
+    repair_patches --&gt; apply_patches
+    finalize --&gt; [*] : Git Commit &amp; GitHub PR Opened</pre>
+<ul>
+<li><strong>LangGraph State Machine (<code>agent/workflow.py</code>)</strong>: Coordinates automated development cycles with automated patch proposing, applying, auditing, testing, and self-healing.</li>
+<li><strong>Deterministic Guardrails (<code>agent/guardrails.py</code>)</strong>:
+<ul>
+<li><strong>AST Syntax Inspection</strong>: Uses Python <code>ast.walk</code> to block execution sinks (<code>eval()</code>, <code>exec()</code>, <code>__import__()</code>).</li>
+<li><strong>Secret Scrubbing</strong>: Regex filters detect exposed API keys, private keys, and cloud credentials before test execution.</li>
+</ul>
+</li>
+<li><strong>Closed-Loop Self-Healing</strong>: Captures <code>pytest</code> stderr and tracebacks to prompt the LLM for automated patch self-correction (configurable retry limit).</li>
+</ul>
+<hr>
+<h2 id="10-troubleshooting--solved-engineering-challenges">10. Troubleshooting &amp; Solved Engineering Challenges</h2>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Issue Encountered</th>
+<th style="text-align:left">Root Cause</th>
+<th style="text-align:left">Engineering Solution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><strong><code>403 Identity Toolkit disabled</code></strong></td>
+<td style="text-align:left">API not enabled in GCP project.</td>
+<td style="text-align:left">Enabled via <code>gcloud services enable identitytoolkit.googleapis.com</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong><code>OAuth state mismatch / CSRF</code></strong></td>
+<td style="text-align:left">Streamlit wipes memory on browser redirect.</td>
+<td style="text-align:left">Implemented <strong>Stateless HMAC-SHA256 Signed State</strong> with TTL.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Redirect stuck on Google login</strong></td>
+<td style="text-align:left">Browser trapped in iframe sandbox.</td>
+<td style="text-align:left">Renders direct HTML <code>&lt;a&gt;</code> tag with <code>target=&quot;_top&quot;</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong><code>The token is not yet valid (iat)</code></strong></td>
+<td style="text-align:left">Clock skew between local host and Google servers.</td>
+<td style="text-align:left">Added <code>leeway=60</code> to <code>jwt.decode()</code> per RFC 7519.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong><code>client_secret is missing</code></strong></td>
+<td style="text-align:left">Google OAuth client registered as Web App.</td>
+<td style="text-align:left">Supplied <code>GOOGLE_CLIENT_SECRET</code> at <code>/token</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong><code>RuntimeError: Event loop closed</code></strong></td>
+<td style="text-align:left"><code>asyncpg</code> pool tied to dead event loop in Streamlit.</td>
+<td style="text-align:left">Implemented loop-aware pool recycler in <code>DatabaseManager</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>FastMCP server import failure</strong></td>
+<td style="text-align:left">Pinned <code>mcp~=1.28.1</code> lacked <code>request_state</code>.</td>
+<td style="text-align:left">Upgraded virtual environment to <code>mcp&gt;=2.2.0</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Mermaid Syntax Tokenizer Error</strong></td>
+<td style="text-align:left">Raw <code>&lt;ROLE&gt;</code> tags parsed as unclosed HTML.</td>
+<td style="text-align:left">Sanitized labels to <code>ROLE_MAP_role</code> and quoted node text.</td>
+</tr>
+</tbody>
+</table>
+<p><em>(For full troubleshooting logs and details, refer to <a href="project_technical_guide.html#8-troubleshooting--solved-engineering-challenges"><code>project_technical_guide.md</code></a>).</em></p>
+<hr>
+<h2 id="11-environment-configuration-reference-env">11. Environment Configuration Reference (<code>.env</code>)</h2>
+<pre><code class="language-env"># ── AI Models ─────────────────────────────────────────────────────────────
+OPENAI_API_KEY=sk-proj-...
+
+# ── PostgreSQL + pgvector ────────────────────────────────────────────────
+DATABASE_URL=postgresql://rag_user:rag_password@localhost:5432/enterprise_rag
+
+# ── Google Cloud OAuth 2.0 PKCE ───────────────────────────────────────────
+GOOGLE_CLIENT_ID=226714713434-67bati2e5sj8kmqg0g8vuhu0jd82eek8.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=GOCSPX-...
+GOOGLE_REDIRECT_URI=http://localhost:8501/
+REQUIRE_GOOGLE_AUTH=true
+
+# ── Firebase Admin SDK (Custom Claims) ───────────────────────────────────
+FIREBASE_SERVICE_ACCOUNT_PATH=service_account.json
+FIREBASE_PROJECT_ID=226714713434
+
+# ── Role Mapping (Fallback for Standard Google ID tokens) ─────────────────
+ROLE_MAP_engineer=kenono2000@gmail.com
+ROLE_MAP_finance_executive=kenono2000@gmail.com
+ROLE_MAP_hr_manager=kenono2000@gmail.com
+
+# ── GitHub &amp; Autonomous SDLC Agent ───────────────────────────────────────
+GITHUB_TOKEN=github_pat_...
+SDLC_SANDBOX_ROOT=.
+SDLC_TEST_COMMAND=python -m pytest -q
+SDLC_PUSH=false
+</code></pre>
+<hr>
+<h2 id="12-application-execution--verification-guide">12. Application Execution &amp; Verification Guide</h2>
+<h3 id="1-setup-virtual-environment">1. Setup Virtual Environment</h3>
+<pre><code class="language-powershell">python <span class="hljs-literal">-m</span> venv .venv
+.\.venv\Scripts\Activate.ps1
+python <span class="hljs-literal">-m</span> pip install <span class="hljs-literal">-r</span> requirements.txt
+</code></pre>
+<h3 id="2-start-postgresql-with-pgvector">2. Start PostgreSQL with pgvector</h3>
+<pre><code class="language-powershell">docker compose up <span class="hljs-literal">-d</span> postgres
+</code></pre>
+<h3 id="3-run-automated-tests-3737-passing">3. Run Automated Tests (37/37 Passing)</h3>
+<pre><code class="language-powershell">python <span class="hljs-literal">-m</span> pytest <span class="hljs-literal">-v</span>
+</code></pre>
+<h3 id="4-start-the-fastapi-microservice">4. Start the FastAPI Microservice</h3>
+<pre><code class="language-powershell">python <span class="hljs-literal">-m</span> uvicorn app.main:app <span class="hljs-literal">--host</span> <span class="hljs-number">0.0</span>.<span class="hljs-number">0.0</span> <span class="hljs-literal">--port</span> <span class="hljs-number">8000</span> <span class="hljs-literal">--reload</span>
+</code></pre>
+<ul>
+<li>Interactive Swagger UI: <strong><code>http://localhost:8000/docs</code></strong></li>
+<li>Health Probe: <strong><code>http://localhost:8000/health</code></strong></li>
+</ul>
+<h3 id="5-launch-the-streamlit-interactive-ui">5. Launch the Streamlit Interactive UI</h3>
+<pre><code class="language-powershell">python <span class="hljs-literal">-m</span> streamlit run streamlit_app.py <span class="hljs-literal">--server</span>.port <span class="hljs-number">8501</span>
+</code></pre>
+<ul>
+<li>Access in Browser: <strong><code>http://localhost:8501</code></strong></li>
+</ul>
+<h3 id="6-run-the-fastmcp-gateway">6. Run the FastMCP Gateway</h3>
+<pre><code class="language-powershell">python <span class="hljs-literal">-m</span> app.mcp
+</code></pre>
+<hr>
+<h2 id="13-key-engineering-takeaways">13. Key Engineering Takeaways</h2>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Architecture Pattern</th>
+<th style="text-align:left">Implementation in Project</th>
+<th style="text-align:left">Enterprise Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><strong>In-Database RBAC</strong></td>
+<td style="text-align:left">`allowed_roles ?</td>
+<td style="text-align:left">$2::text[]`</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Vector Indexing</strong></td>
+<td style="text-align:left"><code>pgvector</code> HNSW (<code>m=16, ef=64</code>)</td>
+<td style="text-align:left">Sub-millisecond similarity queries over 1536-dimensional embeddings.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Stateless OAuth State</strong></td>
+<td style="text-align:left">HMAC-SHA256 signed <code>state</code></td>
+<td style="text-align:left">Eliminates server-side session stores; immune to browser redirects &amp; restarts.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Clock Skew Leeway</strong></td>
+<td style="text-align:left">PyJWT <code>leeway=60</code></td>
+<td style="text-align:left">Absorbs minor NTP drift between local systems and Google Cloud auth servers.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Loop-Aware asyncpg</strong></td>
+<td style="text-align:left">Auto pool recycle on loop close</td>
+<td style="text-align:left">Solves event loop destruction errors across Streamlit reruns.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>AST Code Guardrails</strong></td>
+<td style="text-align:left">Python <code>ast.walk</code> visitor</td>
+<td style="text-align:left">Blocks dynamic execution sinks (<code>eval</code>, <code>exec</code>) before code execution.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Self-Correction Loops</strong></td>
+<td style="text-align:left">LangGraph conditional edges</td>
+<td style="text-align:left">Enables autonomous agents to heal broken code using pytest failure traces.</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<blockquote>
+<p>📖 <strong>For exhaustive technical blueprints, mathematical formulas, and step-by-step setup guides, consult <a href="project_technical_guide.html"><code>project_technical_guide.md</code></a>.</strong></p>
+</blockquote>
