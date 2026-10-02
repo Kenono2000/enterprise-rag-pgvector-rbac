@@ -12,7 +12,7 @@
 3. [Layer 1: Database & pgvector RBAC (`schema.sql` & `app/db/`)](#3-layer-1-database--pgvector-rbac)
 4. [Layer 2: Identity, Tokens & Session Security (`app/auth/`)](#4-layer-2-identity-tokens--session-security)
 5. [Layer 3: FastAPI Backend & Streamlit Frontend](#5-layer-3-fastapi-backend--streamlit-frontend)
-6. [Layer 4: FastMCP Agent Gateway (`app/mcp.py`)](#6-layer-4-fastmcp-agent-gateway)
+6. [Layer 4: FastMCP Agent Gateway (`app/mcp/`)](#6-layer-4-fastmcp-agent-gateway)
 7. [Layer 5: Autonomous Self-Healing SDLC Agent (`agent/`)](#7-layer-5-autonomous-self-healing-sdlc-agent)
 8. [Testing & Verification Guide (41/41 Tests)](#8-testing--verification-guide)
 9. [Operational Cheat Sheet & Troubleshooting](#9-operational-cheat-sheet--troubleshooting)
@@ -217,7 +217,7 @@ $$\text{confidence\_score} = \frac{1}{N} \sum_{i=1}^N \text{similarity}_i = \fra
 
 ---
 
-## 6. Layer 4: FastMCP Agent Gateway (`app/mcp.py`)
+## 6. Layer 4: FastMCP Agent Gateway (`app/mcp/`)
 
 FastMCP standardizes tool and resource access for external AI coding agents (Claude Desktop, Cursor, CLI agents):
 

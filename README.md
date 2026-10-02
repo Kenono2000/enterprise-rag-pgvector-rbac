@@ -119,7 +119,7 @@ flowchart TB
   $$\text{confidence} = \frac{1}{N} \sum_{i=1}^N \left(1 - (\text{embedding}_i \Leftrightarrow \text{query\_vec})\right)$$
 * **Streamlit Shift-Left UI**: Direct `<a target="_top">` OAuth button, live RBAC SQL inspector, token copy drawer for Swagger UI, and session security monitor.
 
-### 4. FastMCP Agent Gateway (`app/mcp.py`)
+### 4. FastMCP Agent Gateway (`app/mcp/`)
 * **Standardized AI Integration**: Connects external AI agents (Cursor, Claude Desktop) via the Model Context Protocol.
 * **Governed Tools**: `search_sdlc_context` verifies Google ID tokens and applies in-database RBAC; `propose_patch` validates submitter claims.
 * **Operational Budget Policies**: `policy://sdlc-budget` serves explicit token ceilings (`50,000` tokens/issue) and step caps (`10`) to prevent infinite agentic execution loops.
