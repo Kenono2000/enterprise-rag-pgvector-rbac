@@ -206,4 +206,4 @@ tests/test_agent.py      ......                                           [100%]
 
 For comprehensive mathematical formulations, step-by-step GCIP Cloud Function code, token security threat models, and architectural deep-dives:
 
-👉 **[Read the Full Technical Guide (`project_technical_guide.md`)](project_technical_guide.md)**
+👉 **[Read the Full Technical Guide (`TECH-GUIDE.md`)](TECH-GUIDE.md)**
