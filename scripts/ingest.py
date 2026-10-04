@@ -22,6 +22,42 @@ from utilities import (
 )
 
 
+def check_document_exists(target, filename: str) -> bool:
+    """
+    Check if ingested filename already exists in enterprise_documents.document_id.
+
+    Supports database cursor, connection, or database URL connection string.
+    Checks exact filename match, chunk prefix match (e.g., filename_1),
+    and stem match (e.g., filename without extension).
+    """
+    query = """
+        SELECT 1 FROM enterprise_documents
+        WHERE document_id = %s 
+           OR document_id LIKE %s ESCAPE '\\'
+           OR document_id = %s 
+           OR document_id LIKE %s ESCAPE '\\'
+        LIMIT 1
+    """
+    stem = Path(filename).stem
+    escaped_fn = filename.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+    escaped_stem = stem.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+    params = (filename, f"{escaped_fn}_%", stem, f"{escaped_stem}_%")
+
+    if isinstance(target, str):
+        with get_db_connection(target) as conn, conn.cursor() as cur:
+            cur.execute(query, params)
+            return cur.fetchone() is not None
+    elif hasattr(target, "cursor"):
+        with target.cursor() as cur:
+            cur.execute(query, params)
+            return cur.fetchone() is not None
+    elif hasattr(target, "execute"):
+        target.execute(query, params)
+        return target.fetchone() is not None
+    else:
+        raise ValueError(f"Invalid target type for check_document_exists: {type(target)}")
+
+
 def ingest_data(chunks: list[Document], embeddings_model: OpenAIEmbeddings, db_url: str):
     if not chunks:
         print("No chunks to ingest.")
@@ -65,6 +101,7 @@ def ingest_data(chunks: list[Document], embeddings_model: OpenAIEmbeddings, db_u
 def main():
     parser = argparse.ArgumentParser(description="Ingest docs into pgvector.")
     parser.add_argument("paths", nargs='+', help="File or directory paths.")
+    parser.add_argument("--force", action="store_true", help="Force re-ingestion of already existing documents.")
     args = parser.parse_args()
     try:
         openai_api_key, database_url = load_config(str(PROJECT_ROOT / ".env"))
@@ -78,7 +115,8 @@ def main():
         if p.is_dir():
             file_paths.extend(str(f) for f in p.rglob("*.pdf"))
             file_paths.extend(str(f) for f in p.rglob("*.md"))
-        elif p.is_file() and p.suffix.lower() in {".pdf", ".md"}:
+            file_paths.extend(str(f) for f in p.rglob("*.docx"))
+        elif p.is_file() and p.suffix.lower() in {".pdf", ".md", ".docx"}:
             file_paths.append(str(p))
         else:
             print(f"⚠️ Skipping: {path}")
@@ -87,7 +125,28 @@ def main():
         print("No valid files found.")
         return
 
-    documents = get_documents(file_paths)
+    # Check if ingested filename already exists in enterprise_documents.document_id
+    files_to_process: list[str] = []
+    if getattr(args, "force", False):
+        files_to_process = file_paths
+    else:
+        try:
+            with get_db_connection(database_url) as conn, conn.cursor() as cur:
+                for file_path in file_paths:
+                    filename = Path(file_path).name
+                    if check_document_exists(cur, filename):
+                        print(f"⚠️ Skipping already ingested file: {filename} (exists in enterprise_documents.document_id)")
+                    else:
+                        files_to_process.append(file_path)
+        except psycopg2.Error as e:
+            print(f"⚠️ Could not verify existing documents in database ({e}). Proceeding with all files.")
+            files_to_process = file_paths
+
+    if not files_to_process:
+        print("All documents have already been ingested.")
+        return
+
+    documents = get_documents(files_to_process)
     chunks = split_chunks(documents)
     embeddings_model = get_embedding_model(openai_api_key)
     ingest_data(chunks, embeddings_model, database_url)

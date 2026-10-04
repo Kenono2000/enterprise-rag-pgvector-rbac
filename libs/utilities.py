@@ -25,7 +25,7 @@ from typing import Union
 import numpy as np
 import psycopg2
 from dotenv import load_dotenv
-from langchain_community.document_loaders import PyPDFLoader, UnstructuredMarkdownLoader
+from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, UnstructuredMarkdownLoader
 from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -84,14 +84,31 @@ def get_documents(file_paths: list[str]) -> list[Document]:
             suffix = Path(file_path).suffix.lower()
             if suffix == ".pdf":
                 loader = PyPDFLoader(file_path)
+                documents.extend(loader.load())
             elif suffix == ".md":
                 loader = UnstructuredMarkdownLoader(file_path)
+                documents.extend(loader.load())
+            elif suffix == ".docx":
+                try:
+                    loader = Docx2txtLoader(file_path)
+                    documents.extend(loader.load())
+                except (ImportError, ModuleNotFoundError):
+                    import docx
+
+                    doc = docx.Document(file_path)
+                    content_parts = [p.text for p in doc.paragraphs if p.text.strip()]
+                    for table in doc.tables:
+                        for row in table.rows:
+                            row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                            if row_text:
+                                content_parts.append(row_text)
+                    text = "\n\n".join(content_parts)
+                    documents.append(Document(page_content=text, metadata={"source": file_path}))
             else:
                 print(f"⚠️ Skipping unsupported file: {file_path}")
                 continue
-            documents.extend(loader.load())
             print(f"  [✓] Loaded {file_path}")
-        except (OSError, RuntimeError) as e:
+        except Exception as e:
             print(f"❌ Failed to load {file_path}: {e}")
     return documents
 
