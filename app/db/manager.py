@@ -71,7 +71,7 @@ class DatabaseManager:
             cls._pool = None
 
     @classmethod
-    async def secure_search(cls, query_vector: List[float], user_roles: List[str], limit: int = 3):
+    async def secure_search(cls, query_vector: List[float], user_roles: List[str], limit: int = 10):
         pool = await cls.get_pool()
         vector_str = f"[{','.join(map(str, query_vector))}]"
         

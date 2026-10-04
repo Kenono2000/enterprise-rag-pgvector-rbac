@@ -718,99 +718,106 @@ def _render_rag_interface() -> None:
         f"📋 **Active JWT Role Claims:** `{roles}`"
     )
 
-    st.subheader("2. Secure Grounded Retrieval")
-    question = st.text_input(
-        "Enter Question:",
-        value="What were the Q3 financial results and margins?",
-    )
-
-    if st.button("🚀 Execute Zero-Trust Vector Search", type="primary"):
-        if not roles:
-            st.error(
-                "⛔ Your Google account has no application roles assigned. "
-                "Ask an administrator to set `app_roles` custom claims in Firebase."
-            )
-            return
-
-        with st.status("Executing Zero-Trust Vector Search…", expanded=True) as status:
-            st.write("Generating embedding via OpenAI…")
-
-            async def perform_search():
-                await DatabaseManager.get_pool()
-                query_vector = await generate_embedding(question)
-                rows = await DatabaseManager.secure_search(query_vector, roles)
-
-                if not rows:
-                    return None
-
-                context = "\n\n".join(
-                    [f"[{r['title']}]: {r['content']}" for r in rows]
-                )
-                prompt = f"Answer strictly using context:\n\n{context}\n\nQuestion: {question}"
-                answer = await chat_completion(prompt)
-                return {
-                    "answer": answer,
-                    "rows": rows,
-                    "avg_conf": sum(float(r["similarity"]) for r in rows) / len(rows),
+    # -------------------------------------------------------------
+    # 2. Interactive Conversational Chat Interface
+    # -------------------------------------------------------------
+    st.subheader("💬 Enterprise Knowledge Chat")
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {
+                "role": "assistant",
+                "content": "👋 Hello! Ask me any questions about enterprise documentation. Access is automatically governed by your verified roles.",
+                "citations": [],
+                "sql": None,
+            }
+        ]
+    with st.sidebar:
+        if st.button("🗑️ Clear Chat History", use_container_width=True):
+            st.session_state.messages = [
+                {
+                    "role": "assistant",
+                    "content": "👋 Chat history cleared. How can I help you?",
+                    "citations": [],
+                    "sql": None,
                 }
+            ]
+            st.rerun()
 
-            result = run_async(perform_search())
+    # Render chat history
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg.get("citations"):
+                with st.expander("📚 Sources & Citations", expanded=False):
+                    for cit in msg["citations"]:
+                        st.markdown(f"- **{cit.get('title', 'Document')}** (Confidence: `{float(cit.get('similarity', 0.0)):.2f}`)")
+                        st.caption(cit.get("content", "")[:250] + "...")
+            if msg.get("sql"):
+                with st.expander("🔍 Executed RBAC Query", expanded=False):
+                    st.code(msg["sql"], language="sql")
 
-            # Show the RBAC SQL for transparency
-            roles_sql = ", ".join(f"'{r}'" for r in roles)
-            sql_query = (
-                f"SELECT * FROM enterprise_documents\n"
-                f"WHERE allowed_roles ?| ARRAY[{roles_sql}]\n"
-                f"ORDER BY embedding <=> <vector> LIMIT 3"
-            )
-            st.code(sql_query, language="sql")
+    # Chat input
+    if prompt_input := st.chat_input("Ask a question about internal documentation..."):
+        st.session_state.messages.append({"role": "user", "content": prompt_input})
+        with st.chat_message("user"):
+            st.markdown(prompt_input)
 
-            if not result:
-                status.update(label="Access Denied", state="error", expanded=True)
-                st.error("No authorized documentation found matching your security credentials.")
-                st.warning(
-                    f"🛡️ **Security Note:** The roles `{roles}` are not authorised "
-                    "to access any stored documents."
+        with st.chat_message("assistant"):
+            with st.status("Querying knowledge base...", expanded=True) as status:
+                async def perform_search():
+                    await DatabaseManager.get_pool()
+                    emb = await generate_embedding(prompt_input)
+                    rows = await DatabaseManager.secure_search(emb, roles, limit=3)
+                    if not rows:
+                        return None
+                    context = "\n\n".join(
+                        f"Document: {r['title']}\nContent: {r['content']}"
+                        for r in rows
+                    )
+                    prompt = f"Context:\n{context}\n\nQuestion: {prompt_input}\nAnswer:"
+                    answer = await chat_completion(prompt)
+                    return {
+                        "answer": answer,
+                        "rows": rows,
+                        "avg_conf": sum(float(r["similarity"]) for r in rows) / len(rows),
+                    }
+
+                result = run_async(perform_search())
+                roles_sql = ", ".join(f"'{r}'" for r in roles)
+                sql_query = (
+                    f"SELECT * FROM enterprise_documents\n"
+                    f"WHERE allowed_roles ?| ARRAY[{roles_sql}]\n"
+                    f"ORDER BY embedding <=> <vector> LIMIT 3"
                 )
-            else:
-                status.update(label="Authorization Verified", state="complete", expanded=True)
-                st.success("✅ Authorization Verified: Document Grounded Successfully")
+                if not result:
+                    status.update(label="Access Denied / Not Found", state="error", expanded=False)
+                    response_text = (
+                        "⚠️ No authorized documentation found matching your security credentials. "
+                        f"The roles `{roles}` are not authorized to access matching documents."
+                    )
+                    citations = []
+                else:
+                    status.update(label="Response Generated", state="complete", expanded=False)
+                    response_text = result["answer"]
+                    citations = result["rows"]
 
-                st.markdown("### Grounded Answer")
-                st.write(result["answer"])
+            st.markdown(response_text)
+            if citations:
+                with st.expander("📚 Sources & Citations", expanded=False):
+                    for row in citations:
+                        st.markdown(
+                            f"- **{row['title']}** (Confidence: `{float(row['similarity']):.2f}`)"
+                        )
+                        st.caption(row["content"][:250] + "...")
+            with st.expander("🔍 Executed RBAC Query", expanded=False):
+                st.code(sql_query, language="sql")
 
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Citations Found", len(result["rows"]))
-                with col2:
-                    st.metric("Avg Confidence", f"{result['avg_conf']:.3f}")
-                with col3:
-                    st.metric("RLS Policy", "Active", delta="Protected")
-
-                st.markdown("### 📚 Authorized Citations")
-                for doc in result["rows"]:
-                    with st.container(border=True):
-                        c1, c2 = st.columns([3, 1])
-                        with c1:
-                            st.markdown(f"**{doc['title']}**")
-                            st.caption(f"ID: `{doc['document_id']}`")
-                        with c2:
-                            st.code(f"Sim: {float(doc['similarity']):.3f}")
-                        with st.expander("View Source Snippet", expanded=True):
-                            st.text(doc["content"])
-
-                import datetime
-                with st.expander("📊 View Audit Citation & Scopes", expanded=True):
-                    st.json({
-                        "user_sub": st.session_state.get("user_sub"),
-                        "user_email": st.session_state.get("user_email"),
-                        "authorized_roles_evaluated": roles,
-                        "confidence_score": result["avg_conf"],
-                        "data_leakage_prevented": True,
-                        "auth_method": "google_oauth2_pkce",
-                        "engine": "pgvector-rls-production",
-                        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
-                    })
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": response_text,
+            "citations": citations,
+            "sql": sql_query,
+        })
 
     # Educational Architectural Deep Dive
     st.divider()
