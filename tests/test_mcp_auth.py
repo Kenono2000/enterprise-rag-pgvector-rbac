@@ -65,3 +65,35 @@ class TestMcpToolsAuth:
             auth_token="valid.token",
         )
         assert "dev@acme.com" in result
+
+
+class TestMcpRunServer:
+    @patch("app.mcp.gateway.mcp.run")
+    def test_run_server_default_stdio(self, mock_run, monkeypatch):
+        monkeypatch.delenv("MCP_TRANSPORT", raising=False)
+        from app.mcp.gateway import run_server
+        run_server(transport="stdio")
+        mock_run.assert_called_once_with(transport="stdio")
+
+    @patch("app.mcp.gateway.mcp.run")
+    def test_run_server_sse_transport(self, mock_run):
+        from app.mcp.gateway import run_server
+        run_server(transport="sse", host="0.0.0.0", port=9000)
+        mock_run.assert_called_once_with(
+            transport="sse",
+            host="0.0.0.0",
+            port=9000,
+        )
+
+    @patch("app.mcp.gateway.mcp.run")
+    def test_run_server_env_transport(self, mock_run, monkeypatch):
+        monkeypatch.setenv("MCP_TRANSPORT", "streamable-http")
+        monkeypatch.setenv("MCP_PORT", "8888")
+        from app.mcp.gateway import run_server
+        run_server()
+        mock_run.assert_called_once_with(
+            transport="streamable-http",
+            host="127.0.0.1",
+            port=8888,
+        )
+

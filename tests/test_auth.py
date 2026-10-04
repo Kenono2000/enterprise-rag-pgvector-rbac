@@ -214,3 +214,62 @@ class TestSessionCookie:
         assert decode_session_cookie("invalid_string_without_dot") is None
         assert decode_session_cookie("invalid.sig") is None
 
+
+class TestDynamicGoogleCredentials:
+    def test_get_credentials_from_secrets_dict(self, monkeypatch):
+        import sys
+        mock_st = MagicMock()
+        mock_st.secrets = {
+            "gcp_service_account": {
+                "type": "service_account",
+                "project_id": "test-project",
+                "private_key": "-----BEGIN PRIVATE KEY-----\nMOCK\n-----END PRIVATE KEY-----\n",
+                "client_email": "test@test-project.iam.gserviceaccount.com",
+            }
+        }
+        monkeypatch.setitem(sys.modules, "streamlit", mock_st)
+
+        from app.auth.role_mapper import _get_google_credentials_dict
+        creds = _get_google_credentials_dict()
+        assert creds is not None
+        assert creds["project_id"] == "test-project"
+
+    def test_get_credentials_from_json_string(self, monkeypatch):
+        import sys
+        payload = {
+            "type": "service_account",
+            "project_id": "json-project",
+            "private_key": "dummy_key",
+        }
+        mock_st = MagicMock()
+        mock_st.secrets = {"GOOGLE_CREDENTIALS_JSON": json.dumps(payload)}
+        monkeypatch.setitem(sys.modules, "streamlit", mock_st)
+
+        from app.auth.role_mapper import _get_google_credentials_dict
+        creds = _get_google_credentials_dict()
+        assert creds is not None
+        assert creds["project_id"] == "json-project"
+
+    def test_ensure_google_application_credentials_synthesizes_file(self, monkeypatch):
+        import sys, os
+        payload = {
+            "type": "service_account",
+            "project_id": "temp-file-project",
+            "private_key": "dummy_key",
+        }
+        mock_st = MagicMock()
+        mock_st.secrets = {"gcp_service_account": payload}
+        monkeypatch.setitem(sys.modules, "streamlit", mock_st)
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.delenv("FIREBASE_SERVICE_ACCOUNT_PATH", raising=False)
+
+        import app.auth.role_mapper as rm
+        rm._TEMP_CREDENTIALS_FILE = None
+        path = rm.ensure_google_application_credentials()
+        assert path is not None
+        assert os.path.exists(path)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            assert data["project_id"] == "temp-file-project"
+
+

@@ -21,9 +21,11 @@ Setup (Firebase Admin SDK — run once per user, or on sign-up):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-from typing import Any, Dict, List
+import tempfile
+from typing import Any, Dict, List, Optional
 
 import firebase_admin
 from firebase_admin import auth as fb_auth, credentials
@@ -39,14 +41,138 @@ KNOWN_ROLES = frozenset(
 )
 
 # ---------------------------------------------------------------------------
+# Dynamic Google & Firebase credentials resolver
+# ---------------------------------------------------------------------------
+
+_TEMP_CREDENTIALS_FILE: Optional[str] = None
+
+
+def _get_google_credentials_dict() -> Optional[Dict[str, Any]]:
+    """
+    Retrieve Google / Firebase service account dictionary.
+    Checks Streamlit secrets first, then environment variables.
+    """
+    # 1. Check Streamlit secrets (Streamlit Cloud deployment)
+    try:
+        import streamlit as st
+
+        # Standard dictionary sections in secrets.toml
+        for sec in ("gcp_service_account", "firebase_service_account", "google_credentials"):
+            if hasattr(st, "secrets") and sec in st.secrets:
+                return dict(st.secrets[sec])
+
+        # Raw JSON string in secrets
+        if hasattr(st, "secrets") and "GOOGLE_CREDENTIALS_JSON" in st.secrets:
+            return json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
+
+        # Flattened keys at the root of secrets
+        if hasattr(st, "secrets") and "project_id" in st.secrets and "private_key" in st.secrets:
+            return {k: st.secrets[k] for k in st.secrets}
+    except Exception:
+        pass
+
+    # 2. Check JSON string in environment variable
+    raw_env_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if raw_env_json:
+        try:
+            return json.loads(raw_env_json)
+        except Exception:
+            pass
+
+    # 3. Check individual fields present in environment (e.g. from .env file)
+    if os.getenv("project_id") and os.getenv("private_key"):
+        sa_keys = [
+            "type", "project_id", "private_key_id", "private_key",
+            "client_email", "client_id", "auth_uri", "token_uri",
+            "auth_provider_x509_cert_url", "client_x509_cert_url", "universe_domain"
+        ]
+        creds: Dict[str, Any] = {}
+        for k in sa_keys:
+            val = os.getenv(k)
+            if val is not None:
+                if k == "private_key":
+                    # Fix escaped newlines in PEM private key
+                    val = val.replace("\\n", "\n")
+                creds[k] = val
+        if "type" not in creds:
+            creds["type"] = "service_account"
+        return creds
+
+    return None
+
+
+def ensure_google_application_credentials() -> Optional[str]:
+    """
+    Ensure GOOGLE_APPLICATION_CREDENTIALS points to a valid file.
+    If running in Streamlit Cloud without a local file, synthesizes an
+    ephemeral temporary JSON file from st.secrets and sets the environment variable.
+    """
+    global _TEMP_CREDENTIALS_FILE
+
+    # 1. Existing valid file from environment variable
+    existing = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if existing and os.path.exists(existing):
+        return existing
+
+    # 2. Check local fallback candidate files
+    candidates = [
+        os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH"),
+        "service_account.json",
+        "firebase-service-account.json",
+        os.path.join(os.path.dirname(__file__), "..", "..", "service_account.json"),
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            abs_path = os.path.abspath(path)
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = abs_path
+            return abs_path
+
+    # 3. Synthesize temporary file from st.secrets / env dictionary
+    if _TEMP_CREDENTIALS_FILE and os.path.exists(_TEMP_CREDENTIALS_FILE):
+        return _TEMP_CREDENTIALS_FILE
+
+    creds_dict = _get_google_credentials_dict()
+    if creds_dict:
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+                json.dump(creds_dict, tmp)
+                _TEMP_CREDENTIALS_FILE = tmp.name
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _TEMP_CREDENTIALS_FILE
+            logger.info("Created ephemeral credentials file at %s", _TEMP_CREDENTIALS_FILE)
+            return _TEMP_CREDENTIALS_FILE
+        except Exception as exc:
+            logger.warning("Failed creating ephemeral credentials file: %s", exc)
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Firebase Admin SDK user claims helper
 # ---------------------------------------------------------------------------
 
 def _init_firebase_admin() -> bool:
-    """Initialize Firebase Admin SDK once if service credentials exist."""
+    """
+    Initialize Firebase Admin SDK once.
+    Priority:
+    1. Dynamic credentials dictionary from st.secrets (Streamlit Cloud).
+    2. Local service account JSON file (Local development).
+    3. Application Default Credentials (ADC).
+    """
     if firebase_admin._apps:
         return True
 
+    # 1. Dynamic credentials from st.secrets / env dictionary
+    creds_dict = _get_google_credentials_dict()
+    if creds_dict:
+        try:
+            cred = credentials.Certificate(creds_dict)
+            firebase_admin.initialize_app(cred)
+            logger.info("Initialized Firebase Admin SDK dynamically from secrets dictionary")
+            return True
+        except Exception as exc:
+            logger.warning("Failed initializing Firebase with credentials dictionary: %s", exc)
+
+    # 2. Fallback to local files & environment paths
     candidates = [
         os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH"),
         os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
@@ -64,8 +190,10 @@ def _init_firebase_admin() -> bool:
             except Exception as exc:
                 logger.warning("Failed initializing Firebase with %s: %s", path, exc)
 
+    # 3. Application Default Credentials (ADC)
     try:
         firebase_admin.initialize_app()
+        logger.info("Initialized Firebase Admin SDK using Application Default Credentials")
         return True
     except Exception as exc:
         logger.debug("Firebase default credentials not available: %s", exc)

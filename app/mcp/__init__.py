@@ -7,6 +7,7 @@ and operational budget policies.
 
 from app.mcp.gateway import (
     mcp,
+    run_server,
     _resolve_tool_roles,
     search_sdlc_context,
     propose_patch,
@@ -15,8 +16,10 @@ from app.mcp.gateway import (
 
 __all__ = [
     "mcp",
+    "run_server",
     "_resolve_tool_roles",
     "search_sdlc_context",
     "propose_patch",
     "get_budget_policy",
 ]
+

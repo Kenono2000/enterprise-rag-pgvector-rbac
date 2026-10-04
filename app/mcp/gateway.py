@@ -126,5 +126,64 @@ def get_budget_policy() -> str:
     })
 
 
+def run_server(
+    transport: Optional[str] = None,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+) -> None:
+    """
+    Run the FastMCP gateway with configurable transport.
+    Supports 'stdio' (default for local CLI/subprocesses), 'sse' (HTTP Server-Sent Events
+    for network clients like OAuth/Bearer), 'http', or 'streamable-http'.
+
+    Configuration priority:
+    1. Explicit parameters passed to run_server()
+    2. CLI arguments (--transport, --host, --port)
+    3. Environment variables (MCP_TRANSPORT, MCP_HOST, MCP_PORT)
+    4. Defaults: transport="stdio", host="127.0.0.1", port=8000
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="SDLC-Harness FastMCP Gateway")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "sse", "http", "streamable-http"],
+        default=os.getenv("MCP_TRANSPORT", "stdio"),
+        help="Transport protocol (stdio, sse, http, streamable-http)",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.getenv("MCP_HOST", "127.0.0.1"),
+        help="Bind host for HTTP/SSE transports (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("MCP_PORT", "8000")),
+        help="Bind port for HTTP/SSE transports (default: 8000)",
+    )
+    args, _ = parser.parse_known_args()
+
+    selected_transport = (transport or args.transport or "stdio").lower()
+    selected_host = host or args.host or "127.0.0.1"
+    selected_port = port or args.port or 8000
+
+    if selected_transport in ("sse", "http", "streamable-http"):
+        logger.info(
+            "Starting FastMCP gateway on %s://%s:%s",
+            selected_transport,
+            selected_host,
+            selected_port,
+        )
+        mcp.run(
+            transport=selected_transport,
+            host=selected_host,
+            port=selected_port,
+        )
+    else:
+        logger.info("Starting FastMCP gateway over stdio transport")
+        mcp.run(transport="stdio")
+
+
 if __name__ == "__main__":
-    mcp.run()
+    run_server()

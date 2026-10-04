@@ -15,7 +15,11 @@ from app.auth.pkce import (
     exchange_code_for_tokens_sync,
     generate_code_verifier,
 )
-from app.auth.role_mapper import KNOWN_ROLES, extract_roles
+from app.auth.role_mapper import (
+    KNOWN_ROLES,
+    extract_roles,
+    ensure_google_application_credentials,
+)
 
 __all__ = [
     "KNOWN_ROLES",
@@ -30,4 +34,5 @@ __all__ = [
     "generate_code_verifier",
     "verify_google_token",
     "extract_roles",
+    "ensure_google_application_credentials",
 ]

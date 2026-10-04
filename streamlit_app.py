@@ -52,12 +52,16 @@ from app.auth import (
     encode_session_cookie,
     exchange_code_for_tokens_sync,
     extract_roles,
+    ensure_google_application_credentials,
 )
 from app.db import DatabaseManager, generate_embedding, chat_completion
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Ensure Google credentials exist (dynamically from st.secrets with local fallback)
+ensure_google_application_credentials()
 
 # ---------------------------------------------------------------------------
 # SessionIdleManager & Cookie Configuration (SOC-2 / HIPAA Compliance)
