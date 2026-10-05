@@ -125,10 +125,10 @@ def _pkce_store_pop(state: str) -> str | None:
 
 def _secret(key: str) -> Optional[str]:
     """Read a config value from env vars or Streamlit secrets (in that order)."""
-    value = os.getenv(key)
+    value = os.getenv(key) or os.getenv(key.upper())
     if not value:
         try:
-            value = st.secrets.get(key)  # type: ignore[attr-defined]
+            value = st.secrets.get(key) or st.secrets.get(key.upper())  # type: ignore[attr-defined]
         except Exception:
             pass
     return value

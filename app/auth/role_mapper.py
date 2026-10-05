@@ -65,9 +65,26 @@ def _get_google_credentials_dict() -> Optional[Dict[str, Any]]:
         if hasattr(st, "secrets") and "GOOGLE_CREDENTIALS_JSON" in st.secrets:
             return json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
 
-        # Flattened keys at the root of secrets
-        if hasattr(st, "secrets") and "project_id" in st.secrets and "private_key" in st.secrets:
-            return {k: st.secrets[k] for k in st.secrets}
+        # Flattened keys at the root of secrets (support lowercase or uppercase)
+        if hasattr(st, "secrets"):
+            has_sec_proj = "project_id" in st.secrets or "PROJECT_ID" in st.secrets
+            has_sec_pk = "private_key" in st.secrets or "PRIVATE_KEY" in st.secrets
+            if has_sec_proj and has_sec_pk:
+                sa_keys = [
+                    "type", "project_id", "private_key_id", "private_key",
+                    "client_email", "client_id", "auth_uri", "token_uri",
+                    "auth_provider_x509_cert_url", "client_x509_cert_url", "universe_domain"
+                ]
+                creds: Dict[str, Any] = {}
+                for k in sa_keys:
+                    val = st.secrets.get(k) if k in st.secrets else st.secrets.get(k.upper())
+                    if val is not None:
+                        if k == "private_key" and isinstance(val, str):
+                            val = val.replace("\\n", "\n")
+                        creds[k] = val
+                if "type" not in creds:
+                    creds["type"] = "service_account"
+                return creds
     except Exception:
         pass
 
@@ -80,7 +97,9 @@ def _get_google_credentials_dict() -> Optional[Dict[str, Any]]:
             pass
 
     # 3. Check individual fields present in environment (e.g. from .env file)
-    if os.getenv("project_id") and os.getenv("private_key"):
+    has_project_id = os.getenv("project_id") or os.getenv("PROJECT_ID")
+    has_private_key = os.getenv("private_key") or os.getenv("PRIVATE_KEY")
+    if has_project_id and has_private_key:
         sa_keys = [
             "type", "project_id", "private_key_id", "private_key",
             "client_email", "client_id", "auth_uri", "token_uri",
@@ -88,7 +107,7 @@ def _get_google_credentials_dict() -> Optional[Dict[str, Any]]:
         ]
         creds: Dict[str, Any] = {}
         for k in sa_keys:
-            val = os.getenv(k)
+            val = os.getenv(k) if os.getenv(k) is not None else os.getenv(k.upper())
             if val is not None:
                 if k == "private_key":
                     # Fix escaped newlines in PEM private key
