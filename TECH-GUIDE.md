@@ -211,7 +211,7 @@ Every retrieval response includes an auditable confidence score:
 $$\text{confidence\_score} = \frac{1}{N} \sum_{i=1}^N \text{similarity}_i = \frac{1}{N} \sum_{i=1}^N \left(1 - (\text{embedding}_i \Leftrightarrow \text{query\_vec})\right)$$
 
 ### Streamlit Shift-Left UI (`streamlit_app.py`)
-* **Top-Level Navigation**: Uses `<a target="_top">` buttons to break out of iframe sandboxes for Google OAuth consent.
+* **Iframe Sandbox-Safe Navigation**: Uses native popup navigation (`target="_blank"`) compliant with Streamlit Community Cloud iframe sandboxing policies.
 * **Live RBAC Audit Inspector**: Displays raw generated embeddings, verified JWT claims, and executed PostgreSQL queries directly on screen.
 * **Interactive Security Panel**: Real-time session elapsed time, ID token TTL countdown, manual silent refresh trigger, and token copy drawer for Swagger UI (`/docs`).
 

@@ -588,28 +588,14 @@ def _render_sign_in_page() -> None:
             st.error(f"Failed to build authorization URL: {exc}")
             return
 
-        # Direct styled button targeting top window:
-        # Avoids iframe issues, executes in one click, and ensures top-level browser navigation.
-        st.markdown(
-            f"""
-            <a href="{auth_url}" target="_top" style="
-                display: block;
-                width: 100%;
-                text-align: center;
-                background-color: #FF4B4B;
-                color: white !important;
-                padding: 0.65rem 1rem;
-                border-radius: 0.5rem;
-                text-decoration: none;
-                font-weight: 600;
-                font-size: 1rem;
-                border: none;
-                box-shadow: 0 1px 2px rgba(0,0,0,0.1);
-            ">
-                🔐 Sign in with Google
-            </a>
-            """,
-            unsafe_allow_html=True,
+        # Native link button opens Google OAuth in a new tab (target="_blank"):
+        # This complies with Streamlit Community Cloud iframe sandboxing (which allows popups
+        # but disallows top-frame navigation via target="_top").
+        st.link_button(
+            "🔐 Sign in with Google",
+            auth_url,
+            type="primary",
+            use_container_width=True,
         )
 
 

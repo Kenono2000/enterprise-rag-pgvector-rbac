@@ -117,7 +117,7 @@ flowchart TB
 * **FastAPI Dependency Injection**: Endpoints enforce `get_current_user` with `leeway=60s` clock-skew tolerance to absorb minor NTP drift.
 * **Mathematical Confidence Scoring**: Citations compute an auditable certainty metric:
   $$\text{confidence} = \frac{1}{N} \sum_{i=1}^N \left(1 - (\text{embedding}_i \Leftrightarrow \text{query\_vec})\right)$$
-* **Streamlit Shift-Left UI**: Direct `<a target="_top">` OAuth button, live RBAC SQL inspector, token copy drawer for Swagger UI, and session security monitor.
+* **Streamlit Shift-Left UI**: Native sandbox-compliant OAuth button, live RBAC SQL inspector, token copy drawer for Swagger UI, and session security monitor.
 
 ### 4. FastMCP Agent Gateway (`app/mcp/`)
 * **Standardized AI Integration**: Connects external AI agents (Cursor, Claude Desktop) via the Model Context Protocol.
