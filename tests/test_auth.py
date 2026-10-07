@@ -173,10 +173,64 @@ class TestExtractRoles:
         roles = extract_roles(payload)
         assert "finance_executive" in roles
 
+    def test_standard_roles_claim_extracted(self):
+        payload = {"sub": "u1", "roles": ["finance_executive"]}
+        assert extract_roles(payload) == ["finance_executive"]
+
+    def test_groups_claim_extracted(self):
+        payload = {"sub": "u1", "groups": ["compliance_auditor", "executive"]}
+        assert extract_roles(payload) == ["compliance_auditor", "executive"]
+
+    def test_cognito_and_realm_access_extracted(self):
+        payload = {
+            "sub": "u1",
+            "cognito:groups": ["engineer"],
+            "realm_access": {"roles": ["hr_manager"]},
+        }
+        assert set(extract_roles(payload)) == {"engineer", "hr_manager"}
+
+    def test_comma_separated_and_case_insensitive(self):
+        payload = {"sub": "u1", "roles": "ENGINEER, Finance_Executive "}
+        assert extract_roles(payload) == ["engineer", "finance_executive"]
+
+    def test_sql_injection_payloads_filtered(self):
+        injection_payloads = [
+            "engineer' OR '1'='1",
+            "'; DROP TABLE enterprise_documents; --",
+            "admin' UNION SELECT * FROM users --",
+            "engineer\" OR 1=1 --",
+            "' OR 1=1/*",
+        ]
+        payload = {"sub": "attacker", "roles": injection_payloads}
+        assert extract_roles(payload) == []
+
     def test_all_known_roles_are_valid(self):
         """Sanity check: all KNOWN_ROLES match the DB schema values."""
         expected = {"finance_executive", "compliance_auditor", "hr_manager", "executive", "engineer"}
         assert KNOWN_ROLES == expected
+
+
+class TestJwksTokenValidation:
+    def test_unauthorized_issuer_rejected(self, monkeypatch):
+        import jwt as pyjwt
+        from app.auth.jwks import verify_jwt_token
+
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
+        # Token with unauthorized evil issuer
+        fake_token = pyjwt.encode(
+            {"iss": "https://evil-attacker.com", "sub": "attacker", "aud": "test-client-id"},
+            "secret",
+            algorithm="HS256",
+        )
+        with pytest.raises(pyjwt.InvalidTokenError, match="Unexpected token issuer"):
+            verify_jwt_token(fake_token)
+
+    def test_enterprise_issuer_allowed_when_configured(self, monkeypatch):
+        from app.auth.jwks import get_allowed_issuers
+
+        monkeypatch.setenv("ENTERPRISE_OIDC_ISSUER", "https://login.microsoftonline.com/tenant-id/v2.0")
+        issuers = get_allowed_issuers("my-client-id")
+        assert "https://login.microsoftonline.com/tenant-id/v2.0" in issuers
 
 
 class TestSessionCookie:

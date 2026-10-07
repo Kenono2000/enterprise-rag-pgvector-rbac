@@ -72,6 +72,19 @@ class DatabaseManager:
 
     @classmethod
     async def secure_search(cls, query_vector: List[float], user_roles: List[str], limit: int = 10):
+        # Zero-Trust: If caller has no roles, return empty results immediately
+        if not user_roles:
+            return []
+
+        # Defense-in-depth: Ensure all role entries are valid, non-empty identifier strings
+        from app.auth.role_mapper import KNOWN_ROLES
+        sanitized_roles = [
+            str(r).strip() for r in user_roles
+            if isinstance(r, str) and (str(r).strip() in KNOWN_ROLES or str(r).strip().isidentifier())
+        ]
+        if not sanitized_roles:
+            return []
+
         pool = await cls.get_pool()
         vector_str = f"[{','.join(map(str, query_vector))}]"
         
@@ -85,7 +98,8 @@ class DatabaseManager:
             LIMIT $3
         """
         async with pool.acquire() as conn:
-            return await conn.fetch(sql, vector_str, user_roles, limit)
+            return await conn.fetch(sql, vector_str, sanitized_roles, limit)
+
 
     @classmethod
     async def ingest_document(cls, document_id: str, title: str, content: str, allowed_roles: List[str], embedding: List[float]):

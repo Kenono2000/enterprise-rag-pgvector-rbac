@@ -302,21 +302,43 @@ def extract_roles(token_payload: Dict[str, Any]) -> List[str]:
     list[str]
         Validated application role strings.
     """
-    # 1 — Firebase custom claims
-    raw_roles = token_payload.get("app_roles")
-    if raw_roles and isinstance(raw_roles, list):
-        roles = [r for r in raw_roles if isinstance(r, str) and r in KNOWN_ROLES]
-        if roles:
-            logger.debug(
-                "Roles from custom claims: %s  sub=%s",
-                roles,
-                token_payload.get("sub"),
-            )
-            return roles
-        logger.warning(
-            "app_roles claim present but contained no recognised roles: %s",
-            raw_roles,
+    # 1 — Extract and validate roles from verified JWT claims (app_roles, roles, groups)
+    claim_candidates: List[Any] = []
+    
+    # Standard OIDC / OAuth2 & Firebase claim locations
+    if "app_roles" in token_payload:
+        claim_candidates.append(token_payload["app_roles"])
+    if "roles" in token_payload:
+        claim_candidates.append(token_payload["roles"])
+    if "groups" in token_payload:
+        claim_candidates.append(token_payload["groups"])
+    if "cognito:groups" in token_payload:
+        claim_candidates.append(token_payload["cognito:groups"])
+    if isinstance(token_payload.get("realm_access"), dict) and "roles" in token_payload["realm_access"]:
+        claim_candidates.append(token_payload["realm_access"]["roles"])
+
+    extracted: set[str] = set()
+    for candidate in claim_candidates:
+        if isinstance(candidate, str):
+            for item in candidate.split(","):
+                norm = item.strip().lower()
+                if norm in KNOWN_ROLES:
+                    extracted.add(norm)
+        elif isinstance(candidate, (list, tuple, set)):
+            for item in candidate:
+                if isinstance(item, str):
+                    norm = item.strip().lower()
+                    if norm in KNOWN_ROLES:
+                        extracted.add(norm)
+
+    if extracted:
+        resolved = sorted(list(extracted))
+        logger.debug(
+            "Roles from verified token claims: %s  sub=%s",
+            resolved,
+            token_payload.get("sub"),
         )
+        return resolved
 
     # 2 — Look up Firebase custom claims via Firebase Admin SDK
     email = token_payload.get("email", "")

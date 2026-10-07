@@ -42,6 +42,20 @@ EXPECTED_ISSUERS = {
 }
 
 
+def get_allowed_issuers(audience: Optional[str] = None) -> set[str]:
+    """Return the set of valid token issuers allowed by the application."""
+    issuers = set(EXPECTED_ISSUERS)
+    if audience:
+        issuers.add(f"https://securetoken.google.com/{audience}")
+
+    custom_issuer = os.getenv("OIDC_ISSUER") or os.getenv("ENTERPRISE_OIDC_ISSUER")
+    if custom_issuer:
+        norm = custom_issuer.rstrip("/")
+        issuers.add(norm)
+        issuers.add(f"{norm}/")
+    return issuers
+
+
 # ---------------------------------------------------------------------------
 # JWKS Client (one per issuer, cached at module level)
 # ---------------------------------------------------------------------------
@@ -52,10 +66,19 @@ _jwks_clients: Dict[str, PyJWKClient] = {}
 def _get_jwks_client(issuer: str) -> PyJWKClient:
     """Return a cached PyJWKClient for the given issuer, creating one if needed."""
     if issuer not in _jwks_clients:
-        if "securetoken.google.com" in issuer:
+        custom_jwks = os.getenv("OIDC_JWKS_URI") or os.getenv("ENTERPRISE_JWKS_URI")
+        custom_issuer = (os.getenv("OIDC_ISSUER") or os.getenv("ENTERPRISE_OIDC_ISSUER") or "").rstrip("/")
+
+        if custom_jwks and (not custom_issuer or issuer.rstrip("/") == custom_issuer):
+            jwks_uri = custom_jwks
+        elif "securetoken.google.com" in issuer:
             jwks_uri = FIREBASE_JWKS
-        else:
+        elif issuer.rstrip("/") in {iss.rstrip("/") for iss in EXPECTED_ISSUERS}:
             jwks_uri = GOOGLE_ACCOUNTS_JWKS
+        elif custom_jwks:
+            jwks_uri = custom_jwks
+        else:
+            jwks_uri = f"{issuer.rstrip('/')}/.well-known/jwks.json"
 
         _jwks_clients[issuer] = PyJWKClient(
             jwks_uri,
@@ -84,21 +107,23 @@ def _peek_issuer(token: str) -> str:
     return iss
 
 
-def verify_google_token(
+def verify_jwt_token(
     token: str,
     *,
     audience: Optional[str] = None,
+    allowed_issuers: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     """
-    Verify a Google or Firebase ID token (RS256).
+    Verify a Google, Firebase, or Enterprise OIDC ID token (RS256).
 
     Parameters
     ----------
     token:
         Raw Bearer token string.
     audience:
-        Expected `aud` claim. Defaults to GOOGLE_CLIENT_ID from the environment.
-        For Firebase tokens this should be the Firebase project ID.
+        Expected `aud` claim. Defaults to GOOGLE_CLIENT_ID or OIDC_CLIENT_ID.
+    allowed_issuers:
+        Optional set of allowed `iss` claim values.
 
     Returns
     -------
@@ -109,13 +134,17 @@ def verify_google_token(
     ------
     jwt.InvalidTokenError / subclasses on any failure.
     """
-    audience = audience or os.getenv("GOOGLE_CLIENT_ID")
+    audience = audience or os.getenv("GOOGLE_CLIENT_ID") or os.getenv("OIDC_CLIENT_ID")
     if not audience:
         raise InvalidTokenError(
-            "GOOGLE_CLIENT_ID is not set — cannot verify token audience."
+            "Audience is not set (GOOGLE_CLIENT_ID / OIDC_CLIENT_ID missing) — cannot verify token."
         )
 
     iss = _peek_issuer(token)
+    expected_set = allowed_issuers or get_allowed_issuers(audience)
+    if iss not in expected_set and iss.rstrip("/") not in {x.rstrip("/") for x in expected_set}:
+        raise InvalidTokenError(f"Unexpected token issuer: {iss}")
+
     client = _get_jwks_client(iss)
 
     try:
@@ -131,15 +160,14 @@ def verify_google_token(
         signing_key.key,
         algorithms=["RS256"],
         audience=audience,
-        leeway=60,  # 60s tolerance for clock skew between Google servers and local machine
+        leeway=60,  # 60s tolerance for clock skew between IdP servers and local machine
         options={"require": ["exp", "iat", "sub", "iss"]},
     )
 
-    # Validate issuer explicitly (PyJWT checks aud but not iss by default unless configured)
-    if payload.get("iss") not in EXPECTED_ISSUERS | {
-        f"https://securetoken.google.com/{audience}"
-    }:
-        raise InvalidTokenError(f"Unexpected token issuer: {payload.get('iss')}")
-
     logger.debug("Token verified: sub=%s email=%s", payload.get("sub"), payload.get("email"))
     return payload
+
+
+# Backwards compatibility alias
+verify_google_token = verify_jwt_token
+

@@ -773,11 +773,20 @@ def _render_rag_interface() -> None:
                     }
 
                 result = run_async(perform_search())
-                roles_sql = ", ".join(f"'{r}'" for r in roles)
+                # Parameterized query representation matching safe in-database asyncpg execution
+                roles_repr = json.dumps(roles)
                 sql_query = (
-                    f"SELECT * FROM enterprise_documents\n"
-                    f"WHERE allowed_roles ?| ARRAY[{roles_sql}]\n"
-                    f"ORDER BY embedding <=> <vector> LIMIT 3"
+                    "SELECT document_id, title, content, allowed_roles,\n"
+                    "       1 - (embedding <=> $1::vector) AS similarity\n"
+                    "FROM enterprise_documents\n"
+                    "WHERE allowed_roles ?| $2::text[]\n"
+                    "  AND (embedding_model = 'text-embedding-3-large' OR embedding_model IS NULL)\n"
+                    "ORDER BY embedding <=> $1::vector\n"
+                    "LIMIT $3;\n\n"
+                    f"-- Parameter bindings (parameterized & injection-proof):\n"
+                    f"-- $1 = <query_vector: 1536 dims>\n"
+                    f"-- $2 = {roles_repr}\n"
+                    f"-- $3 = 3"
                 )
                 if not result:
                     status.update(label="Access Denied / Not Found", state="error", expanded=False)

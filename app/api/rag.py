@@ -33,7 +33,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from app.auth.jwks import verify_google_token
-from app.auth.role_mapper import extract_roles
+from app.auth.role_mapper import extract_roles, KNOWN_ROLES
 from app.db.llm import chat_completion, generate_embedding
 from app.db.manager import DatabaseManager
 
@@ -116,9 +116,13 @@ async def get_current_user(
     # --- Path 2: Legacy X-User-Roles header (dev / backward-compat) ---
     if not require_google and x_user_roles:
         try:
-            roles = json.loads(x_user_roles)
-            if not isinstance(roles, list):
+            raw_roles = json.loads(x_user_roles)
+            if not isinstance(raw_roles, list):
                 raise ValueError("X-User-Roles must be a JSON array")
+            roles = [
+                str(r).strip() for r in raw_roles 
+                if isinstance(r, str) and (r.strip() in KNOWN_ROLES or r.strip().isidentifier())
+            ]
             logger.debug("Using legacy X-User-Roles header: %s", roles)
             return UserIdentity(sub="legacy-header-user", roles=roles)
         except Exception as exc:
