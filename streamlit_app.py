@@ -793,10 +793,10 @@ def _render_rag_interface() -> None:
                     )
                     system_prompt = (
                         "You are an enterprise zero-trust AI assistant.\n"
-                        "Answer strictly using the authorized context below.\n"
-                        "Cite sources in format [Doc: <Title>, Chunk <Index>].\n"
-                        "If the context does not contain the answer, explicitly state: "
-                        "'I do not have sufficient information in the authorized documents to answer this question.'"
+                        "Answer the user's question by synthesizing information from the authorized context chunks below.\n"
+                        "Cite sources in the format [Doc: <Title>, Chunk <Index>].\n"
+                        "Only state 'I do not have sufficient information in the authorized documents to answer this question.' "
+                        "if the authorized context is completely silent or irrelevant to the question."
                     )
                     prompt = f"{system_prompt}\n\nContext:\n{context}\n\nQuestion: {prompt_input}\nAnswer:"
                     return {
@@ -804,6 +804,7 @@ def _render_rag_interface() -> None:
                         "rows": rows,
                         "avg_conf": sum(float(r["similarity"]) for r in rows) / len(rows),
                     }
+
 
                 result = run_async(perform_search())
                 roles_repr = json.dumps(roles)
