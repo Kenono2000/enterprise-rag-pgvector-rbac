@@ -151,6 +151,33 @@ app = FastAPI(
 )
 
 
+@app.middleware("http")
+async def trace_http_requests(request: Request, call_next):
+    """Trace inbound FastAPI requests and status codes into Jaeger spans."""
+    start_time = time.perf_counter()
+    with tracer.trace_span(
+        f"HTTP {request.method} {request.url.path}",
+        {
+            "http.method": request.method,
+            "http.url": str(request.url),
+            "http.path": request.url.path,
+            "http.client_ip": request.client.host if request.client else "unknown",
+        },
+    ) as span_data:
+        try:
+            response = await call_next(request)
+            elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            span_data["attributes"]["http.status_code"] = response.status_code
+            span_data["attributes"]["http.duration_ms"] = elapsed_ms
+            return response
+        except Exception as exc:
+            elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            span_data["attributes"]["http.status_code"] = 500
+            span_data["attributes"]["http.error"] = str(exc)
+            raise
+
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------

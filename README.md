@@ -404,11 +404,20 @@ Streamlit creates new script runner threads per user interaction. To prevent Pos
 #### 1. Configuration Validation via Pydantic BaseSettings (`app/config.py`)
 `app/config.py` uses `pydantic_settings.BaseSettings` to validate environment variables, secrets, and connection parameters at application startup. Missing credentials or malformed URIs fail fast during boot rather than intermittently at runtime.
 
-#### 2. Enterprise Observability & Tracing (`app/observability.py`)
-* `ObservabilityTracer` measures execution metrics across retrieval and generation pipelines.
-* Records retrieval latency, candidate passage count, and retrieval mode (`hybrid` vs `dense`).
-* Records LLM token usage (prompt tokens, completion tokens, total tokens) and inference latency.
-* Designed for zero-overhead integration with OpenTelemetry and Langfuse collectors.
+#### 2. Enterprise Observability, OpenTelemetry & Jaeger Tracing (`app/observability.py`)
+* **Dual-Tier Tracing Architecture**:
+  * **Tier 1 (Fallback)**: High-performance structured metric logging with an in-memory bounded ring buffer (last 1,000 events) accessible via `GET /api/v1/metrics/observability`.
+  * **Tier 2 (OpenTelemetry / Jaeger)**: Automatic OTLP export (`BatchSpanProcessor` + `OTLPSpanExporter` to `http://localhost:4317`) when `OTEL_ENABLED=true`.
+* **Full Context Capture in Traces**:
+  * Captures the user's natural language question (`rag.question`) and synthesized LLM response (`rag.response`) as both **OpenTelemetry Span Tags** and timeline **Span Events** (`user_question`, `ai_response`).
+  * Attaches verified RBAC roles (`rag.roles`), LLM model name (`rag.model`), token consumption, and execution duration (`rag.duration_ms`).
+* **FastAPI Request Middleware (`app/main.py`)**:
+  * Inbound HTTP requests automatically create trace spans (`HTTP <METHOD> <PATH>`) logging client IP, status codes, and endpoint execution duration.
+* **FastMCP Tool Tracing (`app/mcp/gateway.py`)**:
+  * MCP tool calls (`search_sdlc_context`, `propose_patch`) emit dedicated spans (`mcp_tool.<tool_name>`) capturing arguments, sanitizing credentials, and logging results.
+* **Persistent Jaeger Storage via Badger (`docker-compose.yml`)**:
+  * Jaeger runs with `SPAN_STORAGE_TYPE=badger` backed by Docker volume `jaeger_data:/badger` (`user: "0:0"`).
+  * Traces and RAG chat interactions persist across container restarts and system reboots with a 7-day retention TTL (`BADGER_SPAN_STORE_TTL=168h`).
 
 #### 3. Hardened Multi-Stage Dockerfile (`Dockerfile`)
 ```dockerfile
@@ -427,6 +436,7 @@ HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8000/health
 
 #### 4. Automated Integration Testing (`testcontainers-python`)
 `tests/test_integration_pgvector.py` provides end-to-end integration testing against real database containers (`pgvector/pgvector:pg16`), verifying that `schema.sql` initializes extensions, creates tables, and executes HNSW and GIN queries accurately in CI environments.
+
 
 ---
 
@@ -501,17 +511,22 @@ python -m pytest -v
 
 ### 3. Launch Services
 ```powershell
-# Start PostgreSQL 16 + pgvector container
-docker compose up -d postgres
+# Start PostgreSQL 16 + pgvector and Persistent Jaeger Tracing
+docker compose up -d
 
 # Start FastAPI Microservice (Port 8000)
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 # 📖 Swagger UI: http://localhost:8000/docs
 # 🩺 Health Probes: http://localhost:8000/healthz | http://localhost:8000/readyz
+# 📊 Metrics Snapshot: http://localhost:8000/api/v1/metrics/observability
 
 # Start Streamlit UI (Port 8501)
 python -m streamlit run streamlit_app.py --server.port 8501
 # 🖥️ Web App: http://localhost:8501
+
+# Inspect Distributed Tracing & RAG Question/Response in Jaeger (Port 16686)
+# 🔍 Jaeger UI: http://localhost:16686 (Service: enterprise-rag-pgvector-rbac)
+
 
 # Start FastMCP Gateway
 python -m app.mcp
@@ -571,5 +586,7 @@ tests/test_utilities.py                 .......                                 
 | **OAuth state mismatch / CSRF** | Streamlit re-creates session on navigation away to Google. | **Stateless HMAC-SHA256 Signed State**: Verifier is embedded in signed state string; zero server memory dependency. |
 | **Browser reload requires re-login (F5)** | Streamlit WebSocket reset clears RAM session state. | **Encrypted Session Cookie**: `enterprise_rag_session` cookie is written to browser and rehydrated via `st.context.cookies`. |
 | **`ImmatureSignatureError: (iat)`** | Clock drift between local machine and Google NTP servers. | Added `leeway=60` in `jwt.decode()` per RFC 7519. |
-| **`RuntimeError: Event loop is closed`** | Streamlit tears down async event loops between reruns. | **Loop-Aware Connection Manager**: Detects closed/mismatched event loops and recycles `asyncpg` pools cleanly. |
+| **`RuntimeError: Event loop is closed`** | Streamlit tears down async event loops between reruns while `AsyncOpenAI` retained transport connections bound to the initial loop. | **Loop-Scoped Client Manager**: Scopes `AsyncOpenAI` and `asyncpg` pools dynamically to active event loops (`get_openai_client()`), re-initializing cleanly if the prior loop is closed. |
 | **Context Eviction / Recall Starvation** | Post-filtering in application code drops top-$K$ restricted documents. | **In-Database RBAC**: Evaluates `WHERE allowed_roles ?| $user_roles` inside PostgreSQL before vector distance ranking. |
+| **Jaeger Badger `mkdir /badger/key: permission denied`** | Docker mounts root-owned named volume while container ran as non-root user. | **Container User Mapping (`user: "0:0"`)**: Run Jaeger with root user context to initialize Badger LSM value log directories and SSTable index keys. |
+| **Jaeger Trace Loss on Container Restart** | Default all-in-one image stores traces in ephemeral memory. | **Persistent Badger Storage**: Configured `SPAN_STORAGE_TYPE=badger` with Docker volume `jaeger_data:/badger` and 7-day TTL retention. |

@@ -97,3 +97,23 @@ class TestMcpRunServer:
             port=8888,
         )
 
+
+@pytest.mark.asyncio
+async def test_mcp_observability_tracking(monkeypatch):
+    """Verify MCP tool calls emit telemetry events to ObservabilityTracer."""
+    from app.observability import tracer
+    monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "true")
+
+    # Blocked call
+    await search_sdlc_context(question="What are the encryption standards?")
+    
+    summary = tracer.get_metrics_summary()
+    assert summary["mcp_tool_executions"] >= 1
+
+    recent = tracer.get_recent_metrics(limit=5)
+    mcp_events = [m for m in recent if m.get("event") == "mcp_tool_execution"]
+    assert len(mcp_events) >= 1
+    assert mcp_events[-1]["tool_name"] == "search_sdlc_context"
+    assert mcp_events[-1]["status"] == "error"
+
+

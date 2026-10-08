@@ -8,10 +8,12 @@ Integrates with OpenTelemetry when configured, with structured metrics fallback.
 
 from __future__ import annotations
 
+import json
 import time
 import logging
 from typing import Any, Dict, List, Optional
 from contextlib import contextmanager
+
 
 logger = logging.getLogger("enterprise_rag.observability")
 
@@ -179,6 +181,51 @@ class ObservabilityTracer:
             except Exception as exc:
                 logger.debug("Failed exporting chat interaction to OTel: %s", exc)
 
+    def record_mcp_tool_execution(
+        self,
+        tool_name: str,
+        parameters: Dict[str, Any],
+        result: str,
+        roles: Optional[List[str]],
+        duration_ms: float,
+        error: Optional[str] = None,
+    ) -> None:
+        """Capture MCP tool invocations, parameters, and responses in Jaeger spans, tags, and events."""
+        data = {
+            "event": "mcp_tool_execution",
+            "tool_name": tool_name,
+            "roles": roles or [],
+            "duration_ms": duration_ms,
+            "status": "error" if error else "ok",
+            "error": error,
+            "timestamp": time.time(),
+        }
+        self._metrics.append(data)
+        logger.info("MCP TOOL EXECUTION tool=%s roles=%s duration=%.2fms status=%s", tool_name, roles, duration_ms, data["status"])
+
+        if self._otel_tracer:
+            try:
+                span_name = f"mcp_tool.{tool_name}"
+                with self._otel_tracer.start_span(span_name) as span:
+                    span.set_attribute("mcp.tool_name", tool_name)
+                    span.set_attribute("mcp.roles", ",".join(roles) if roles else "none")
+                    span.set_attribute("mcp.duration_ms", duration_ms)
+                    span.set_attribute("mcp.status", data["status"])
+                    if error:
+                        span.set_attribute("mcp.error", error)
+                    
+                    # Attach specific question/response tags if present in parameters/result
+                    if "question" in parameters:
+                        span.set_attribute("rag.question", str(parameters["question"]))
+                    span.set_attribute("rag.response", result[:1000])
+
+                    # Emit span events
+                    span.add_event("mcp_parameters", {"params": json.dumps({k: str(v) for k, v in parameters.items() if k != "auth_token"})})
+                    span.add_event("mcp_result", {"content": result[:2000]})
+            except Exception as exc:
+                logger.debug("Failed exporting MCP tool execution to OTel: %s", exc)
+
+
     def get_recent_metrics(self, limit: int = 50) -> List[Dict[str, Any]]:
         return self._metrics[-limit:]
 
@@ -187,6 +234,7 @@ class ObservabilityTracer:
         retrievals = [m for m in self._metrics if m.get("event") == "retrieval"]
         generations = [m for m in self._metrics if m.get("event") == "generation"]
         interactions = [m for m in self._metrics if m.get("event") == "chat_interaction"]
+        mcp_tools = [m for m in self._metrics if m.get("event") == "mcp_tool_execution"]
         error_spans = [m for m in self._metrics if m.get("status") == "error"]
         return {
             "service_name": self.service_name,
@@ -195,8 +243,10 @@ class ObservabilityTracer:
             "retrieval_events": len(retrievals),
             "generation_events": len(generations),
             "chat_interactions": len(interactions),
+            "mcp_tool_executions": len(mcp_tools),
             "error_spans": len(error_spans),
         }
+
 
 
 

@@ -17,10 +17,13 @@ from app.db.manager import DatabaseManager
 from app.db.llm import generate_embedding, chat_completion
 from app.auth.jwks import verify_google_token
 from app.auth.role_mapper import extract_roles
+from app.observability import tracer
+import time
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("SDLC-Harness-Gateway")
+
 
 
 def _resolve_tool_roles(
@@ -69,15 +72,35 @@ async def search_sdlc_context(
       verified via Google JWKS.
     - user_roles: Optional fallback roles list (only honored if REQUIRE_GOOGLE_AUTH=false).
     """
+    t_start = time.perf_counter()
     roles, error = _resolve_tool_roles(auth_token, user_roles)
     if error:
-        return f"⛔ {error}"
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {error}"
+        tracer.record_mcp_tool_execution(
+            tool_name="search_sdlc_context",
+            parameters={"question": question},
+            result=res,
+            roles=roles,
+            duration_ms=duration_ms,
+            error=error,
+        )
+        return res
 
     query_vector = await generate_embedding(question)
     rows = await DatabaseManager.secure_search(query_vector, roles)
 
     if not rows:
-        return f"No authorized documentation found for the evaluated roles: {roles}"
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"No authorized documentation found for the evaluated roles: {roles}"
+        tracer.record_mcp_tool_execution(
+            tool_name="search_sdlc_context",
+            parameters={"question": question},
+            result=res,
+            roles=roles,
+            duration_ms=duration_ms,
+        )
+        return res
 
     context_chunks = "\n\n".join([f"[{r['title']}]: {r['content']}" for r in rows])
 
@@ -87,7 +110,16 @@ async def search_sdlc_context(
     citations = [f"- {r['title']} (similarity: {round(float(r['similarity']), 3)})" for r in rows]
     citations_text = "\n".join(citations)
 
-    return f"{answer_text}\n\nCitations:\n{citations_text}\n\n[Authorized Roles Evaluated: {roles}]"
+    result_text = f"{answer_text}\n\nCitations:\n{citations_text}\n\n[Authorized Roles Evaluated: {roles}]"
+    duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+    tracer.record_mcp_tool_execution(
+        tool_name="search_sdlc_context",
+        parameters={"question": question},
+        result=result_text,
+        roles=roles,
+        duration_ms=duration_ms,
+    )
+    return result_text
 
 
 @mcp.tool()
@@ -104,17 +136,48 @@ async def propose_patch(
     - patch_content: The patch content.
     - auth_token: Optional Google ID token to verify submitter identity.
     """
+    t_start = time.perf_counter()
     submitter = "anonymous"
     if auth_token:
         try:
             payload = verify_google_token(auth_token)
             submitter = payload.get("email") or payload.get("sub", "authenticated-user")
         except Exception as exc:
-            return f"⛔ Authentication failed: {str(exc)}"
+            duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+            err_msg = f"⛔ Authentication failed: {str(exc)}"
+            tracer.record_mcp_tool_execution(
+                tool_name="propose_patch",
+                parameters={"branch_name": branch_name},
+                result=err_msg,
+                roles=None,
+                duration_ms=duration_ms,
+                error=str(exc),
+            )
+            return err_msg
     elif os.getenv("REQUIRE_GOOGLE_AUTH", "false").lower() == "true":
-        return "⛔ Authorization required: provide a valid Google ID token via 'auth_token'."
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        err_msg = "⛔ Authorization required: provide a valid Google ID token via 'auth_token'."
+        tracer.record_mcp_tool_execution(
+            tool_name="propose_patch",
+            parameters={"branch_name": branch_name},
+            result=err_msg,
+            roles=None,
+            duration_ms=duration_ms,
+            error="Unauthorized",
+        )
+        return err_msg
 
-    return f"Patch submitted to {branch_name} by {submitter}"
+    res = f"Patch submitted to {branch_name} by {submitter}"
+    duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+    tracer.record_mcp_tool_execution(
+        tool_name="propose_patch",
+        parameters={"branch_name": branch_name},
+        result=res,
+        roles=[submitter],
+        duration_ms=duration_ms,
+    )
+    return res
+
 
 
 @mcp.resource("policy://sdlc-budget")
