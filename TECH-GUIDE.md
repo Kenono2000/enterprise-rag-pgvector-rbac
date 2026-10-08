@@ -407,7 +407,7 @@ stateDiagram-v2
 
 ## 11. Testing & Verification Guide
 
-The project features a **100% passing test suite (95 tests: 94 passed, 1 skipped)** that executes completely offline without external network or API dependencies:
+The project features a **100% passing test suite (96 tests: 95 passed, 1 skipped)** that executes completely offline without external network or API dependencies:
 
 ```powershell
 python -m pytest -v
@@ -417,7 +417,7 @@ python -m pytest -v
 | Module | Tests | Key Invariants Verified |
 | :--- | :---: | :--- |
 | **`tests/test_hybrid_search.py`** | 6 | • Reciprocal Rank Fusion (RRF) math validation.<br/>• Zero-Trust empty role short-circuiting.<br/>• Heuristic & cross-encoder candidate re-ranking.<br/>• GroundingGuardrail citation and missing context admission checks. |
-| **`tests/test_observability_and_health.py`** | 6 | • Liveness (`/healthz`) and readiness (`/readyz`) probes.<br/>• 503 DB failure handling.<br/>• Pydantic `BaseSettings` validation.<br/>• `ObservabilityTracer` metric recording.<br/>• Token streaming sync and async generators. |
+| **`tests/test_observability_and_health.py`** | 7 | • Liveness (`/healthz`) and readiness (`/readyz`) probes.<br/>• Telemetry endpoint (`/api/v1/metrics/observability`).<br/>• 503 DB failure handling.<br/>• Pydantic `BaseSettings` validation.<br/>• `ObservabilityTracer` metric recording.<br/>• Token streaming sync and async generators. |
 | **`tests/test_integration_pgvector.py`** | 2 | • Testcontainers `pgvector/pgvector:pg16` end-to-end integration harness.<br/>• Verification of schema.sql DDL, HNSW index, and GIN full-text search. |
 | **`tests/test_database_schema.py`** | 6 | • Normalized table schemas (`documents` & `document_chunks`).<br/>• `ON DELETE CASCADE` foreign key relationship.<br/>• HNSW vector index (`m=16, ef=64`) & GIN role index.<br/>• GIN full-text index on `tsv`.<br/>• B-tree file hash de-duplication index.<br/>• Cosine similarity calculation benchmark simulation. |
 | **`tests/test_security_rbac.py`** | 5 | • SQL injection immunity in vector search.<br/>• Parameterized array containment (`$2::text[]`).<br/>• Zero-Trust empty role short-circuiting.<br/>• Header validation and injection filtering. |
@@ -427,7 +427,7 @@ python -m pytest -v
 | **`tests/test_agent.py`** | 6 | • GitHub webhook HMAC-SHA256 verification.<br/>• Webhook JSON parsing into typed models.<br/>• Deterministic secret scanning (API keys, private keys).<br/>• AST static inspection (`eval`, `exec`, `__import__`).<br/>• Sandbox path traversal prevention.<br/>• Full LangGraph self-healing test repair cycle. |
 | **`tests/test_ingest.py`** | 9 | • Pre-ingestion SHA-256 de-duplication, modified file re-indexing detection, force flag bypass, stem matching, chunk prefix detection. |
 | **`tests/test_utilities.py`** | 7 | • Multi-format loaders (`.pdf`, `.md`, `.docx`), tokenizer-aware chunk splitting, chunk metadata attribution, 64KB block hashing, and tenacity retry on 429 rate limits. |
-| **Total** | **95** | **94 Passed, 1 Skipped (18.98s execution time)** |
+| **Total** | **96** | **95 Passed, 1 Skipped** |
 
 ---
 

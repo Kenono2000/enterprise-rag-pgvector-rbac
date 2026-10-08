@@ -180,6 +180,15 @@ async def readyz():
         )
 
 
+@app.get("/api/v1/metrics/observability", tags=["Observability"])
+async def get_observability_metrics():
+    """Return in-memory telemetry snapshot, trace summary counts, and OpenTelemetry status."""
+    return {
+        "summary": tracer.get_metrics_summary(),
+        "recent_traces": tracer.get_recent_metrics(limit=20),
+    }
+
+
 @app.post("/api/v1/query", response_model=RAGResponse, tags=["RAG"])
 async def query_rag(
     request: RAGQueryRequest,

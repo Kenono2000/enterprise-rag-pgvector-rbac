@@ -96,3 +96,16 @@ def test_chat_completion_stream_sync_generator():
     assert len(tokens) > 0
     full_text = "".join(tokens)
     assert len(full_text.strip()) > 0
+
+
+def test_observability_metrics_endpoint():
+    """Verify /api/v1/metrics/observability returns structured telemetry summary and recent traces."""
+    response = client.get("/api/v1/metrics/observability")
+    assert response.status_code == 200
+    data = response.json()
+    assert "summary" in data
+    assert "recent_traces" in data
+    assert "total_recorded_events" in data["summary"]
+    assert "otel_active" in data["summary"]
+    assert isinstance(data["recent_traces"], list)
+
