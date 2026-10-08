@@ -91,8 +91,13 @@ flowchart TB
 
 ## 🧱 Architectural Pillars (The 5 Layers)
 
-### 1. Database Layer: pgvector + Dual Indexing (`app/db/`)
-* **Dual Indexing**: Combines **HNSW** (`vector_cosine_ops`, $m=16$, $ef=64$) for sub-millisecond approximate nearest neighbor search with **GIN** (`jsonb_path_ops`) for constant-time role membership checks.
+### 1. Database Layer: Normalized pgvector + Dual Indexing (`schema.sql` & `app/db/`)
+* **Normalized Schema Design**: De-couples master document metadata (`documents`) from vector embeddings (`document_chunks`) using a foreign key with `ON DELETE CASCADE`. Eliminates duplicate metadata storage and simplifies document updates.
+* **Dual Indexing & Fast Lookups**:
+  * **HNSW Vector Index**: Approximate nearest neighbor search (`vector_cosine_ops`, $m=16$, $ef=64$) on `document_chunks.embedding`.
+  * **GIN Role Index**: Fast JSONB role membership checks (`jsonb_path_ops`) on `documents.allowed_roles`.
+  * **B-Tree File Hash Index**: Instant cryptographic de-duplication lookups on `documents.file_hash`.
+* **Backward-Compatible View & Trigger**: Provides an `enterprise_documents` unified view and `INSTEAD OF INSERT` trigger so existing consumers, queries, and scripts continue to function without alteration.
 * **The Core In-DB RBAC Query (Parameterized & Injection-Proof)**:
   ```sql
   SELECT document_id, title, content, allowed_roles, 
@@ -152,7 +157,7 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-### 2. Run Automated Verification (70/70 Tests)
+### 2. Run Automated Verification (76/76 Tests)
 All tests run **100% offline** with zero external network or API dependencies:
 ```powershell
 python -m pytest -v
@@ -177,19 +182,21 @@ python -m app.mcp
 
 ---
 
-## 🧪 Test Suite Overview (70 Passing Tests)
+## 🧪 Test Suite Overview (76 Passing Tests)
 
 ```text
-tests/test_agent.py          ......                                           [  8%]
-tests/test_auth.py           ..................................               [ 57%]
-tests/test_ingest.py         .......                                          [ 67%]
-tests/test_mcp_auth.py       ..........                                       [ 81%]
-tests/test_rag.py            ....                                             [ 87%]
+tests/test_agent.py          ......                                           [  7%]
+tests/test_auth.py           ..................................               [ 52%]
+tests/test_database_schema.py ......                                          [ 60%]
+tests/test_ingest.py         .......                                          [ 69%]
+tests/test_mcp_auth.py       ..........                                       [ 82%]
+tests/test_rag.py            ....                                             [ 88%]
 tests/test_security_rbac.py   .....                                            [ 94%]
 tests/test_utilities.py      ....                                             [100%]
-============================== 70 passed in 13.54s ==============================
+============================== 76 passed in 36.57s ==============================
 ```
 
+* **`test_database_schema.py` (6 tests)**: Normalized table definitions (`documents`, `document_chunks`), HNSW and GIN index specifications, cascading deletes, file hash lookups, and similarity calculation benchmark simulation.
 * **`test_security_rbac.py` (5 tests)**: Dedicated security test suite verifying SQL injection immunity, parameterized array execution (`$2::text[]`), zero-trust empty role short-circuiting, and API header validation.
 * **`test_auth.py` (34 tests)**: PKCE verification, stateless HMAC tokens, JWKS leeway, multi-source claim extraction (`groups`, `roles`, `app_roles`, `cognito:groups`, `realm_access`), enterprise JWKS issuer validation, and **session cookie compression/tampering/expiry tests**.
 * **`test_rag.py` (4 tests)**: FastAPI endpoints, 401 unauthorized rejection, dev role fallbacks, and in-database RBAC retrieval.

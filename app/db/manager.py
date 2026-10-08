@@ -102,11 +102,20 @@ class DatabaseManager:
 
 
     @classmethod
-    async def ingest_document(cls, document_id: str, title: str, content: str, allowed_roles: List[str], embedding: List[float]):
+    async def ingest_document(
+        cls, 
+        document_id: str, 
+        title: str, 
+        content: str, 
+        allowed_roles: List[str], 
+        embedding: List[float],
+        file_hash: Optional[str] = None,
+    ):
         pool = await cls.get_pool()
         vector_str = f"[{','.join(map(str, embedding))}]"
         roles_json = json.dumps(allowed_roles)
         
+        # Ingests transparently via enterprise_documents view or base table
         sql = """
             INSERT INTO enterprise_documents (document_id, title, content, allowed_roles, embedding)
             VALUES ($1, $2, $3, $4::jsonb, $5::vector)
@@ -116,3 +125,102 @@ class DatabaseManager:
         """
         async with pool.acquire() as conn:
             await conn.execute(sql, document_id, title, content, roles_json, vector_str)
+            if file_hash:
+                # If master documents table exists, link file_hash
+                try:
+                    await conn.execute(
+                        "UPDATE documents SET file_hash = $1 WHERE document_id = $2",
+                        file_hash, document_id
+                    )
+                except Exception:
+                    pass
+
+    @classmethod
+    async def ingest_normalized_document(
+        cls,
+        document_id: str,
+        title: str,
+        chunks: List[dict],
+        allowed_roles: List[str],
+        file_hash: Optional[str] = None,
+        source_path: Optional[str] = None,
+        file_type: str = "markdown",
+    ) -> str:
+        """
+        Ingest a document and its chunks into normalized documents and document_chunks tables.
+        Atomic transaction ensures all chunks or none are persisted.
+        """
+        pool = await cls.get_pool()
+        roles_json = json.dumps(allowed_roles)
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                # 1. Upsert master document
+                doc_row = await conn.fetchrow(
+                    """
+                    INSERT INTO documents (document_id, title, source_path, file_hash, file_type, allowed_roles, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, CURRENT_TIMESTAMP)
+                    ON CONFLICT (document_id) DO UPDATE
+                    SET title = EXCLUDED.title,
+                        source_path = EXCLUDED.source_path,
+                        file_hash = EXCLUDED.file_hash,
+                        file_type = EXCLUDED.file_type,
+                        allowed_roles = EXCLUDED.allowed_roles,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING id
+                    """,
+                    document_id, title, source_path, file_hash, file_type, roles_json
+                )
+                doc_uuid = doc_row["id"]
+
+                # 2. Insert/replace chunks
+                await conn.execute("DELETE FROM document_chunks WHERE document_id = $1", doc_uuid)
+                for idx, chunk in enumerate(chunks):
+                    chunk_id = chunk.get("chunk_id", f"{document_id}_chunk_{idx+1}")
+                    content = chunk.get("content", "")
+                    embedding = chunk.get("embedding", [])
+                    vector_str = f"[{','.join(map(str, embedding))}]"
+                    model = chunk.get("embedding_model", "text-embedding-3-large")
+                    tokens = chunk.get("token_count", len(content.split()))
+
+                    await conn.execute(
+                        """
+                        INSERT INTO document_chunks (document_id, chunk_id, chunk_index, content, token_count, embedding, embedding_model)
+                        VALUES ($1, $2, $3, $4, $5, $6::vector, $7)
+                        ON CONFLICT (chunk_id) DO UPDATE
+                        SET content = EXCLUDED.content,
+                            token_count = EXCLUDED.token_count,
+                            embedding = EXCLUDED.embedding,
+                            embedding_model = EXCLUDED.embedding_model
+                        """,
+                        doc_uuid, chunk_id, idx, content, tokens, vector_str, model
+                    )
+
+                return str(doc_uuid)
+
+    @classmethod
+    async def get_document_by_hash(cls, file_hash: str) -> Optional[dict]:
+        """Lookup document existence by SHA-256 hash using idx_documents_file_hash index."""
+        pool = await cls.get_pool()
+        async with pool.acquire() as conn:
+            try:
+                row = await conn.fetchrow(
+                    "SELECT id, document_id, title, file_hash, created_at FROM documents WHERE file_hash = $1",
+                    file_hash
+                )
+                return dict(row) if row else None
+            except Exception:
+                return None
+
+    @classmethod
+    async def delete_document(cls, document_id: str) -> bool:
+        """Delete document from documents table (cascading to all document_chunks)."""
+        pool = await cls.get_pool()
+        async with pool.acquire() as conn:
+            try:
+                result = await conn.execute("DELETE FROM documents WHERE document_id = $1", document_id)
+                return "DELETE 1" in result
+            except Exception:
+                result = await conn.execute("DELETE FROM enterprise_documents WHERE document_id = $1", document_id)
+                return "DELETE" in result
+

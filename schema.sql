@@ -1,53 +1,179 @@
--- 1. Create extensions (Idempotent)
+-- ============================================================================
+-- schema.sql
+-- PostgreSQL 16 + pgvector Normalized Architecture with Dual Indexing
+-- ============================================================================
+
+-- 1. Create Extensions (Idempotent)
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- 2. Create table (Idempotent)
--- Added UNIQUE to document_id so we can prevent duplicate inserts later
-CREATE TABLE IF NOT EXISTS enterprise_documents (
+-- 2. Master Documents Table (Metadata, Governance, De-duplication)
+CREATE TABLE IF NOT EXISTS documents (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    document_id VARCHAR(100) NOT NULL UNIQUE, 
+    document_id VARCHAR(100) NOT NULL UNIQUE,
     title VARCHAR(255) NOT NULL,
-    content TEXT NOT NULL, 
+    source_path TEXT,
+    file_hash CHAR(64) UNIQUE,
+    file_type VARCHAR(16) DEFAULT 'markdown',
     allowed_roles JSONB NOT NULL DEFAULT '[]'::jsonb,
-    embedding vector(1536) NOT NULL,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    embedding_model VARCHAR(100) DEFAULT 'text-embedding-3-large'
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 3. Document Chunks Table (Vector Embeddings, Content, Chunk Sequence)
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    chunk_id VARCHAR(128) NOT NULL UNIQUE,
+    chunk_index INT NOT NULL DEFAULT 0,
+    content TEXT NOT NULL,
+    token_count INT,
+    embedding vector(1536) NOT NULL,
+    embedding_model VARCHAR(100) DEFAULT 'text-embedding-3-large',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
 
--- 3. Create indexes (Idempotent)
-CREATE INDEX IF NOT EXISTS idx_docs_allowed_roles 
-ON enterprise_documents USING GIN (allowed_roles);
+-- ============================================================================
+-- 4. High-Performance Dual Indexing & Lookup Indexes
+-- ============================================================================
 
-CREATE INDEX IF NOT EXISTS idx_docs_hnsw_embedding 
-ON enterprise_documents 
+-- 4.1 HNSW Vector Index: sub-millisecond approximate nearest neighbor search
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw 
+ON document_chunks 
 USING hnsw (embedding vector_cosine_ops)
 WITH (m = 16, ef_construction = 64);
 
--- 4. Insert data (Idempotent)
--- Added ON CONFLICT to skip insertion if the document_id already exists
-INSERT INTO enterprise_documents (document_id, title, content, allowed_roles, embedding)
+-- 4.2 GIN Role Index: constant-time JSONB role membership pre-filter
+CREATE INDEX IF NOT EXISTS idx_documents_allowed_roles_gin 
+ON documents 
+USING gin (allowed_roles jsonb_path_ops);
+
+-- 4.3 Unique / B-Tree Index on file_hash for cryptographic de-duplication
+CREATE INDEX IF NOT EXISTS idx_documents_file_hash 
+ON documents (file_hash);
+
+-- 4.4 Foreign Key Index for low-latency joins and cascading operations
+CREATE INDEX IF NOT EXISTS idx_chunks_document_id 
+ON document_chunks (document_id);
+
+-- 4.5 Chunk Sequence Index
+CREATE INDEX IF NOT EXISTS idx_chunks_document_seq 
+ON document_chunks (document_id, chunk_index);
+
+-- ============================================================================
+-- 5. Backward-Compatible View & Transparent Upsert Trigger
+-- ============================================================================
+
+-- Unified view matching legacy queries and test contracts
+CREATE OR REPLACE VIEW enterprise_documents AS
+SELECT 
+    c.chunk_id AS document_id,
+    d.title,
+    c.content,
+    d.allowed_roles,
+    c.embedding,
+    c.created_at,
+    c.embedding_model,
+    d.file_hash,
+    d.id AS parent_document_id,
+    c.chunk_index
+FROM documents d
+JOIN document_chunks c ON d.id = c.document_id;
+
+-- Trigger function enabling transparent inserts/upserts into enterprise_documents
+CREATE OR REPLACE FUNCTION trg_enterprise_documents_upsert()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_doc_uuid UUID;
+BEGIN
+    -- Insert or update parent document record
+    INSERT INTO documents (document_id, title, allowed_roles, updated_at)
+    VALUES (NEW.document_id, NEW.title, NEW.allowed_roles, CURRENT_TIMESTAMP)
+    ON CONFLICT (document_id) DO UPDATE 
+    SET title = EXCLUDED.title, 
+        allowed_roles = EXCLUDED.allowed_roles, 
+        updated_at = CURRENT_TIMESTAMP
+    RETURNING id INTO v_doc_uuid;
+
+    -- Insert or update chunk record
+    INSERT INTO document_chunks (document_id, chunk_id, chunk_index, content, embedding, embedding_model)
+    VALUES (
+        v_doc_uuid, 
+        NEW.document_id, 
+        0, 
+        NEW.content, 
+        NEW.embedding, 
+        COALESCE(NEW.embedding_model, 'text-embedding-3-large')
+    )
+    ON CONFLICT (chunk_id) DO UPDATE
+    SET content = EXCLUDED.content, 
+        embedding = EXCLUDED.embedding, 
+        embedding_model = EXCLUDED.embedding_model;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_enterprise_docs_io_insert ON enterprise_documents;
+CREATE TRIGGER trg_enterprise_docs_io_insert
+INSTEAD OF INSERT ON enterprise_documents
+FOR EACH ROW EXECUTE FUNCTION trg_enterprise_documents_upsert();
+
+-- ============================================================================
+-- 6. Deterministic Mock Seed Data (100% Offline Testing & Initial Boot)
+-- ============================================================================
+
+-- Master Documents Seed
+INSERT INTO documents (document_id, title, file_hash, allowed_roles)
 VALUES 
 (
     'FIN-2026-001',
     'Executive Q3 Financial Audit',
-    'Operating margins in Q3 increased by 14.2% following the backend modernization and zero-trust identity migration.',
-    '["finance_executive", "compliance_auditor"]'::jsonb,
-    (SELECT array_agg(0.01 * (i % 5))::vector(1536) FROM generate_series(1, 1536) i)
+    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    '["finance_executive", "compliance_auditor"]'::jsonb
 ),
 (
     'HR-2026-042',
     'Internal Compensation & Benefits Policy',
-    'Annual performance bonuses for senior architects are benchmarked against top-tier FinTech industry percentiles.',
-    '["hr_manager", "executive"]'::jsonb,
-    (SELECT array_agg(0.02 * (i % 3))::vector(1536) FROM generate_series(1, 1536) i)
+    'a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0',
+    '["hr_manager", "executive"]'::jsonb
 ),
 (
     'ENG-2026-105',
     'Public Engineering Guidelines',
-    'All backend microservices must implement asynchronous non-blocking I/O and Pydantic DTO validation.',
-    '["engineer", "finance_executive", "hr_manager"]'::jsonb,
-    (SELECT array_agg(0.015 * (i % 4))::vector(1536) FROM generate_series(1, 1536) i)
+    'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210',
+    '["engineer", "finance_executive", "hr_manager"]'::jsonb
 )
 ON CONFLICT (document_id) DO NOTHING;
+
+-- Chunks Seed (Vectors generated with deterministic formulas)
+INSERT INTO document_chunks (document_id, chunk_id, chunk_index, content, embedding)
+SELECT 
+    d.id,
+    'FIN-2026-001_chunk_1',
+    0,
+    'Operating margins in Q3 increased by 14.2% following the backend modernization and zero-trust identity migration.',
+    (SELECT array_agg(0.01 * (i % 5))::vector(1536) FROM generate_series(1, 1536) i)
+FROM documents d WHERE d.document_id = 'FIN-2026-001'
+ON CONFLICT (chunk_id) DO NOTHING;
+
+INSERT INTO document_chunks (document_id, chunk_id, chunk_index, content, embedding)
+SELECT 
+    d.id,
+    'HR-2026-042_chunk_1',
+    0,
+    'Annual performance bonuses for senior architects are benchmarked against top-tier FinTech industry percentiles.',
+    (SELECT array_agg(0.02 * (i % 3))::vector(1536) FROM generate_series(1, 1536) i)
+FROM documents d WHERE d.document_id = 'HR-2026-042'
+ON CONFLICT (chunk_id) DO NOTHING;
+
+INSERT INTO document_chunks (document_id, chunk_id, chunk_index, content, embedding)
+SELECT 
+    d.id,
+    'ENG-2026-105_chunk_1',
+    0,
+    'All backend microservices must implement asynchronous non-blocking I/O and Pydantic DTO validation.',
+    (SELECT array_agg(0.015 * (i % 4))::vector(1536) FROM generate_series(1, 1536) i)
+FROM documents d WHERE d.document_id = 'ENG-2026-105'
+ON CONFLICT (chunk_id) DO NOTHING;

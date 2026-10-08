@@ -80,28 +80,66 @@ enterprise-rag-pgvector-rbac/
 
 ## 3. Layer 1: Database & pgvector RBAC
 
-### Schema & Dual-Index Strategy (`schema.sql`)
+### Normalized Schema & Dual-Index Strategy (`schema.sql`)
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-CREATE TABLE IF NOT EXISTS enterprise_documents (
-    document_id VARCHAR(64) PRIMARY KEY,
+-- 1. Master Documents Table
+CREATE TABLE IF NOT EXISTS documents (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    document_id VARCHAR(100) NOT NULL UNIQUE,
     title VARCHAR(255) NOT NULL,
+    source_path TEXT,
+    file_hash CHAR(64) UNIQUE,
+    file_type VARCHAR(16) DEFAULT 'markdown',
+    allowed_roles JSONB NOT NULL DEFAULT '[]'::jsonb,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. Document Chunks Table with Foreign Key & Cascade Deletion
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    chunk_id VARCHAR(128) NOT NULL UNIQUE,
+    chunk_index INT NOT NULL DEFAULT 0,
     content TEXT NOT NULL,
-    allowed_roles JSONB NOT NULL,
-    embedding vector(1536),
-    embedding_model VARCHAR(64) DEFAULT 'text-embedding-3-large',
+    token_count INT,
+    embedding vector(1536) NOT NULL,
+    embedding_model VARCHAR(100) DEFAULT 'text-embedding-3-large',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- 1. HNSW Index: sub-millisecond approximate nearest neighbor search
-CREATE INDEX idx_enterprise_documents_embedding_hnsw 
-ON enterprise_documents USING hnsw (embedding vector_cosine_ops)
+-- 3. HNSW Vector Index: sub-millisecond approximate nearest neighbor search
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw 
+ON document_chunks USING hnsw (embedding vector_cosine_ops)
 WITH (m = 16, ef_construction = 64);
 
--- 2. GIN Index: constant-time JSONB role membership pre-filter
-CREATE INDEX idx_enterprise_documents_roles_gin 
-ON enterprise_documents USING gin (allowed_roles jsonb_path_ops);
+-- 4. GIN Role Index: constant-time JSONB role membership pre-filter
+CREATE INDEX IF NOT EXISTS idx_documents_allowed_roles_gin 
+ON documents USING gin (allowed_roles jsonb_path_ops);
+
+-- 5. B-Tree Hash Index: instant cryptographic de-duplication
+CREATE INDEX IF NOT EXISTS idx_documents_file_hash 
+ON documents (file_hash);
+
+-- 6. Backward-Compatible View & Transparent Upsert Trigger
+CREATE OR REPLACE VIEW enterprise_documents AS
+SELECT 
+    c.chunk_id AS document_id,
+    d.title,
+    c.content,
+    d.allowed_roles,
+    c.embedding,
+    c.created_at,
+    c.embedding_model,
+    d.file_hash,
+    d.id AS parent_document_id,
+    c.chunk_index
+FROM documents d
+JOIN document_chunks c ON d.id = c.document_id;
 ```
 
 ### The In-Database RBAC Query (`app/db/manager.py`)
@@ -275,7 +313,7 @@ stateDiagram-v2
 
 ## 8. Testing & Verification Guide
 
-The project features a **100% passing test suite (70/70 tests)** that executes completely offline without external network or API dependencies:
+The project features a **100% passing test suite (76/76 tests)** that executes completely offline without external network or API dependencies:
 
 ```powershell
 python -m pytest -v
@@ -284,6 +322,7 @@ python -m pytest -v
 ### Test Suite Breakdown
 | Module | Tests | Key Invariants Verified |
 | :--- | :---: | :--- |
+| **`tests/test_database_schema.py`** | 6 | • Normalized table schemas (`documents` & `document_chunks`).<br/>• `ON DELETE CASCADE` foreign key relationship.<br/>• HNSW vector index (`m=16, ef=64`) & GIN role index.<br/>• B-tree file hash de-duplication index.<br/>• Backward-compatible view & trigger execution.<br/>• Cosine similarity calculation benchmark simulation. |
 | **`tests/test_security_rbac.py`** | 5 | • SQL injection immunity in vector search.<br/>• Parameterized array containment (`$2::text[]`).<br/>• Zero-Trust empty role short-circuiting.<br/>• Header validation and injection filtering. |
 | **`tests/test_auth.py`** | 34 | • RFC 7636 PKCE `code_verifier` & `code_challenge` derivation.<br/>• Stateless HMAC-SHA256 OAuth state generation & expiration (300s TTL).<br/>• Google JWKS certificate caching & `leeway=60s` clock skew tolerance.<br/>• Multi-source role claim extraction (`app_roles`, `roles`, `groups`, `cognito:groups`, `realm_access.roles`).<br/>• Enterprise JWKS issuer validation & rejection of untrusted issuers.<br/>• **Session Cookie Encoding**: Roundtrip compression, signature tampering rejection, expired TTL handling, and malformed cookie rejection. |
 | **`tests/test_rag.py`** | 4 | • Health check status.<br/>• Strict 401 rejection when unauthenticated.<br/>• Dev header fallback (`X-User-Roles`).<br/>• End-to-end vector retrieval & RBAC filtering. |
@@ -291,7 +330,7 @@ python -m pytest -v
 | **`tests/test_agent.py`** | 6 | • GitHub webhook HMAC-SHA256 verification.<br/>• Webhook JSON parsing into typed models.<br/>• Deterministic secret scanning (API keys, private keys).<br/>• AST static inspection (`eval`, `exec`, `__import__`).<br/>• Sandbox path traversal prevention.<br/>• Full LangGraph self-healing test repair cycle. |
 | **`tests/test_ingest.py`** | 7 | • Pre-ingestion de-duplication, stem matching, chunk prefix detection. |
 | **`tests/test_utilities.py`** | 4 | • Multi-format loaders (`.pdf`, `.md`, `.docx`) and fallback parsers. |
-| **Total** | **70** | **100% Passed (13.5s execution time)** |
+| **Total** | **76** | **100% Passed (36.5s execution time)** |
 
 ---
 
