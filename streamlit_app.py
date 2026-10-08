@@ -54,8 +54,13 @@ from app.auth import (
     extract_roles,
     ensure_google_application_credentials,
 )
-from app.db import DatabaseManager, generate_embedding, chat_completion
+from app.db import DatabaseManager, generate_embedding, chat_completion, chat_completion_stream_sync
 
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    pass
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -135,15 +140,34 @@ def _secret(key: str) -> Optional[str]:
 
 
 def run_async(coro):
-    """Run an async coroutine from synchronous Streamlit context."""
+    """
+    Thread-safe async runner preventing event loop collision in Streamlit worker threads.
+    If current thread's loop is already running, executes in an isolated worker thread pool.
+    """
+    import concurrent.futures
     try:
         loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            raise RuntimeError("closed")
+        if loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                return executor.submit(asyncio.run, coro).result()
+        elif loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(coro)
+        else:
+            return loop.run_until_complete(coro)
     except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(asyncio.run, coro).result()
+
+
+@st.cache_resource
+def get_shared_db_pool():
+    """
+    Cached connection pool shared safely across Streamlit sessions.
+    Prevents connection pool exhaustion under concurrent multi-user load.
+    """
+    return run_async(DatabaseManager.get_pool())
 
 
 def _get_redirect_uri() -> str:
@@ -757,37 +781,49 @@ def _render_rag_interface() -> None:
                 async def perform_search():
                     await DatabaseManager.get_pool()
                     emb = await generate_embedding(prompt_input)
-                    rows = await DatabaseManager.secure_search(emb, roles, limit=3)
+                    rows = await DatabaseManager.hybrid_search(prompt_input, emb, roles, limit=3)
+                    if not rows:
+                        rows = await DatabaseManager.secure_search(emb, roles, limit=3)
                     if not rows:
                         return None
                     context = "\n\n".join(
-                        f"Document: {r['title']}\nContent: {r['content']}"
+                        f"[Doc: {r['title']}, Chunk {r.get('chunk_index', 0)}]:\n{r['content']}"
                         for r in rows
                     )
-                    prompt = f"Context:\n{context}\n\nQuestion: {prompt_input}\nAnswer:"
-                    answer = await chat_completion(prompt)
+                    system_prompt = (
+                        "You are an enterprise zero-trust AI assistant.\n"
+                        "Answer strictly using the authorized context below.\n"
+                        "Cite sources in format [Doc: <Title>, Chunk <Index>].\n"
+                        "If the context does not contain the answer, explicitly state: "
+                        "'I do not have sufficient information in the authorized documents to answer this question.'"
+                    )
+                    prompt = f"{system_prompt}\n\nContext:\n{context}\n\nQuestion: {prompt_input}\nAnswer:"
                     return {
-                        "answer": answer,
+                        "prompt": prompt,
                         "rows": rows,
                         "avg_conf": sum(float(r["similarity"]) for r in rows) / len(rows),
                     }
 
                 result = run_async(perform_search())
-                # Parameterized query representation matching safe in-database asyncpg execution
                 roles_repr = json.dumps(roles)
                 sql_query = (
-                    "SELECT d.document_id, d.title, c.content, d.allowed_roles,\n"
+                    "-- 1. Dense Vector Retrieval (HNSW Cosine Similarity)\n"
+                    "SELECT c.id, d.document_id, d.title, c.chunk_index, c.content,\n"
                     "       1 - (c.embedding <=> $1::vector) AS similarity\n"
                     "FROM document_chunks c\n"
                     "JOIN documents d ON c.document_id = d.id\n"
                     "WHERE d.allowed_roles ?| $2::text[]\n"
-                    "  AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)\n"
-                    "ORDER BY c.embedding <=> $1::vector\n"
-                    "LIMIT $3;\n\n"
-                    f"-- Parameter bindings (parameterized & injection-proof):\n"
-                    f"-- $1 = <query_vector: 1536 dims>\n"
-                    f"-- $2 = {roles_repr}\n"
-                    f"-- $3 = 3"
+                    "ORDER BY c.embedding <=> $1::vector LIMIT 6;\n\n"
+                    "-- 2. Sparse Full-Text Retrieval (GIN tsvector / ts_rank)\n"
+                    "SELECT c.id, d.document_id, d.title, c.chunk_index, c.content,\n"
+                    "       ts_rank(c.tsv, plainto_tsquery('english', $3)) AS text_rank\n"
+                    "FROM document_chunks c\n"
+                    "JOIN documents d ON c.document_id = d.id\n"
+                    "WHERE d.allowed_roles ?| $2::text[]\n"
+                    "  AND c.tsv @@ plainto_tsquery('english', $3)\n"
+                    "ORDER BY text_rank DESC LIMIT 6;\n\n"
+                    "-- 3. Reciprocal Rank Fusion: RRF_Score = sum( 1 / (60 + rank) )\n"
+                    f"-- Parameter bindings: $1=<1536-dim vector>, $2={roles_repr}, $3={json.dumps(prompt_input)}"
                 )
                 if not result:
                     status.update(label="Access Denied / Not Found", state="error", expanded=False)
@@ -795,21 +831,22 @@ def _render_rag_interface() -> None:
                         "⚠️ No authorized documentation found matching your security credentials. "
                         f"The roles `{roles}` are not authorized to access matching documents."
                     )
+                    st.markdown(response_text)
                     citations = []
                 else:
-                    status.update(label="Response Generated", state="complete", expanded=False)
-                    response_text = result["answer"]
+                    status.update(label="Response Streaming", state="complete", expanded=False)
+                    response_text = st.write_stream(chat_completion_stream_sync(result["prompt"]))
                     citations = result["rows"]
 
-            st.markdown(response_text)
             if citations:
                 with st.expander("📚 Sources & Citations", expanded=False):
                     for row in citations:
+                        rrf_str = f", RRF: `{float(row.get('rrf_score', 0.0)):.4f}`" if "rrf_score" in row else ""
                         st.markdown(
-                            f"- **{row['title']}** (Confidence: `{float(row['similarity']):.2f}`)"
+                            f"- **{row['title']}** (Chunk {row.get('chunk_index', 0)}, Confidence: `{float(row['similarity']):.2f}`{rrf_str})"
                         )
                         st.caption(row["content"][:250] + "...")
-            with st.expander("🔍 Executed RBAC Query", expanded=False):
+            with st.expander("🔍 Executed RBAC Query (Hybrid & RRF)", expanded=False):
                 st.code(sql_query, language="sql")
 
         st.session_state.messages.append({

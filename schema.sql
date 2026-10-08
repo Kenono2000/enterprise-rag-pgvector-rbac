@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     token_count INT,
     embedding vector(1536) NOT NULL,
     embedding_model VARCHAR(100) DEFAULT 'text-embedding-3-large',
+    tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -105,6 +106,11 @@ ON document_chunks (document_id);
 -- 5.5 Chunk Sequence Index
 CREATE INDEX IF NOT EXISTS idx_chunks_document_seq 
 ON document_chunks (document_id, chunk_index);
+
+-- 5.6 GIN Full-Text Search Index: sparse keyword matching and lexical search
+CREATE INDEX IF NOT EXISTS idx_chunks_content_tsv 
+ON document_chunks 
+USING gin (tsv);
 
 -- ============================================================================
 -- 6. Deterministic Mock Seed Data (100% Offline Testing & Initial Boot)

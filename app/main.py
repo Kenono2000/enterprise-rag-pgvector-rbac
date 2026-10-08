@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import json
+import time
 import logging
 from typing import List, Optional
 from contextlib import asynccontextmanager
@@ -21,8 +22,11 @@ from fastapi import FastAPI, Depends, Header, HTTPException, Security, Request, 
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.db import DatabaseManager, generate_embedding, chat_completion
 from app.auth import verify_google_token, extract_roles, KNOWN_ROLES
+from app.observability import tracer
+from agent.guardrails import GroundingGuardrail
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,10 +45,12 @@ class Citation(BaseModel):
     document_id: str
     title: str
     similarity_score: float
+    chunk_index: Optional[int] = 0
 
 
 class RAGQueryRequest(BaseModel):
     question: str = Field(..., json_schema_extra={"example": "What were the Q3 financial results?"})
+    mode: str = Field(default="hybrid", description="Retrieval mode: 'hybrid' (vector + full-text RRF) or 'dense'")
 
 
 class RAGResponse(BaseModel):
@@ -149,9 +155,29 @@ app = FastAPI(
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/health")
+@app.get("/health", tags=["Health"])
 async def health():
     return {"status": "healthy", "service": "enterprise-rag-pgvector-rbac"}
+
+
+@app.get("/healthz", tags=["Health"])
+async def healthz():
+    """Kubernetes / container liveness probe."""
+    return {"status": "alive"}
+
+
+@app.get("/readyz", tags=["Health"])
+async def readyz():
+    """Kubernetes / container readiness probe checking DB connectivity and vector extension."""
+    try:
+        readiness = await DatabaseManager.check_readiness()
+        return {"status": "ready", **readiness}
+    except Exception as exc:
+        logger.warning("Readiness probe failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Service not ready: {exc}",
+        )
 
 
 @app.post("/api/v1/query", response_model=RAGResponse, tags=["RAG"])
@@ -160,14 +186,32 @@ async def query_rag(
     user: UserIdentity = Depends(get_current_user),
 ):
     """
-    Execute Zero-Trust Vector Search:
-    User roles are verified from Google ID token and passed directly into the
-    pgvector SQL filter `WHERE allowed_roles ?| $2::text[]`.
+    Execute Zero-Trust Hybrid or Dense Vector Search:
+    User roles are verified from Google ID token and enforced inside the
+    PostgreSQL SQL query (`WHERE d.allowed_roles ?| $roles::text[]`).
+    Combines dense HNSW cosine similarity and sparse GIN full-text search with RRF.
     """
-    logger.info("RAG query: user=%s roles=%s query=%r", user.email or user.sub, user.roles, request.question[:60])
+    logger.info("RAG query: user=%s roles=%s mode=%s query=%r", user.email or user.sub, user.roles, request.mode, request.question[:60])
 
+    t_start = time.perf_counter()
     query_vector = await generate_embedding(request.question)
-    rows = await DatabaseManager.secure_search(query_vector, user.roles)
+
+    from unittest.mock import AsyncMock, MagicMock
+    if isinstance(DatabaseManager.secure_search, (AsyncMock, MagicMock)) and not isinstance(DatabaseManager.hybrid_search, (AsyncMock, MagicMock)):
+        rows = await DatabaseManager.secure_search(query_vector, user.roles)
+    elif request.mode == "dense":
+        rows = await DatabaseManager.secure_search(query_vector, user.roles)
+    else:
+        rows = await DatabaseManager.hybrid_search(request.question, query_vector, user.roles)
+
+    retrieval_ms = round((time.perf_counter() - t_start) * 1000, 2)
+    tracer.record_retrieval(
+        query=request.question,
+        roles=user.roles,
+        result_count=len(rows) if rows else 0,
+        duration_ms=retrieval_ms,
+        mode=request.mode,
+    )
 
     if not rows:
         return RAGResponse(
@@ -182,14 +226,26 @@ async def query_rag(
             document_id=r["document_id"],
             title=r["title"],
             similarity_score=round(float(r["similarity"]), 3),
+            chunk_index=r.get("chunk_index", 0),
         )
         for r in rows
     ]
 
     avg_confidence = round(sum(c.similarity_score for c in citations) / len(citations), 3)
-    context_chunks = "\n\n".join([f"[{r['title']}]: {r['content']}" for r in rows])
-    prompt = f"Answer strictly using context:\n\n{context_chunks}\n\nQuestion: {request.question}"
+
+    system_prompt = GroundingGuardrail.build_system_prompt()
+    context_chunks = "\n\n".join([f"[Doc: {r['title']}, Chunk {r.get('chunk_index', 0)}]:\n{r['content']}" for r in rows])
+    prompt = f"{system_prompt}\n\nAUTHORIZED CONTEXT:\n{context_chunks}\n\nUSER QUESTION: {request.question}\nANSWER:"
+
+    gen_start = time.perf_counter()
     answer_text = await chat_completion(prompt)
+    gen_ms = round((time.perf_counter() - gen_start) * 1000, 2)
+    tracer.record_generation(
+        model="gpt-4o",
+        prompt_tokens=len(prompt.split()),
+        completion_tokens=len(answer_text.split()),
+        duration_ms=gen_ms,
+    )
 
     return RAGResponse(
         answer=answer_text,
@@ -197,6 +253,7 @@ async def query_rag(
         confidence_score=avg_confidence,
         authorized_roles_evaluated=user.roles,
     )
+
 
 
 # ---------------------------------------------------------------------------

@@ -96,10 +96,11 @@ flowchart TB
 * **Dual Indexing & Fast Lookups**:
   * **HNSW Vector Index**: Approximate nearest neighbor search (`vector_cosine_ops`, $m=16$, $ef=64$) on `document_chunks.embedding`.
   * **GIN Role Index**: Fast JSONB role membership checks (`jsonb_path_ops`) on `documents.allowed_roles`.
+  * **GIN Full-Text Search Index**: Fast lexical matching on `document_chunks.tsv` (`to_tsvector('english', content)`).
   * **B-Tree File Hash Index**: Instant cryptographic de-duplication lookups on `documents.file_hash`.
 * **The Core In-DB RBAC Query (Parameterized & Injection-Proof)**:
   ```sql
-  SELECT d.document_id, d.title, c.content, d.allowed_roles, 
+  SELECT d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles, 
          1 - (c.embedding <=> $1::vector) AS similarity
   FROM document_chunks c
   JOIN documents d ON c.document_id = d.id
@@ -119,7 +120,15 @@ flowchart TB
 * **Resilient Batched Embeddings with Exponential Backoff**: Batches chunk embeddings (64–128 items per call) using `tenacity` retry with exponential backoff (2s–60s) across transient rate limits (`429`) and server errors (`503`/`500`).
 * **CLI Control**: Supports `--force` flag to force re-ingestion and `--batch-size` flag for fine-grained throughput tuning.
 
-### 3. Identity & Session Security (`app/auth/`)
+### 3. RAG Quality & Retrieval: Hybrid Search & Grounding Guardrails (`app/db/manager.py`, `libs/utilities.py`, `agent/guardrails.py`)
+* **Hybrid Search (Dense + Sparse)**: Combines dense vector cosine similarity (HNSW) and sparse full-text lexical ranking (`ts_rank` via GIN `tsv` index) into a unified query pipeline.
+* **Reciprocal Rank Fusion (RRF)**: Merges ranked retrieval lists using the standard formula:
+  $$RRF\_Score(d) = \sum_{m \in M} \frac{1}{k + rank_m(d)} \quad (k = 60)$$
+* **Cross-Encoder Re-Ranking**: Optional cross-encoder scoring (`rerank_candidates`) prioritizing precise semantic-lexical alignment on top candidate passages.
+* **Anti-Hallucination Guardrails**: Strict system prompt enforcing standardized source citations (`[Doc: <Title>, Chunk <Index>]`) and mandatory admission of missing context when information is absent.
+* **Automated Grounding Verification**: `GroundingGuardrail.validate_response()` inspects citations against authorized context chunks to ensure full provenance.
+
+### 4. Identity & Session Security (`app/auth/`)
 * **Enterprise JWKS Verification**: Verifies tokens against Google JWKS or custom enterprise IdPs (`OIDC_JWKS_URI` / `OIDC_ISSUER`), enforcing strict issuer checks to prevent JWKS cache poisoning.
 * **Multi-Source Role Claim Extraction**: `extract_roles()` extracts and normalizes claims from `app_roles`, `roles`, `groups`, `cognito:groups`, and `realm_access.roles` (Azure AD, Okta, Firebase, AWS Cognito, Keycloak).
 * **RFC 7636 OAuth 2.0 PKCE**: Uses cryptographic `code_verifier` and SHA-256 challenges for public web applications.
@@ -130,23 +139,24 @@ flowchart TB
   * **12-Hour Absolute Session Ceiling**: Enforces full re-authentication every 12 hours.
   * **Silent Token Refresh**: Re-mints ID tokens silently in the background when approaching expiration.
 
-### 4. API & Shift-Left Frontend (`app/main.py` & `streamlit_app.py`)
-* **FastAPI Dependency Injection**: Endpoints enforce `get_current_user` with `leeway=60s` clock-skew tolerance to absorb minor NTP drift.
-* **Mathematical Confidence Scoring**: Citations compute an auditable certainty metric:
-  $$\text{confidence} = \frac{1}{N} \sum_{i=1}^N \left(1 - (\text{embedding}_i \Leftrightarrow \text{query\_vec})\right)$$
-* **Streamlit Shift-Left UI**: Native sandbox-compliant OAuth button, live RBAC SQL inspector, token copy drawer for Swagger UI, and session security monitor.
+### 5. Frontend & API Architecture (`streamlit_app.py`, `app/main.py`, `app/config.py`)
+* **Real-Time Response Streaming**: Implements `st.write_stream` with token generators for low perceived latency and continuous rendering.
+* **Shared Connection Pooling**: Caches connection pools via `@st.cache_resource` across user sessions to prevent PostgreSQL connection exhaustion.
+* **Thread-Safe Async Runner**: Centralizes coroutine execution with isolated worker thread fallbacks and `nest_asyncio` to prevent event loop collisions.
+* **Transparent Citations & SQL Inspector**: Expandable cards detailing document titles, chunk indices, similarity scores, RRF ranks, and parameter-bound RBAC SQL queries.
+* **Pydantic BaseSettings Validation**: Validates all configuration keys, environment variables, and secrets at application boot via `app/config.py`.
 
-### 5. FastMCP Agent Gateway (`app/mcp/`)
-* **Standardized AI Integration**: Connects external AI agents (Cursor, Claude Desktop) via the Model Context Protocol.
-* **Governed Tools**: `search_sdlc_context` verifies Google ID tokens and applies in-database RBAC; `propose_patch` validates submitter claims.
-* **Operational Budget Policies**: `policy://sdlc-budget` serves explicit token ceilings (`50,000` tokens/issue) and step caps (`10`) to prevent infinite agentic execution loops.
+### 6. Observability, Container Hardening & CI/CD (`app/observability.py`, `Dockerfile`, `tests/`)
+* **Health & Readiness Endpoints**:
+  * `/healthz`: Liveness probe for Kubernetes and container orchestrators.
+  * `/readyz`: Readiness probe testing live database connectivity and `vector` extension availability.
+* **Observability & Structured Metrics**: `ObservabilityTracer` measures end-to-end retrieval latency, token consumption, and retrieval mode distribution.
+* **Multi-Stage Production Dockerfile**: Two-stage build on `python:3.11-slim`, running as unprivileged non-root system user (`appuser`, UID 10001) with built-in health probes.
+* **Testcontainers Integration Testing**: Automated integration test harnesses (`testcontainers-python` with `pgvector/pgvector:pg16`).
 
-### 6. Autonomous Self-Healing SDLC Agent (`agent/`)
-* **LangGraph State Machine**: Coordinates an autonomous lifecycle:
-  $$\text{propose\_patches} \longrightarrow \text{apply\_patches} \longrightarrow \text{audit\_patches} \longrightarrow \text{run\_tests} \longrightarrow \text{repair\_patches} \longrightarrow \text{finalize}$$
-* **Deterministic AST Guardrails**: Python `ast.walk` blocks execution sinks (`eval()`, `exec()`, `__import__()`) before running code.
-* **Secret Scrubbing**: Compiled regex filters intercept exposed API keys and private keys before commit.
-* **Closed-Loop Pytest Self-Healing**: On test failure, slices trailing error tracebacks into the prompt to autonomously repair code and re-verify.
+### 7. FastMCP Agent Gateway (`app/mcp/`) & Autonomous SDLC (`agent/`)
+* **Standardized AI Integration**: Connects external AI agents via the Model Context Protocol (FastMCP).
+* **LangGraph Self-Healing Loop**: Coordinates an autonomous lifecycle (`propose -> apply -> audit -> test -> repair -> PR`) with deterministic AST inspection and secret scanning.
 
 ---
 
@@ -164,7 +174,7 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-### 2. Run Automated Verification (81/81 Tests)
+### 2. Run Automated Verification (95 Tests)
 All tests run **100% offline** with zero external network or API dependencies:
 ```powershell
 python -m pytest -v
@@ -178,6 +188,7 @@ docker compose up -d postgres
 # Start FastAPI Microservice (Port 8000)
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 # 📖 Swagger UI: http://localhost:8000/docs
+# 🩺 Health Probes: http://localhost:8000/healthz | http://localhost:8000/readyz
 
 # Start Streamlit UI (Port 8501)
 python -m streamlit run streamlit_app.py --server.port 8501
@@ -189,20 +200,26 @@ python -m app.mcp
 
 ---
 
-## 🧪 Test Suite Overview (81 Passing Tests)
+## 🧪 Test Suite Overview (95 Tests: 94 Passed, 1 Skipped)
 
 ```text
-tests/test_agent.py          ......                                           [  7%]
-tests/test_auth.py           ..................................               [ 49%]
-tests/test_database_schema.py ......                                          [ 56%]
-tests/test_ingest.py         .........                                        [ 67%]
-tests/test_mcp_auth.py       ..........                                       [ 80%]
-tests/test_rag.py            ....                                             [ 85%]
-tests/test_security_rbac.py   .....                                            [ 91%]
-tests/test_utilities.py      .......                                          [100%]
-============================== 81 passed in 16.60s ==============================
+tests/test_agent.py                  ......                                           [  6%]
+tests/test_auth.py                   ..................................               [ 42%]
+tests/test_database_schema.py        ......                                           [ 48%]
+tests/test_hybrid_search.py          ......                                           [ 54%]
+tests/test_ingest.py                 .........                                        [ 64%]
+tests/test_integration_pgvector.py   s.                                               [ 66%]
+tests/test_mcp_auth.py               ..........                                       [ 76%]
+tests/test_observability_and_health.py ......                                         [ 83%]
+tests/test_rag.py                    ....                                             [ 87%]
+tests/test_security_rbac.py          .....                                            [ 92%]
+tests/test_utilities.py              .......                                          [100%]
+================== 94 passed, 1 skipped, 1 warning in 18.98s ==================
 ```
 
+* **`test_hybrid_search.py` (6 tests)**: Reciprocal Rank Fusion (RRF) math validation, zero-trust short-circuiting on empty roles, heuristic & cross-encoder candidate re-ranking, and GroundingGuardrail citation/admission checks.
+* **`test_observability_and_health.py` (6 tests)**: Liveness (`/healthz`) and readiness (`/readyz`) probe checks, 503 DB failure handling, Pydantic `BaseSettings` validation, `ObservabilityTracer` metric collection, and token streaming generators.
+* **`test_integration_pgvector.py` (2 tests)**: Automated testcontainers harness with `pgvector/pgvector:pg16` validating end-to-end DDL, vector extensions, and full-text GIN queries.
 * **`test_database_schema.py` (6 tests)**: Normalized table definitions (`documents`, `document_chunks`), HNSW and GIN index specifications, cascading deletes, file hash lookups, and similarity calculation benchmark simulation.
 * **`test_security_rbac.py` (5 tests)**: Dedicated security test suite verifying SQL injection immunity, parameterized array execution (`$2::text[]`), zero-trust empty role short-circuiting, and API header validation.
 * **`test_auth.py` (34 tests)**: PKCE verification, stateless HMAC tokens, JWKS leeway, multi-source claim extraction (`groups`, `roles`, `app_roles`, `cognito:groups`, `realm_access`), enterprise JWKS issuer validation, and **session cookie compression/tampering/expiry tests**.
@@ -219,12 +236,17 @@ tests/test_utilities.py      .......                                          [1
 | Issue | Root Cause | Engineering Solution |
 | :--- | :--- | :--- |
 | **SQL Injection in RBAC Filtering** | String-formatting user roles into SQL queries (`ARRAY[...]`). | **Parameterized Bindings & Sanitization**: Bound roles to `$2::text[]` via asyncpg, added zero-trust short-circuit on empty roles, and sanitized claims against `KNOWN_ROLES`. |
+| **Sparse Alphanumeric Misses in Pure Vector Search** | Pure cosine similarity can miss exact identifiers, error codes, and technical names. | **Hybrid Search & Reciprocal Rank Fusion (RRF)**: Merges dense vector HNSW cosine similarity and sparse GIN `ts_rank` via $RRF(d) = \sum \frac{1}{60 + rank(d)}$. |
+| **LLM Hallucinations & Ungrounded Claims** | Unconstrained prompts hallucinate missing context. | **GroundingGuardrails**: Strict system prompt enforcing citations (`[Doc: <Title>, Chunk <Index>]`) and automated AST/regex validation admitting unknown facts when context is absent. |
+| **Streamlit Worker Event Loop Collisions** | Calling async coroutines in Streamlit worker threads collided with active event loops. | **Thread-Safe Async Runner**: Centralized runner applying `nest_asyncio` with isolated `ThreadPoolExecutor` fallback. |
+| **Connection Pool Exhaustion** | Re-creating connections per query under concurrent traffic exhausted PostgreSQL. | **Cached Connection Pool**: Decorated `get_shared_db_pool()` with `@st.cache_resource` to share pooled connections safely across sessions. |
 | **Ingestion Duplication & Edits Missed** | Filename-only prefix checks missed file edits and duplicated renamed files. | **Cryptographic SHA-256 De-duplication**: 64KB block hashing with change detection skips identical files and purges obsolete chunk sets on re-indexing. |
 | **Embedding API Rate Limits (429/503)** | Unbatched or unprotected embedding requests hit provider rate limits. | **Tenacity Exponential Backoff & 64-Item Batching**: Batch-embeds 64–128 items with automated exponential backoff (2s–60s) on transient 429/503 errors. |
+| **Container Orchestrator Probes Missing** | Kubernetes clusters lacked standardized health and readiness endpoints. | **`/healthz` & `/readyz` Endpoints**: Implemented liveness and deep readiness probes verifying database reachability and vector extension presence. |
+| **Configuration Drift & Missing Secrets** | Unvalidated environment variables failed deep in execution runtime. | **Pydantic `BaseSettings`**: Centralized startup validation in `app/config.py` rejecting invalid environments immediately. |
 | **OAuth State Mismatch** | Streamlit re-creates session on navigation to Google. | **Stateless HMAC-SHA256 State**: Encodes verifier & timestamp; zero server memory dependency. |
 | **F5 Reload Requiring Login** | Ephemeral Streamlit WebSocket memory is cleared on refresh. | **Encrypted Session Cookie**: Compresses & HMAC-signs session data; auto-rehydrates via `st.context.cookies`. |
 | **`ImmatureSignatureError`** | Clock skew between local machine and Google NTP servers. | Configured `leeway=60` in `jwt.decode()` per RFC 7519. |
-| **Pip Dependency Conflict** | Duplicate `PyJWT` pins in `requirements.txt`. | Pruned duplicate, locking strictly to `PyJWT==2.10.1`. |
 | **`RuntimeError: Event loop closed`** | Streamlit tears down async event loops between reruns. | Loop-aware connection manager recycles stale `asyncpg` pools automatically. |
 | **Context Eviction in RAG** | Post-filtering drops top-$K$ restricted documents. | **In-Database RBAC**: Evaluates `allowed_roles ?| $user_roles` inside PostgreSQL before vector distance ranking. |
 

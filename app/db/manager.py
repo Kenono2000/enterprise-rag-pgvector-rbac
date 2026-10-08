@@ -89,7 +89,7 @@ class DatabaseManager:
         vector_str = f"[{','.join(map(str, query_vector))}]"
         
         sql = """
-            SELECT d.document_id, d.title, c.content, d.allowed_roles, 
+            SELECT d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles, 
                    1 - (c.embedding <=> $1::vector) as similarity
             FROM document_chunks c
             JOIN documents d ON c.document_id = d.id
@@ -100,6 +100,124 @@ class DatabaseManager:
         """
         async with pool.acquire() as conn:
             return await conn.fetch(sql, vector_str, sanitized_roles, limit)
+
+    @classmethod
+    async def hybrid_search(
+        cls,
+        query_text: str,
+        query_vector: List[float],
+        user_roles: List[str],
+        limit: int = 10,
+        rrf_k: int = 60,
+    ) -> List[dict]:
+        """
+        Execute Hybrid Search combining Dense Vector Search (HNSW cosine similarity)
+        and Sparse Full-Text Search (GIN tsvector / ts_rank) with Reciprocal Rank Fusion (RRF).
+        Enforces Zero-Trust RBAC: documents outside user_roles are filtered at SQL execution time.
+        """
+        if not user_roles:
+            return []
+
+        from app.auth.role_mapper import KNOWN_ROLES
+        sanitized_roles = [
+            str(r).strip() for r in user_roles
+            if isinstance(r, str) and (str(r).strip() in KNOWN_ROLES or str(r).strip().isidentifier())
+        ]
+        if not sanitized_roles:
+            return []
+
+        pool = await cls.get_pool()
+        vector_str = f"[{','.join(map(str, query_vector))}]"
+
+        # 1. Dense retrieval (HNSW cosine distance)
+        dense_sql = """
+            SELECT c.id::text as chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
+                   1 - (c.embedding <=> $1::vector) AS similarity
+            FROM document_chunks c
+            JOIN documents d ON c.document_id = d.id
+            WHERE d.allowed_roles ?| $2::text[]
+              AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)
+            ORDER BY c.embedding <=> $1::vector
+            LIMIT $3
+        """
+
+        # 2. Sparse retrieval (Full-Text Search with ts_rank)
+        sparse_sql = """
+            SELECT c.id::text as chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
+                   ts_rank(c.tsv, plainto_tsquery('english', $1)) AS text_rank,
+                   1 - (c.embedding <=> $2::vector) AS similarity
+            FROM document_chunks c
+            JOIN documents d ON c.document_id = d.id
+            WHERE d.allowed_roles ?| $3::text[]
+              AND c.tsv @@ plainto_tsquery('english', $1)
+            ORDER BY text_rank DESC
+            LIMIT $4
+        """
+
+        fetch_limit = limit * 2
+        async with pool.acquire() as conn:
+            dense_rows = await conn.fetch(dense_sql, vector_str, sanitized_roles, fetch_limit)
+            try:
+                sparse_rows = await conn.fetch(sparse_sql, query_text, vector_str, sanitized_roles, fetch_limit)
+            except Exception:
+                sparse_rows = []
+
+        # 3. Reciprocal Rank Fusion (RRF)
+        # RRF Score = sum( 1 / (k + rank) )
+        candidates = {}
+
+        for rank, row in enumerate(dense_rows):
+            key = row["chunk_id_pk"]
+            candidates[key] = {
+                "chunk_id_pk": key,
+                "document_id": row["document_id"],
+                "title": row["title"],
+                "chunk_index": row.get("chunk_index", 0),
+                "content": row["content"],
+                "allowed_roles": row["allowed_roles"],
+                "similarity": float(row["similarity"]),
+                "text_rank": 0.0,
+                "dense_rank": rank + 1,
+                "sparse_rank": None,
+                "rrf_score": 1.0 / (rrf_k + (rank + 1)),
+            }
+
+        for rank, row in enumerate(sparse_rows):
+            key = row["chunk_id_pk"]
+            sparse_score = 1.0 / (rrf_k + (rank + 1))
+            if key in candidates:
+                candidates[key]["sparse_rank"] = rank + 1
+                candidates[key]["text_rank"] = float(row.get("text_rank", 0.0))
+                candidates[key]["rrf_score"] += sparse_score
+            else:
+                candidates[key] = {
+                    "chunk_id_pk": key,
+                    "document_id": row["document_id"],
+                    "title": row["title"],
+                    "chunk_index": row.get("chunk_index", 0),
+                    "content": row["content"],
+                    "allowed_roles": row["allowed_roles"],
+                    "similarity": float(row.get("similarity", 0.0)),
+                    "text_rank": float(row.get("text_rank", 0.0)),
+                    "dense_rank": None,
+                    "sparse_rank": rank + 1,
+                    "rrf_score": sparse_score,
+                }
+
+        fused = sorted(candidates.values(), key=lambda x: x["rrf_score"], reverse=True)
+        return fused[:limit]
+
+    @classmethod
+    async def check_readiness(cls) -> dict:
+        """Probe database connectivity and vector extension status."""
+        pool = await cls.get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("SELECT 1")
+            ext = await conn.fetchval("SELECT extname FROM pg_extension WHERE extname = 'vector'")
+            return {
+                "database": "connected",
+                "vector_extension": "available" if ext == "vector" else "missing",
+            }
 
 
     @classmethod

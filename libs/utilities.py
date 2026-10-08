@@ -12,6 +12,7 @@ __all__ = [
     "load_config",
     "log_error",
     "remove_comments_and_docstrings",
+    "rerank_candidates",
     "safe_calculate",
     "split_chunks",
     "truncate_and_normalize",
@@ -247,6 +248,45 @@ def get_embedding_model(api_key: str) -> OpenAIEmbeddings:
         dimensions=1536,
         openai_api_key=api_key
     )
+
+
+def rerank_candidates(
+    query: str,
+    candidates: list[dict],
+    top_k: int = 5,
+    cross_encoder_model: str | None = None,
+) -> list[dict]:
+    """
+    Support optional cross-encoder re-ranking on top candidates.
+    If a cross-encoder model is specified and available, scores candidates with it;
+    otherwise applies robust deterministic fusion (combining lexical query overlap,
+    semantic similarity, and reciprocal rank).
+    """
+    if not candidates:
+        return []
+
+    if cross_encoder_model:
+        try:
+            from sentence_transformers import CrossEncoder
+            model = CrossEncoder(cross_encoder_model)
+            pairs = [[query, c.get("content", "")] for c in candidates]
+            scores = model.predict(pairs)
+            for c, score in zip(candidates, scores):
+                c["rerank_score"] = float(score)
+            return sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)[:top_k]
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Cross-encoder model unavailable, applying fallback: %s", exc)
+
+    # Deterministic hybrid scoring combining lexical token match, similarity, and RRF
+    query_terms = set(re.findall(r"\w+", query.lower()))
+    for c in candidates:
+        content_terms = set(re.findall(r"\w+", c.get("content", "").lower()))
+        term_overlap = len(query_terms & content_terms) / max(1, len(query_terms))
+        base_sim = float(c.get("similarity", 0.0))
+        rrf = float(c.get("rrf_score", 0.0))
+        c["rerank_score"] = round(base_sim * 0.5 + term_overlap * 0.35 + rrf * 0.15, 4)
+
+    return sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)[:top_k]
 
 def get_llm(api_key: str, model: str = "gpt-4o", temperature: float = 0.0) -> ChatOpenAI:
     return ChatOpenAI(model=model, temperature=temperature, openai_api_key=api_key)

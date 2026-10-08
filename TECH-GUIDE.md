@@ -11,11 +11,15 @@
 2. [Codebase Organization](#2-codebase-organization)
 3. [Layer 1: Database & pgvector RBAC (`schema.sql` & `app/db/`)](#3-layer-1-database--pgvector-rbac)
 4. [Layer 2: Identity, Tokens & Session Security (`app/auth/`)](#4-layer-2-identity-tokens--session-security)
-5. [Layer 3: FastAPI Backend & Streamlit Frontend](#5-layer-3-fastapi-backend--streamlit-frontend)
-6. [Layer 4: FastMCP Agent Gateway (`app/mcp/`)](#6-layer-4-fastmcp-agent-gateway)
-7. [Layer 5: Autonomous Self-Healing SDLC Agent (`agent/`)](#7-layer-5-autonomous-self-healing-sdlc-agent)
-8. [Testing & Verification Guide (41/41 Tests)](#8-testing--verification-guide)
-9. [Operational Cheat Sheet & Troubleshooting](#9-operational-cheat-sheet--troubleshooting)
+5. [Layer 3: High-Performance Ingestion Pipeline (`scripts/ingest.py` & `libs/utilities.py`)](#5-layer-3-high-performance-ingestion-pipeline)
+6. [Layer 4: RAG Quality, Hybrid Search & Grounding Guardrails](#6-layer-4-rag-quality-hybrid-search--grounding-guardrails)
+7. [Layer 5: FastAPI Backend & Streamlit Streaming Frontend](#7-layer-5-fastapi-backend--streamlit-streaming-frontend)
+8. [Layer 6: Observability, Testing & Container Hardening](#8-layer-6-observability-testing--container-hardening)
+9. [Layer 7: FastMCP Agent Gateway (`app/mcp/`)](#9-layer-7-fastmcp-agent-gateway)
+10. [Layer 8: Autonomous Self-Healing SDLC Agent (`agent/`)](#10-layer-8-autonomous-self-healing-sdlc-agent)
+11. [Testing & Verification Guide (95 Tests)](#11-testing--verification-guide)
+12. [Operational Cheat Sheet & Troubleshooting](#12-operational-cheat-sheet--troubleshooting)
+
 
 ---
 
@@ -109,6 +113,7 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     token_count INT,
     embedding vector(1536) NOT NULL,
     embedding_model VARCHAR(100) DEFAULT 'text-embedding-3-large',
+    tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -124,6 +129,10 @@ ON documents USING gin (allowed_roles jsonb_path_ops);
 -- 5. B-Tree Hash Index: instant cryptographic de-duplication
 CREATE INDEX IF NOT EXISTS idx_documents_file_hash 
 ON documents (file_hash);
+
+-- 6. GIN Full-Text Search Index: sparse keyword matching & lexical rank
+CREATE INDEX IF NOT EXISTS idx_chunks_content_tsv 
+ON document_chunks USING gin (tsv);
 ```
 
 ### The In-Database RBAC Query (`app/db/manager.py`)
@@ -257,32 +266,97 @@ flowchart TD
 
 ---
 
-## 6. Layer 4: FastAPI Backend & Streamlit Frontend
+---
 
-### FastAPI Dependency Injection (`app/main.py`)
-All endpoints are secured via `get_current_user`:
-```python
-async def get_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
-    x_user_roles: Optional[str] = Header(default=None),
-) -> UserIdentity:
+## 6. Layer 4: RAG Quality, Hybrid Search & Grounding Guardrails
+
+### 6.1 The Need for Hybrid Search (Dense + Sparse)
+While dense vector embeddings capture semantic intent, pure cosine similarity can miss exact alphanumeric identifiers, error codes (e.g. `ERR-502-BAD-GATEWAY`), and document IDs (`FIN-2026-001`). Sparse full-text search excels at exact lexical matching but misses semantic synonyms.
+
 ```
-* Enforces Google Bearer token verification with **60-second clock skew leeway** (`leeway=60`) to absorb minor time drifts between local hardware and Google NTP servers.
-* Validates and sanitizes legacy dev headers (`X-User-Roles`), rejecting non-array formats with `400 Bad Request`.
-* Returns a strongly-typed `UserIdentity(email, roles, sub)` injected into RAG queries.
+Dense Retrieval (HNSW Vector Index):
+[Semantic Concepts & Intent] ────────► Cosine Similarity (1 - <=> )
+                                                 │
+                                                 ├─► Reciprocal Rank Fusion (RRF) ──► Top Candidates
+                                                 │
+Sparse Retrieval (GIN tsvector Index):           │
+[Exact Terms, Identifiers, Codes] ───► Full-Text Rank (ts_rank)
+```
 
-### Mathematical Confidence Scoring
-Every retrieval response includes an auditable confidence score:
-$$\text{confidence\_score} = \frac{1}{N} \sum_{i=1}^N \text{similarity}_i = \frac{1}{N} \sum_{i=1}^N \left(1 - (\text{embedding}_i \Leftrightarrow \text{query\_vec})\right)$$
+### 6.2 Reciprocal Rank Fusion (RRF) Algorithm
+The hybrid pipeline evaluates both ranking algorithms and combines candidate items using the standard Reciprocal Rank Fusion formula:
+$$RRF(d) = \sum_{m \in M} \frac{1}{k + rank_m(d)}$$
+where $M = \{\text{dense}, \text{sparse}\}$, $k = 60$ is the standard smoothing constant, and $rank_m(d)$ represents the 1-based rank position in retrieval stream $m$.
 
-### Streamlit Shift-Left UI (`streamlit_app.py`)
-* **Iframe Sandbox-Safe Navigation**: Uses native popup navigation (`target="_blank"`) compliant with Streamlit Community Cloud iframe sandboxing policies.
-* **Live RBAC Audit Inspector**: Displays parameterized query templates (`WHERE allowed_roles ?| $2::text[]`) with safe JSON-serialized parameter bindings (`$1`, `$2`, `$3`), demonstrating SQL injection immunity directly on screen.
-* **Interactive Security Panel**: Real-time session elapsed time, ID token TTL countdown, manual silent refresh trigger, and token copy drawer for Swagger UI (`/docs`).
+Both retrieval queries strictly execute the same in-database RBAC filter (`d.allowed_roles ?| $user_roles::text[]`), guaranteeing that unauthenticated passages are excluded prior to scoring.
+
+### 6.3 Optional Cross-Encoder Re-Ranking (`libs/utilities.py`)
+`rerank_candidates(query, candidates, top_k=5, cross_encoder_model=...)` evaluates the top candidates:
+* **Deep Model (When Available)**: Uses sentence-transformers `CrossEncoder` or Cohere Rerank API to compute full cross-attention token interactions between `query` and `chunk.content`.
+* **Deterministic Fallback**: In offline and test environments, applies a calibrated combination of semantic cosine similarity (50%), lexical token intersection (35%), and RRF position (15%).
+
+### 6.4 Strict Anti-Hallucination & Grounding Guardrails (`agent/guardrails.py`)
+* **Standardized Citation Format**: Every claim in the LLM response must be attributed to an authorized passage in the format `[Doc: <Title>, Chunk <Index>]`.
+* **Explicit Unknown Admission**: If the authorized context does not contain sufficient facts to answer the question, the assistant must explicitly declare:
+  > *"I do not have sufficient information in the authorized documents to answer this question."*
+* **GroundingGuardrail Validation**: `GroundingGuardrail.validate_response(answer, context_chunks)` evaluates regular expression citation patterns and verifies that cited document titles match genuine retrieved context passages.
 
 ---
 
-## 7. Layer 5: FastMCP Agent Gateway (`app/mcp/`)
+## 7. Layer 5: FastAPI Backend & Streamlit Streaming Frontend
+
+### 7.1 FastAPI Dependency Injection & Health Probes (`app/main.py`)
+All endpoints enforce `get_current_user` with `leeway=60s` clock-skew tolerance and support Kubernetes container orchestration probes:
+* `GET /healthz`: Immediate liveness check returning `{"status": "alive"}`.
+* `GET /readyz`: Deep readiness check validating active PostgreSQL pool connection and pgvector extension availability (`SELECT extname FROM pg_extension WHERE extname = 'vector'`). Returns HTTP 503 if the database is unreachable.
+* `POST /api/v1/query`: Accepts `RAGQueryRequest(question, mode="hybrid"|"dense")`. Applies zero-trust RBAC in PostgreSQL, runs RRF fusion, applies the grounding system prompt, and logs observability metrics.
+
+### 7.2 Real-Time Token Streaming in Streamlit (`streamlit_app.py`)
+* Synchronous and asynchronous token generators (`chat_completion_stream`, `chat_completion_stream_sync`) stream LLM responses in real-time.
+* Uses Streamlit's native `st.write_stream(...)` to render response tokens as they arrive, eliminating perceived latency while maintaining expanders for citations and executed RBAC SQL queries.
+
+### 7.3 Shared Connection Pooling (`@st.cache_resource`)
+Streamlit creates new script runner threads per user interaction. To prevent PostgreSQL connection pool exhaustion:
+* `get_shared_db_pool()` is decorated with `@st.cache_resource`, ensuring a single shared connection pool persists across all sessions and page refreshes.
+
+### 7.4 Thread-Safe Async Runner (`run_async`)
+* Protects against `RuntimeError: This event loop is already running` in multi-threaded Streamlit worker threads.
+* Automatically detects active event loops, applies `nest_asyncio` if present, and routes execution to an isolated `concurrent.futures.ThreadPoolExecutor` when called inside an already-active event loop.
+
+---
+
+## 8. Layer 6: Observability, Testing & Container Hardening
+
+### 8.1 Configuration Validation via Pydantic BaseSettings (`app/config.py`)
+`app/config.py` uses `pydantic_settings.BaseSettings` to validate environment variables, secrets, and connection parameters at application startup. Missing credentials or malformed URIs fail fast during boot rather than intermittently at runtime.
+
+### 8.2 Enterprise Observability & Tracing (`app/observability.py`)
+* `ObservabilityTracer` measures execution metrics across retrieval and generation pipelines.
+* Records retrieval latency, candidate passage count, and retrieval mode (`hybrid` vs `dense`).
+* Records LLM token usage (prompt tokens, completion tokens, total tokens) and inference latency.
+* Designed for zero-overhead integration with OpenTelemetry and Langfuse collectors.
+
+### 8.3 Hardened Multi-Stage Dockerfile (`Dockerfile`)
+```dockerfile
+# Stage 1: Build & Wheel Compilation
+FROM python:3.11-slim AS builder
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+# Stage 2: Hardened Runtime Container
+FROM python:3.11-slim AS runner
+RUN groupadd -g 10001 appgroup && useradd -u 10001 -g appgroup -m -s /bin/bash appuser
+USER appuser
+HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8000/healthz || exit 1
+```
+* **Minimal Attack Surface**: Build dependencies (`gcc`, `libpq-dev`) are stripped from the final runtime image.
+* **Non-Root Execution**: Runs under unprivileged user `appuser` (UID 10001), preventing container escape vulnerabilities.
+
+### 8.4 Automated Integration Testing (`testcontainers-python`)
+`tests/test_integration_pgvector.py` provides end-to-end integration testing against real database containers (`pgvector/pgvector:pg16`), verifying that `schema.sql` initializes extensions, creates tables, and executes HNSW and GIN queries accurately in CI environments.
+
+---
+
+## 9. Layer 7: FastMCP Agent Gateway (`app/mcp/`)
 
 FastMCP standardizes tool and resource access for external AI coding agents (Claude Desktop, Cursor, CLI agents):
 
@@ -294,7 +368,7 @@ FastMCP standardizes tool and resource access for external AI coding agents (Cla
 
 ---
 
-## 8. Layer 6: Autonomous Self-Healing SDLC Agent (`agent/`)
+## 10. Layer 8: Autonomous Self-Healing SDLC Agent (`agent/`)
 
 The autonomous agent listens to GitHub issue webhooks, writes code patches, audits them statically, runs tests, and autonomously repairs bugs.
 
@@ -331,9 +405,9 @@ stateDiagram-v2
 
 ---
 
-## 9. Testing & Verification Guide
+## 11. Testing & Verification Guide
 
-The project features a **100% passing test suite (81/81 tests)** that executes completely offline without external network or API dependencies:
+The project features a **100% passing test suite (95 tests: 94 passed, 1 skipped)** that executes completely offline without external network or API dependencies:
 
 ```powershell
 python -m pytest -v
@@ -342,7 +416,10 @@ python -m pytest -v
 ### Test Suite Breakdown
 | Module | Tests | Key Invariants Verified |
 | :--- | :---: | :--- |
-| **`tests/test_database_schema.py`** | 6 | • Normalized table schemas (`documents` & `document_chunks`).<br/>• `ON DELETE CASCADE` foreign key relationship.<br/>• HNSW vector index (`m=16, ef=64`) & GIN role index.<br/>• B-tree file hash de-duplication index.<br/>• Consolidated migration cleanup logic in schema.sql.<br/>• Cosine similarity calculation benchmark simulation. |
+| **`tests/test_hybrid_search.py`** | 6 | • Reciprocal Rank Fusion (RRF) math validation.<br/>• Zero-Trust empty role short-circuiting.<br/>• Heuristic & cross-encoder candidate re-ranking.<br/>• GroundingGuardrail citation and missing context admission checks. |
+| **`tests/test_observability_and_health.py`** | 6 | • Liveness (`/healthz`) and readiness (`/readyz`) probes.<br/>• 503 DB failure handling.<br/>• Pydantic `BaseSettings` validation.<br/>• `ObservabilityTracer` metric recording.<br/>• Token streaming sync and async generators. |
+| **`tests/test_integration_pgvector.py`** | 2 | • Testcontainers `pgvector/pgvector:pg16` end-to-end integration harness.<br/>• Verification of schema.sql DDL, HNSW index, and GIN full-text search. |
+| **`tests/test_database_schema.py`** | 6 | • Normalized table schemas (`documents` & `document_chunks`).<br/>• `ON DELETE CASCADE` foreign key relationship.<br/>• HNSW vector index (`m=16, ef=64`) & GIN role index.<br/>• GIN full-text index on `tsv`.<br/>• B-tree file hash de-duplication index.<br/>• Cosine similarity calculation benchmark simulation. |
 | **`tests/test_security_rbac.py`** | 5 | • SQL injection immunity in vector search.<br/>• Parameterized array containment (`$2::text[]`).<br/>• Zero-Trust empty role short-circuiting.<br/>• Header validation and injection filtering. |
 | **`tests/test_auth.py`** | 34 | • RFC 7636 PKCE `code_verifier` & `code_challenge` derivation.<br/>• Stateless HMAC-SHA256 OAuth state generation & expiration (300s TTL).<br/>• Google JWKS certificate caching & `leeway=60s` clock skew tolerance.<br/>• Multi-source role claim extraction (`app_roles`, `roles`, `groups`, `cognito:groups`, `realm_access.roles`).<br/>• Enterprise JWKS issuer validation & rejection of untrusted issuers.<br/>• **Session Cookie Encoding**: Roundtrip compression, signature tampering rejection, expired TTL handling, and malformed cookie rejection. |
 | **`tests/test_rag.py`** | 4 | • Health check status.<br/>• Strict 401 rejection when unauthenticated.<br/>• Dev header fallback (`X-User-Roles`).<br/>• End-to-end vector retrieval & RBAC filtering. |
@@ -350,11 +427,11 @@ python -m pytest -v
 | **`tests/test_agent.py`** | 6 | • GitHub webhook HMAC-SHA256 verification.<br/>• Webhook JSON parsing into typed models.<br/>• Deterministic secret scanning (API keys, private keys).<br/>• AST static inspection (`eval`, `exec`, `__import__`).<br/>• Sandbox path traversal prevention.<br/>• Full LangGraph self-healing test repair cycle. |
 | **`tests/test_ingest.py`** | 9 | • Pre-ingestion SHA-256 de-duplication, modified file re-indexing detection, force flag bypass, stem matching, chunk prefix detection. |
 | **`tests/test_utilities.py`** | 7 | • Multi-format loaders (`.pdf`, `.md`, `.docx`), tokenizer-aware chunk splitting, chunk metadata attribution, 64KB block hashing, and tenacity retry on 429 rate limits. |
-| **Total** | **81** | **100% Passed (16.6s execution time)** |
+| **Total** | **95** | **94 Passed, 1 Skipped (18.98s execution time)** |
 
 ---
 
-## 10. Operational Cheat Sheet & Troubleshooting
+## 12. Operational Cheat Sheet & Troubleshooting
 
 ### Service Launch Commands
 ```powershell
@@ -363,6 +440,8 @@ python -m pytest
 
 # 2. Start FastAPI REST backend (Port 8000)
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+# Liveness probe: curl http://localhost:8000/healthz
+# Readiness probe: curl http://localhost:8000/readyz
 
 # 3. Start Streamlit interactive UI (Port 8501)
 python -m streamlit run streamlit_app.py --server.port 8501
@@ -375,13 +454,18 @@ python -m app.mcp
 | Symptom / Error | Root Cause | Permanent Solution |
 | :--- | :--- | :--- |
 | **SQL Injection in RBAC Filtering** | String-formatting user roles into SQL queries (`ARRAY[...]`). | **Parameterized Bindings & Sanitization**: Bound roles to `$2::text[]` via asyncpg, added zero-trust short-circuit on empty roles, and sanitized claims against `KNOWN_ROLES`. |
+| **Sparse Alphanumeric Misses in Pure Vector Search** | Pure cosine similarity can miss exact identifiers, error codes, and technical names. | **Hybrid Search & Reciprocal Rank Fusion (RRF)**: Merges dense vector HNSW cosine similarity and sparse GIN `ts_rank` via $RRF(d) = \sum \frac{1}{60 + rank(d)}$. |
+| **LLM Hallucinations & Ungrounded Claims** | Unconstrained prompts hallucinate missing context. | **GroundingGuardrails**: Strict system prompt enforcing citations (`[Doc: <Title>, Chunk <Index>]`) and automated AST/regex validation admitting unknown facts when context is absent. |
+| **Streamlit Worker Event Loop Collisions** | Calling async coroutines in Streamlit worker threads collided with active event loops. | **Thread-Safe Async Runner**: Centralized runner applying `nest_asyncio` with isolated `ThreadPoolExecutor` fallback. |
+| **Connection Pool Exhaustion** | Re-creating connections per query under concurrent traffic exhausted PostgreSQL. | **Cached Connection Pool**: Decorated `get_shared_db_pool()` with `@st.cache_resource` to share pooled connections safely across sessions. |
 | **Ingestion Duplication & Edits Missed** | Filename-only prefix checks missed file edits and duplicated renamed files. | **Cryptographic SHA-256 De-duplication**: 64KB block hashing with change detection skips identical files and purges obsolete chunk sets on re-indexing. |
 | **Embedding API Rate Limits (429/503)** | Unbatched or unprotected embedding requests hit provider rate limits. | **Tenacity Exponential Backoff & 64-Item Batching**: Batch-embeds 64–128 items with automated exponential backoff (2s–60s) on transient 429/503 errors. |
+| **Container Orchestrator Probes Missing** | Kubernetes clusters lacked standardized health and readiness endpoints. | **`/healthz` & `/readyz` Endpoints**: Implemented liveness and deep readiness probes verifying database reachability and vector extension presence. |
+| **Configuration Drift & Missing Secrets** | Unvalidated environment variables failed deep in execution runtime. | **Pydantic `BaseSettings`**: Centralized startup validation in `app/config.py` rejecting invalid environments immediately. |
 | **OAuth state mismatch / CSRF** | Streamlit re-creates session on navigation away to Google. | **Stateless HMAC-SHA256 Signed State**: verifier is embedded in signed state string; zero memory dependency. |
 | **Browser reload requires re-login** | Streamlit WebSocket reset clears RAM session state. | **Encrypted Session Cookie**: `enterprise_rag_session` cookie is written to browser and rehydrated via `st.context.cookies`. |
 | **`ImmatureSignatureError: (iat)`** | Clock drift between local machine and Google NTP servers. | Added `leeway=60` in `jwt.decode()` per RFC 7519. |
-| **Pip dependency resolution conflict** | Duplicate entry in `requirements.txt` (`PyJWT==2.10.1` and `2.15.1`). | Pruned duplicate pin, locking strictly to `PyJWT==2.10.1`. |
-| **`client_secret is missing`** | Google OAuth "Web Application" client type requires secret at `/token`. | Set `GOOGLE_CLIENT_SECRET` in `.env` and pass in token exchange. |
 | **`Event loop is closed` in asyncpg** | Streamlit destroys event loops across script reruns. | Loop-aware connection manager: checks `_loop.is_closed()` and recycles pool cleanly. |
 | **Recall starvation in RAG** | Post-filtering in application code drops top-$K$ restricted docs. | **In-Database RBAC**: `WHERE allowed_roles ?| $user_roles` inside the SQL query before HNSW vector ordering. |
+
 

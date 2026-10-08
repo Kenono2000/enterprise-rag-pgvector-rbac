@@ -28,3 +28,46 @@ async def chat_completion(prompt: str, model: str = "gpt-4o", temperature: float
         )
         return completion.choices[0].message.content
     return f"[Local Mock Response for]: {prompt[:50]}..."
+
+
+async def chat_completion_stream(prompt: str, model: str = "gpt-4o", temperature: float = 0.0):
+    """Async generator yielding LLM response tokens in real-time."""
+    if openai_client:
+        stream = await openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            stream=True,
+        )
+        async for chunk in stream:
+            content = chunk.choices[0].delta.content or ""
+            if content:
+                yield content
+    else:
+        # Mock streaming tokens for local dev and testing
+        mock_text = f"[Local Mock Response for]: {prompt[:50]}..."
+        for word in mock_text.split(" "):
+            yield word + " "
+
+
+def chat_completion_stream_sync(prompt: str, model: str = "gpt-4o", temperature: float = 0.0):
+    """Synchronous generator yielding LLM response tokens (compatible with st.write_stream)."""
+    import asyncio
+    if openai_client:
+        from openai import OpenAI
+        sync_client = OpenAI(api_key=openai_api_key)
+        stream = sync_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            stream=True,
+        )
+        for chunk in stream:
+            content = chunk.choices[0].delta.content or ""
+            if content:
+                yield content
+    else:
+        mock_text = f"[Local Mock Response for]: {prompt[:50]}..."
+        for word in mock_text.split(" "):
+            yield word + " "
+

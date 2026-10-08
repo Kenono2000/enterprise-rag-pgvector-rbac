@@ -192,18 +192,32 @@ python <span class="hljs-literal">-m</span> streamlit run streamlit_app.py <span
 python <span class="hljs-literal">-m</span> app.mcp
 </code></pre>
 <hr>
-<h2 id="-test-suite-overview-41-passing-tests">🧪 Test Suite Overview (41 Passing Tests)</h2>
-<pre><code class="language-text">tests/test_rag.py        ....                                             [ 10%]
-tests/test_auth.py       ........................                         [ 68%]
-tests/test_mcp_auth.py   .......                                          [ 85%]
-tests/test_agent.py      ......                                           [100%]
-============================= 41 passed in 10.53s ==============================
+<h2 id="-test-suite-overview-95-passing-tests">🧪 Test Suite Overview (95 Tests: 94 Passed, 1 Skipped)</h2>
+<pre><code class="language-text">tests/test_agent.py                  ......                                           [  6%]
+tests/test_auth.py                   ..................................               [ 42%]
+tests/test_database_schema.py        ......                                           [ 48%]
+tests/test_hybrid_search.py          ......                                           [ 54%]
+tests/test_ingest.py                 .........                                        [ 64%]
+tests/test_integration_pgvector.py   s.                                               [ 66%]
+tests/test_mcp_auth.py               ..........                                       [ 76%]
+tests/test_observability_and_health.py ......                                         [ 83%]
+tests/test_rag.py                    ....                                             [ 87%]
+tests/test_security_rbac.py          .....                                            [ 92%]
+tests/test_utilities.py              .......                                          [100%]
+================== 94 passed, 1 skipped, 1 warning in 18.98s ==================
 </code></pre>
 <ul>
+<li><strong><code>test_hybrid_search.py</code> (6 tests)</strong>: Reciprocal Rank Fusion (RRF) math validation, zero-trust short-circuiting on empty roles, heuristic &amp; cross-encoder candidate re-ranking, and GroundingGuardrail citation/admission checks.</li>
+<li><strong><code>test_observability_and_health.py</code> (6 tests)</strong>: Liveness (<code>/healthz</code>) and readiness (<code>/readyz</code>) probe checks, 503 DB failure handling, Pydantic <code>BaseSettings</code> validation, <code>ObservabilityTracer</code> metric collection, and token streaming generators.</li>
+<li><strong><code>test_integration_pgvector.py</code> (2 tests)</strong>: Automated testcontainers harness with <code>pgvector/pgvector:pg16</code> validating end-to-end DDL, vector extensions, and full-text GIN queries.</li>
+<li><strong><code>test_database_schema.py</code> (6 tests)</strong>: Normalized table definitions (<code>documents</code>, <code>document_chunks</code>), HNSW and GIN index specifications, cascading deletes, file hash lookups, and similarity calculation benchmark simulation.</li>
+<li><strong><code>test_security_rbac.py</code> (5 tests)</strong>: Dedicated security test suite verifying SQL injection immunity, parameterized array execution (<code>$2::text[]</code>), zero-trust empty role short-circuiting, and API header validation.</li>
+<li><strong><code>test_auth.py</code> (34 tests)</strong>: PKCE verification, stateless HMAC tokens, JWKS leeway, multi-source claim extraction, enterprise JWKS issuer validation, and session cookie tests.</li>
 <li><strong><code>test_rag.py</code> (4 tests)</strong>: FastAPI endpoints, 401 unauthorized rejection, dev role fallbacks, and in-database RBAC retrieval.</li>
-<li><strong><code>test_auth.py</code> (24 tests)</strong>: PKCE verification, stateless HMAC state tokens, JWKS leeway, role mappings, and <strong>session cookie compression/tampering/expiry tests</strong>.</li>
-<li><strong><code>test_mcp_auth.py</code> (7 tests)</strong>: FastMCP ID token authentication, role extraction, and tool execution governance.</li>
+<li><strong><code>test_mcp_auth.py</code> (10 tests)</strong>: FastMCP ID token authentication, role extraction, and tool execution governance.</li>
 <li><strong><code>test_agent.py</code> (6 tests)</strong>: GitHub webhook HMAC verification, AST execution sink blocks, secret scanning, sandbox traversal defense, and LangGraph self-healing loop.</li>
+<li><strong><code>test_ingest.py</code> (9 tests)</strong>: Cryptographic SHA-256 de-duplication, modified file re-indexing detection, force flag bypass, stem matching, and chunk prefix detection.</li>
+<li><strong><code>test_utilities.py</code> (7 tests)</strong>: Multi-format loaders, tokenizer-aware chunk splitting, chunk metadata attribution, 64KB block hashing, and tenacity retry on 429 rate limits.</li>
 </ul>
 <hr>
 <h2 id="️-solved-engineering-pitfalls">🛠️ Solved Engineering Pitfalls</h2>
@@ -216,6 +230,51 @@ tests/test_agent.py      ......                                           [100%]
 </tr>
 </thead>
 <tbody>
+<tr>
+<td style="text-align:left"><strong>SQL Injection in RBAC Filtering</strong></td>
+<td style="text-align:left">String-formatting user roles into SQL queries (<code>ARRAY[...]</code>).</td>
+<td style="text-align:left"><strong>Parameterized Bindings &amp; Sanitization</strong>: Bound roles to <code>$2::text[]</code> via asyncpg, added zero-trust short-circuit on empty roles, and sanitized claims against <code>KNOWN_ROLES</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Sparse Alphanumeric Misses in Pure Vector Search</strong></td>
+<td style="text-align:left">Pure cosine similarity misses exact identifiers, error codes, and technical names.</td>
+<td style="text-align:left"><strong>Hybrid Search &amp; Reciprocal Rank Fusion (RRF)</strong>: Merges dense vector HNSW cosine similarity and sparse GIN <code>ts_rank</code> via RRF formula.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>LLM Hallucinations &amp; Ungrounded Claims</strong></td>
+<td style="text-align:left">Unconstrained prompts hallucinate missing context.</td>
+<td style="text-align:left"><strong>GroundingGuardrails</strong>: Strict system prompt enforcing citations (<code>[Doc: &lt;Title&gt;, Chunk &lt;Index&gt;]</code>) and automated validation admitting unknown facts when context is absent.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Streamlit Worker Event Loop Collisions</strong></td>
+<td style="text-align:left">Calling async coroutines in Streamlit worker threads collided with active event loops.</td>
+<td style="text-align:left"><strong>Thread-Safe Async Runner</strong>: Centralized runner applying <code>nest_asyncio</code> with isolated <code>ThreadPoolExecutor</code> fallback.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Connection Pool Exhaustion</strong></td>
+<td style="text-align:left">Re-creating connections per query under concurrent traffic exhausted PostgreSQL.</td>
+<td style="text-align:left"><strong>Cached Connection Pool</strong>: Decorated <code>get_shared_db_pool()</code> with <code>@st.cache_resource</code> to share pooled connections safely across sessions.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Ingestion Duplication &amp; Edits Missed</strong></td>
+<td style="text-align:left">Filename-only prefix checks missed file edits and duplicated renamed files.</td>
+<td style="text-align:left"><strong>Cryptographic SHA-256 De-duplication</strong>: 64KB block hashing with change detection skips identical files and purges obsolete chunk sets on re-indexing.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Embedding API Rate Limits (429/503)</strong></td>
+<td style="text-align:left">Unbatched or unprotected embedding requests hit provider rate limits.</td>
+<td style="text-align:left"><strong>Tenacity Exponential Backoff &amp; 64-Item Batching</strong>: Batch-embeds 64–128 items with automated exponential backoff on transient errors.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Container Orchestrator Probes Missing</strong></td>
+<td style="text-align:left">Kubernetes clusters lacked standardized health and readiness endpoints.</td>
+<td style="text-align:left"><strong><code>/healthz</code> &amp; <code>/readyz</code> Endpoints</strong>: Implemented liveness and deep readiness probes verifying database reachability and vector extension presence.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Configuration Drift &amp; Missing Secrets</strong></td>
+<td style="text-align:left">Unvalidated environment variables failed deep in execution runtime.</td>
+<td style="text-align:left"><strong>Pydantic <code>BaseSettings</code></strong>: Centralized startup validation in <code>app/config.py</code> rejecting invalid environments immediately.</td>
+</tr>
 <tr>
 <td style="text-align:left"><strong>OAuth State Mismatch</strong></td>
 <td style="text-align:left">Streamlit re-creates session on navigation to Google.</td>
@@ -232,23 +291,18 @@ tests/test_agent.py      ......                                           [100%]
 <td style="text-align:left">Configured <code>leeway=60</code> in <code>jwt.decode()</code> per RFC 7519.</td>
 </tr>
 <tr>
-<td style="text-align:left"><strong>Pip Dependency Conflict</strong></td>
-<td style="text-align:left">Duplicate <code>PyJWT</code> pins in <code>requirements.txt</code>.</td>
-<td style="text-align:left">Pruned duplicate, locking strictly to <code>PyJWT==2.10.1</code>.</td>
-</tr>
-<tr>
 <td style="text-align:left"><strong><code>RuntimeError: Event loop closed</code></strong></td>
 <td style="text-align:left">Streamlit tears down async event loops between reruns.</td>
 <td style="text-align:left">Loop-aware connection manager recycles stale <code>asyncpg</code> pools automatically.</td>
 </tr>
 <tr>
 <td style="text-align:left"><strong>Context Eviction in RAG</strong></td>
-<td style="text-align:left">Post-filtering drops top-<span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>K</mi></mrow><annotation encoding="application/x-tex">K</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.6833em;"></span><span class="mord mathnormal" style="margin-right:0.07153em;">K</span></span></span></span> restricted documents.</td>
-<td style="text-align:left"><strong>In-Database RBAC</strong>: Evaluates `allowed_roles ?</td>
+<td style="text-align:left">Post-filtering drops top-K restricted documents.</td>
+<td style="text-align:left"><strong>In-Database RBAC</strong>: Evaluates <code>allowed_roles ?| $user_roles</code> inside PostgreSQL before vector distance ranking.</td>
 </tr>
 </tbody>
 </table>
 <hr>
 <h2 id="-in-depth-technical-manual">📖 In-Depth Technical Manual</h2>
 <p>For comprehensive mathematical formulations, step-by-step GCIP Cloud Function code, token security threat models, and architectural deep-dives:</p>
-<p>👉 <strong><a href="project_technical_guide.html">Read the Full Technical Guide (<code>project_technical_guide.md</code>)</a></strong></p>
+<p>👉 <strong><a href="TECH-GUIDE.md">Read the Full Technical Guide (<code>TECH-GUIDE.md</code>)</a></strong></p>

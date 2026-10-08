@@ -83,3 +83,57 @@ class PolicyEngine:
             violations=violations,
             audit_summary=audit_summary,
         )
+
+
+class GroundingGuardrail:
+    """
+    Validates LLM-generated responses against strict grounding guardrails:
+    - Explicit source citation format: [Doc: <Title>, Chunk <Index>]
+    - Mandatory admission of unknown information when context is absent
+    """
+    CITATION_PATTERN = re.compile(r"\[Doc:\s*([^,\]]+),\s*Chunk\s*(\d+)\]")
+    UNKNOWN_ADMISSION_PHRASES = [
+        "i do not have sufficient information in the authorized documents",
+        "no authorized documentation found",
+        "not mentioned in the provided context",
+        "insufficient information",
+    ]
+
+    @classmethod
+    def build_system_prompt(cls) -> str:
+        return (
+            "You are a Zero-Trust Enterprise Knowledge Assistant.\n"
+            "Answer the user's question STRICTLY and SOLELY using the authorized context chunks provided below.\n\n"
+            "STRICT GROUNDING RULES:\n"
+            "1. Every factual statement or claim MUST cite its source document and chunk index in the exact format: [Doc: <Title>, Chunk <Index>].\n"
+            "2. If the authorized context does NOT contain enough information to answer the question completely and factually, "
+            "you MUST explicitly admit: 'I do not have sufficient information in the authorized documents to answer this question.'\n"
+            "3. Do NOT extrapolate, speculate, or introduce external information not contained in the authorized context.\n"
+        )
+
+    @classmethod
+    def validate_response(cls, answer: str, context_chunks: List[dict]) -> dict:
+        """
+        Validate whether the response satisfies anti-hallucination and grounding rules.
+        """
+        lower = answer.lower()
+        admitted_unknown = any(phrase in lower for phrase in cls.UNKNOWN_ADMISSION_PHRASES)
+        citations = cls.CITATION_PATTERN.findall(answer)
+        violations = []
+
+        if not admitted_unknown and not citations:
+            violations.append("Response lacks mandatory source citations [Doc: <Title>, Chunk <Index>] and did not admit unknown information.")
+
+        available_titles = {c.get("title", "").strip().lower() for c in context_chunks if c.get("title")}
+        if available_titles:
+            for doc_title, _chunk_idx in citations:
+                if doc_title.strip().lower() not in available_titles:
+                    violations.append(f"Cited document '{doc_title}' was not found in authorized context chunks.")
+
+        return {
+            "grounded": len(violations) == 0,
+            "admitted_unknown": admitted_unknown,
+            "citations_found": citations,
+            "violations": violations,
+        }
+

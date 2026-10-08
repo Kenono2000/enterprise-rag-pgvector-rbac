@@ -41,7 +41,12 @@ def test_schema_sql_contains_normalized_tables_and_indexes():
     # 5. File Hash De-duplication Index
     assert "idx_documents_file_hash" in sql_text
 
-    # 6. Consolidated legacy migration and cleanup logic in schema.sql
+    # 6. Full-Text Search tsvector column and GIN Index
+    assert "tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED" in sql_text
+    assert "idx_chunks_content_tsv" in sql_text
+    assert "USING gin (tsv)" in sql_text
+
+    # 7. Consolidated legacy migration and cleanup logic in schema.sql
     assert "DROP TABLE enterprise_documents CASCADE;" in sql_text
     assert "DROP VIEW IF EXISTS enterprise_documents CASCADE;" in sql_text
     assert "DROP FUNCTION IF EXISTS trg_enterprise_documents_upsert CASCADE;" in sql_text
