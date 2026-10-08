@@ -56,6 +56,9 @@ from app.auth import (
     ensure_google_application_credentials,
 )
 from app.db import DatabaseManager, generate_embedding, chat_completion, chat_completion_stream_sync
+from app.observability import tracer
+import time
+
 
 try:
     import nest_asyncio
@@ -773,9 +776,11 @@ def _render_rag_interface() -> None:
 
     # Chat input
     if prompt_input := st.chat_input("Ask a question about internal documentation..."):
+        t_start_chat = time.perf_counter()
         st.session_state.messages.append({"role": "user", "content": prompt_input})
         with st.chat_message("user"):
             st.markdown(prompt_input)
+
 
         with st.chat_message("assistant"):
             with st.status("Querying knowledge base...", expanded=True) as status:
@@ -839,6 +844,16 @@ def _render_rag_interface() -> None:
                     status.update(label="Response Streaming", state="complete", expanded=False)
                     response_text = st.write_stream(chat_completion_stream_sync(result["prompt"]))
                     citations = result["rows"]
+
+                chat_duration_ms = round((time.perf_counter() - t_start_chat) * 1000, 2)
+                tracer.record_chat_interaction(
+                    question=prompt_input,
+                    answer=response_text,
+                    roles=roles,
+                    duration_ms=chat_duration_ms,
+                    model="gpt-4o",
+                )
+
 
             if citations:
                 with st.expander("📚 Sources & Citations", expanded=False):

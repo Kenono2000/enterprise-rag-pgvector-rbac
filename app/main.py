@@ -255,6 +255,13 @@ async def query_rag(
         completion_tokens=len(answer_text.split()),
         duration_ms=gen_ms,
     )
+    tracer.record_chat_interaction(
+        question=request.question,
+        answer=answer_text,
+        roles=user.roles,
+        duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+        model="gpt-4o",
+    )
 
     return RAGResponse(
         answer=answer_text,
@@ -262,6 +269,7 @@ async def query_rag(
         confidence_score=avg_confidence,
         authorized_roles_evaluated=user.roles,
     )
+
 
 
 

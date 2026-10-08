@@ -33,10 +33,25 @@ class ObservabilityTracer:
         if os.getenv("OTEL_ENABLED", "false").lower() == "true":
             try:
                 from opentelemetry import trace
+                from opentelemetry.sdk.trace import TracerProvider
+                from opentelemetry.sdk.trace.export import BatchSpanProcessor
+                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+                from opentelemetry.sdk.resources import Resource
+
+                resource = Resource.create({"service.name": self.service_name})
+                provider = TracerProvider(resource=resource)
+
+                endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+                insecure = os.getenv("OTEL_EXPORTER_OTLP_INSECURE", "true").lower() == "true"
+                otlp_exporter = OTLPSpanExporter(endpoint=endpoint, insecure=insecure)
+
+                provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
+                trace.set_tracer_provider(provider)
                 self._otel_tracer = trace.get_tracer(self.service_name)
-                logger.info("OpenTelemetry tracer initialized for service: %s", self.service_name)
-            except ImportError:
-                logger.info("OpenTelemetry SDK not installed; using structured metric logging.")
+                logger.info("OpenTelemetry OTLP Tracer initialized for service: %s -> %s", self.service_name, endpoint)
+            except Exception as exc:
+                logger.warning("OpenTelemetry OTLP setup failed (%s); using structured metric logging.", exc)
+
 
     @contextmanager
     def trace_span(self, operation: str, attributes: Optional[Dict[str, Any]] = None):
@@ -130,6 +145,40 @@ class ObservabilityTracer:
             duration_ms,
         )
 
+    def record_chat_interaction(
+        self,
+        question: str,
+        answer: str,
+        roles: List[str],
+        duration_ms: float,
+        model: str = "gpt-4o",
+    ) -> None:
+        """Capture user question and AI response in Jaeger spans, tags, and events."""
+        data = {
+            "event": "chat_interaction",
+            "question": question,
+            "answer_preview": answer[:120],
+            "roles": roles,
+            "model": model,
+            "duration_ms": duration_ms,
+            "timestamp": time.time(),
+        }
+        self._metrics.append(data)
+        logger.info("CHAT INTERACTION q=%r roles=%s latency=%.2fms", question[:50], roles, duration_ms)
+
+        if self._otel_tracer:
+            try:
+                with self._otel_tracer.start_span("rag_chat_completion") as span:
+                    span.set_attribute("rag.question", question)
+                    span.set_attribute("rag.response", answer)
+                    span.set_attribute("rag.roles", ",".join(roles))
+                    span.set_attribute("rag.model", model)
+                    span.set_attribute("rag.duration_ms", duration_ms)
+                    span.add_event("user_question", {"content": question})
+                    span.add_event("ai_response", {"content": answer})
+            except Exception as exc:
+                logger.debug("Failed exporting chat interaction to OTel: %s", exc)
+
     def get_recent_metrics(self, limit: int = 50) -> List[Dict[str, Any]]:
         return self._metrics[-limit:]
 
@@ -137,6 +186,7 @@ class ObservabilityTracer:
         """Return aggregated summary counts of recorded telemetry and OTel status."""
         retrievals = [m for m in self._metrics if m.get("event") == "retrieval"]
         generations = [m for m in self._metrics if m.get("event") == "generation"]
+        interactions = [m for m in self._metrics if m.get("event") == "chat_interaction"]
         error_spans = [m for m in self._metrics if m.get("status") == "error"]
         return {
             "service_name": self.service_name,
@@ -144,8 +194,10 @@ class ObservabilityTracer:
             "total_recorded_events": len(self._metrics),
             "retrieval_events": len(retrievals),
             "generation_events": len(generations),
+            "chat_interactions": len(interactions),
             "error_spans": len(error_spans),
         }
+
 
 
 tracer = ObservabilityTracer()

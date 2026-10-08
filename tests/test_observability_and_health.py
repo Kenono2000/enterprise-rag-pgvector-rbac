@@ -109,3 +109,23 @@ def test_observability_metrics_endpoint():
     assert "otel_active" in data["summary"]
     assert isinstance(data["recent_traces"], list)
 
+
+def test_record_chat_interaction():
+    """Verify record_chat_interaction records question and response into telemetry and metrics."""
+    tracer = ObservabilityTracer(service_name="test-chat-rag")
+    tracer.record_chat_interaction(
+        question="What is the architecture?",
+        answer="The architecture consists of PostgreSQL pgvector and FastAPI.",
+        roles=["engineer"],
+        duration_ms=45.2,
+        model="gpt-4o",
+    )
+    summary = tracer.get_metrics_summary()
+    assert summary["chat_interactions"] >= 1
+    recent = tracer.get_recent_metrics(limit=5)
+    interaction_events = [m for m in recent if m.get("event") == "chat_interaction"]
+    assert len(interaction_events) >= 1
+    assert interaction_events[0]["question"] == "What is the architecture?"
+    assert "PostgreSQL" in interaction_events[0]["answer_preview"]
+
+
