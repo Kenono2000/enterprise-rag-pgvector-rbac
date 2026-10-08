@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- 4. If legacy enterprise_documents table exists as a base table, migrate data
+-- 4. Clean up legacy enterprise_documents table or view if present
 DO $$
 BEGIN
     IF EXISTS (
@@ -72,65 +72,16 @@ BEGIN
         ON CONFLICT (chunk_id) DO UPDATE
         SET content = EXCLUDED.content, embedding = EXCLUDED.embedding;
 
-        -- Drop legacy table to replace with backward-compatible view
         DROP TABLE enterprise_documents CASCADE;
     END IF;
 END $$;
 
--- 5. Create backward-compatible view
-CREATE OR REPLACE VIEW enterprise_documents AS
-SELECT 
-    c.chunk_id AS document_id,
-    d.title,
-    c.content,
-    d.allowed_roles,
-    c.embedding,
-    c.created_at,
-    c.embedding_model,
-    d.file_hash,
-    d.id AS parent_document_id,
-    c.chunk_index
-FROM documents d
-JOIN document_chunks c ON d.id = c.document_id;
-
--- 6. Trigger for transparent upserts
-CREATE OR REPLACE FUNCTION trg_enterprise_documents_upsert()
-RETURNS TRIGGER AS $$
-DECLARE
-    v_doc_uuid UUID;
-BEGIN
-    INSERT INTO documents (document_id, title, allowed_roles, updated_at)
-    VALUES (NEW.document_id, NEW.title, NEW.allowed_roles, CURRENT_TIMESTAMP)
-    ON CONFLICT (document_id) DO UPDATE 
-    SET title = EXCLUDED.title, 
-        allowed_roles = EXCLUDED.allowed_roles, 
-        updated_at = CURRENT_TIMESTAMP
-    RETURNING id INTO v_doc_uuid;
-
-    INSERT INTO document_chunks (document_id, chunk_id, chunk_index, content, embedding, embedding_model)
-    VALUES (
-        v_doc_uuid, 
-        NEW.document_id, 
-        0, 
-        NEW.content, 
-        NEW.embedding, 
-        COALESCE(NEW.embedding_model, 'text-embedding-3-large')
-    )
-    ON CONFLICT (chunk_id) DO UPDATE
-    SET content = EXCLUDED.content, 
-        embedding = EXCLUDED.embedding, 
-        embedding_model = EXCLUDED.embedding_model;
-
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
+-- Drop any legacy views or triggers if they exist
 DROP TRIGGER IF EXISTS trg_enterprise_docs_io_insert ON enterprise_documents;
-CREATE TRIGGER trg_enterprise_docs_io_insert
-INSTEAD OF INSERT ON enterprise_documents
-FOR EACH ROW EXECUTE FUNCTION trg_enterprise_documents_upsert();
+DROP VIEW IF EXISTS enterprise_documents CASCADE;
+DROP FUNCTION IF EXISTS trg_enterprise_documents_upsert CASCADE;
 
--- 7. Create indexes
+-- 5. Create indexes
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw 
 ON document_chunks 
 USING hnsw (embedding vector_cosine_ops)

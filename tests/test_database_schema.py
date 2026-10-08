@@ -41,9 +41,8 @@ def test_schema_sql_contains_normalized_tables_and_indexes():
     # 5. File Hash De-duplication Index
     assert "idx_documents_file_hash" in sql_text
 
-    # 6. Backward-compatible view & trigger
-    assert "CREATE OR REPLACE VIEW enterprise_documents" in sql_text
-    assert "INSTEAD OF INSERT ON enterprise_documents" in sql_text
+    # 6. Legacy enterprise_documents table/view is completely removed
+    assert "enterprise_documents" not in sql_text
 
 
 def test_migration_001_script_integrity():
@@ -57,7 +56,7 @@ def test_migration_001_script_integrity():
     assert "CREATE TABLE IF NOT EXISTS document_chunks" in sql
     assert "ON DELETE CASCADE" in sql
     assert "DROP TABLE enterprise_documents CASCADE;" in sql
-    assert "CREATE OR REPLACE VIEW enterprise_documents" in sql
+    assert "DROP VIEW IF EXISTS enterprise_documents CASCADE;" in sql
 
 
 @pytest.mark.asyncio

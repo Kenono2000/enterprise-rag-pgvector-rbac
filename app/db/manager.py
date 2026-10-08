@@ -89,12 +89,13 @@ class DatabaseManager:
         vector_str = f"[{','.join(map(str, query_vector))}]"
         
         sql = """
-            SELECT document_id, title, content, allowed_roles, 
-                   1 - (embedding <=> $1::vector) as similarity
-            FROM enterprise_documents
-            WHERE allowed_roles ?| $2::text[]
-              AND (embedding_model = 'text-embedding-3-large' OR embedding_model IS NULL)
-            ORDER BY embedding <=> $1::vector
+            SELECT d.document_id, d.title, c.content, d.allowed_roles, 
+                   1 - (c.embedding <=> $1::vector) as similarity
+            FROM document_chunks c
+            JOIN documents d ON c.document_id = d.id
+            WHERE d.allowed_roles ?| $2::text[]
+              AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)
+            ORDER BY c.embedding <=> $1::vector
             LIMIT $3
         """
         async with pool.acquire() as conn:
@@ -111,29 +112,21 @@ class DatabaseManager:
         embedding: List[float],
         file_hash: Optional[str] = None,
     ):
-        pool = await cls.get_pool()
-        vector_str = f"[{','.join(map(str, embedding))}]"
-        roles_json = json.dumps(allowed_roles)
-        
-        # Ingests transparently via enterprise_documents view or base table
-        sql = """
-            INSERT INTO enterprise_documents (document_id, title, content, allowed_roles, embedding)
-            VALUES ($1, $2, $3, $4::jsonb, $5::vector)
-            ON CONFLICT (document_id) DO UPDATE 
-            SET title = EXCLUDED.title, content = EXCLUDED.content, 
-                allowed_roles = EXCLUDED.allowed_roles, embedding = EXCLUDED.embedding
-        """
-        async with pool.acquire() as conn:
-            await conn.execute(sql, document_id, title, content, roles_json, vector_str)
-            if file_hash:
-                # If master documents table exists, link file_hash
-                try:
-                    await conn.execute(
-                        "UPDATE documents SET file_hash = $1 WHERE document_id = $2",
-                        file_hash, document_id
-                    )
-                except Exception:
-                    pass
+        """Ingest single-chunk document into normalized documents and document_chunks tables."""
+        chunks = [
+            {
+                "chunk_id": f"{document_id}_chunk_1",
+                "content": content,
+                "embedding": embedding,
+            }
+        ]
+        return await cls.ingest_normalized_document(
+            document_id=document_id,
+            title=title,
+            chunks=chunks,
+            allowed_roles=allowed_roles,
+            file_hash=file_hash,
+        )
 
     @classmethod
     async def ingest_normalized_document(
@@ -217,10 +210,6 @@ class DatabaseManager:
         """Delete document from documents table (cascading to all document_chunks)."""
         pool = await cls.get_pool()
         async with pool.acquire() as conn:
-            try:
-                result = await conn.execute("DELETE FROM documents WHERE document_id = $1", document_id)
-                return "DELETE 1" in result
-            except Exception:
-                result = await conn.execute("DELETE FROM enterprise_documents WHERE document_id = $1", document_id)
-                return "DELETE" in result
+            result = await conn.execute("DELETE FROM documents WHERE document_id = $1", document_id)
+            return "DELETE 1" in result
 

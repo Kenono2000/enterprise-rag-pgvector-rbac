@@ -124,32 +124,17 @@ ON documents USING gin (allowed_roles jsonb_path_ops);
 -- 5. B-Tree Hash Index: instant cryptographic de-duplication
 CREATE INDEX IF NOT EXISTS idx_documents_file_hash 
 ON documents (file_hash);
-
--- 6. Backward-Compatible View & Transparent Upsert Trigger
-CREATE OR REPLACE VIEW enterprise_documents AS
-SELECT 
-    c.chunk_id AS document_id,
-    d.title,
-    c.content,
-    d.allowed_roles,
-    c.embedding,
-    c.created_at,
-    c.embedding_model,
-    d.file_hash,
-    d.id AS parent_document_id,
-    c.chunk_index
-FROM documents d
-JOIN document_chunks c ON d.id = c.document_id;
 ```
 
 ### The In-Database RBAC Query (`app/db/manager.py`)
 ```sql
-SELECT document_id, title, content, allowed_roles, 
-       1 - (embedding <=> $1::vector) AS similarity
-FROM enterprise_documents
-WHERE allowed_roles ?| $2::text[]
-  AND (embedding_model = 'text-embedding-3-large' OR embedding_model IS NULL)
-ORDER BY embedding <=> $1::vector
+SELECT d.document_id, d.title, c.content, d.allowed_roles, 
+       1 - (c.embedding <=> $1::vector) AS similarity
+FROM document_chunks c
+JOIN documents d ON c.document_id = d.id
+WHERE d.allowed_roles ?| $2::text[]
+  AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)
+ORDER BY c.embedding <=> $1::vector
 LIMIT $3;
 ```
 

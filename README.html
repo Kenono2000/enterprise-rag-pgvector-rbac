@@ -75,7 +75,7 @@ An enterprise-grade, shift-left reference implementation combining <strong>In-Da
     end
 
     subgraph Database ["PostgreSQL 16 + pgvector"]
-        db[("enterprise_documents&lt;br/&gt;• GIN: allowed_roles jsonb_path_ops&lt;br/&gt;• HNSW: embedding vector_cosine_ops")]
+        db[("documents + document_chunks&lt;br/&gt;• GIN: allowed_roles jsonb_path_ops&lt;br/&gt;• HNSW: embedding vector_cosine_ops")]
     end
 
     subgraph Agent ["Autonomous SDLC Agent (agent/)"]
@@ -106,11 +106,12 @@ An enterprise-grade, shift-left reference implementation combining <strong>In-Da
 <h3 id="1-database-layer-pgvector--dual-indexing-appdb">1. Database Layer: pgvector + Dual Indexing (<code>app/db/</code>)</h3>
 <ul>
 <li><strong>Dual Indexing</strong>: Combines <strong>HNSW</strong> (<code>vector_cosine_ops</code>, <span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>m</mi><mo>=</mo><mn>16</mn></mrow><annotation encoding="application/x-tex">m=16</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.4306em;"></span><span class="mord mathnormal">m</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:0.6444em;"></span><span class="mord">16</span></span></span></span>, <span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>e</mi><mi>f</mi><mo>=</mo><mn>64</mn></mrow><annotation encoding="application/x-tex">ef=64</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.8889em;vertical-align:-0.1944em;"></span><span class="mord mathnormal">e</span><span class="mord mathnormal" style="margin-right:0.10764em;">f</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:0.6444em;"></span><span class="mord">64</span></span></span></span>) for sub-millisecond approximate nearest neighbor search with <strong>GIN</strong> (<code>jsonb_path_ops</code>) for constant-time role membership checks.</li>
-<li><strong>The Core In-DB RBAC Query</strong>:<pre><code class="language-sql"><span class="hljs-keyword">SELECT</span> document_id, title, content, allowed_roles, 
-       <span class="hljs-number">1</span> <span class="hljs-operator">-</span> (embedding <span class="hljs-operator">&lt;=&gt;</span> $<span class="hljs-number">1</span>::vector) <span class="hljs-keyword">AS</span> similarity
-<span class="hljs-keyword">FROM</span> enterprise_documents
-<span class="hljs-keyword">WHERE</span> allowed_roles ?<span class="hljs-operator">|</span> $<span class="hljs-number">2</span>::text[]
-<span class="hljs-keyword">ORDER</span> <span class="hljs-keyword">BY</span> embedding <span class="hljs-operator">&lt;=&gt;</span> $<span class="hljs-number">1</span>::vector LIMIT $<span class="hljs-number">3</span>;
+<li><strong>The Core In-DB RBAC Query</strong>:<pre><code class="language-sql"><span class="hljs-keyword">SELECT</span> d.document_id, d.title, c.content, d.allowed_roles, 
+       <span class="hljs-number">1</span> <span class="hljs-operator">-</span> (c.embedding <span class="hljs-operator">&lt;=&gt;</span> $<span class="hljs-number">1</span>::vector) <span class="hljs-keyword">AS</span> similarity
+<span class="hljs-keyword">FROM</span> document_chunks c
+<span class="hljs-keyword">JOIN</span> documents d <span class="hljs-keyword">ON</span> c.document_id = d.id
+<span class="hljs-keyword">WHERE</span> d.allowed_roles ?<span class="hljs-operator">|</span> $<span class="hljs-number">2</span>::text[]
+<span class="hljs-keyword">ORDER</span> <span class="hljs-keyword">BY</span> c.embedding <span class="hljs-operator">&lt;=&gt;</span> $<span class="hljs-number">1</span>::vector LIMIT $<span class="hljs-number">3</span>;
 </code></pre>
 </li>
 <li><strong>Matryoshka 1536-d Truncation</strong>: Truncates <code>text-embedding-3-large</code> from 3072 to 1536 dimensions, slashing PostgreSQL disk and RAM usage by <strong>50%</strong> while preserving <strong>&gt;98%</strong> recall.</li>

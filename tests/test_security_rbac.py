@@ -33,7 +33,7 @@ async def test_database_manager_zero_trust_empty_roles():
 async def test_database_manager_sanitizes_sql_injection_roles():
     """Verify that malicious injection roles are filtered out and rejected."""
     injection_roles = [
-        "'; DROP TABLE enterprise_documents; --",
+        "'; DROP TABLE documents; --",
         "' OR '1'='1",
         "admin\" OR 1=1 --",
     ]

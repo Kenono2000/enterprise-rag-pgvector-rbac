@@ -776,12 +776,13 @@ def _render_rag_interface() -> None:
                 # Parameterized query representation matching safe in-database asyncpg execution
                 roles_repr = json.dumps(roles)
                 sql_query = (
-                    "SELECT document_id, title, content, allowed_roles,\n"
-                    "       1 - (embedding <=> $1::vector) AS similarity\n"
-                    "FROM enterprise_documents\n"
-                    "WHERE allowed_roles ?| $2::text[]\n"
-                    "  AND (embedding_model = 'text-embedding-3-large' OR embedding_model IS NULL)\n"
-                    "ORDER BY embedding <=> $1::vector\n"
+                    "SELECT d.document_id, d.title, c.content, d.allowed_roles,\n"
+                    "       1 - (c.embedding <=> $1::vector) AS similarity\n"
+                    "FROM document_chunks c\n"
+                    "JOIN documents d ON c.document_id = d.id\n"
+                    "WHERE d.allowed_roles ?| $2::text[]\n"
+                    "  AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)\n"
+                    "ORDER BY c.embedding <=> $1::vector\n"
                     "LIMIT $3;\n\n"
                     f"-- Parameter bindings (parameterized & injection-proof):\n"
                     f"-- $1 = <query_vector: 1536 dims>\n"

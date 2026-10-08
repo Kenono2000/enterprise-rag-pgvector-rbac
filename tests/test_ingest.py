@@ -13,7 +13,8 @@ def test_check_document_exists_true_with_cursor():
     assert exists is True
     assert mock_cursor.execute.called
     query, params = mock_cursor.execute.call_args[0]
-    assert "enterprise_documents" in query
+    assert "documents" in query
+    assert "enterprise_documents" not in query
     assert "document_id" in query
     assert params[0] == "source.pdf"
     assert params[1] == "source.pdf_%"

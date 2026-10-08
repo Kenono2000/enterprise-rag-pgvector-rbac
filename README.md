@@ -59,7 +59,7 @@ flowchart TB
     end
 
     subgraph Database ["PostgreSQL 16 + pgvector"]
-        db[("enterprise_documents<br/>• GIN: allowed_roles jsonb_path_ops<br/>• HNSW: embedding vector_cosine_ops")]
+        db[("documents + document_chunks<br/>• GIN: allowed_roles jsonb_path_ops<br/>• HNSW: embedding vector_cosine_ops")]
     end
 
     subgraph Agent ["Autonomous SDLC Agent (agent/)"]
@@ -97,15 +97,15 @@ flowchart TB
   * **HNSW Vector Index**: Approximate nearest neighbor search (`vector_cosine_ops`, $m=16$, $ef=64$) on `document_chunks.embedding`.
   * **GIN Role Index**: Fast JSONB role membership checks (`jsonb_path_ops`) on `documents.allowed_roles`.
   * **B-Tree File Hash Index**: Instant cryptographic de-duplication lookups on `documents.file_hash`.
-* **Backward-Compatible View & Trigger**: Provides an `enterprise_documents` unified view and `INSTEAD OF INSERT` trigger so existing consumers, queries, and scripts continue to function without alteration.
 * **The Core In-DB RBAC Query (Parameterized & Injection-Proof)**:
   ```sql
-  SELECT document_id, title, content, allowed_roles, 
-         1 - (embedding <=> $1::vector) AS similarity
-  FROM enterprise_documents
-  WHERE allowed_roles ?| $2::text[]
-    AND (embedding_model = 'text-embedding-3-large' OR embedding_model IS NULL)
-  ORDER BY embedding <=> $1::vector LIMIT $3;
+  SELECT d.document_id, d.title, c.content, d.allowed_roles, 
+         1 - (c.embedding <=> $1::vector) AS similarity
+  FROM document_chunks c
+  JOIN documents d ON c.document_id = d.id
+  WHERE d.allowed_roles ?| $2::text[]
+    AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)
+  ORDER BY c.embedding <=> $1::vector LIMIT $3;
   ```
 * **Zero-Trust Short-Circuiting**: Callers without validated roles immediately receive empty results (`[]`) without executing a database query.
 * **Defense-in-Depth Sanitization**: Vector search roles are sanitized against `KNOWN_ROLES` and identifier syntax, dropping SQL injection strings before binding to `$2::text[]`.

@@ -196,7 +196,7 @@ class TestExtractRoles:
     def test_sql_injection_payloads_filtered(self):
         injection_payloads = [
             "engineer' OR '1'='1",
-            "'; DROP TABLE enterprise_documents; --",
+            "'; DROP TABLE documents; --",
             "admin' UNION SELECT * FROM users --",
             "engineer\" OR 1=1 --",
             "' OR 1=1/*",

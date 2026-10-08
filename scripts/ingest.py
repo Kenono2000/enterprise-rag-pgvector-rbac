@@ -53,12 +53,12 @@ def check_document_exists(target: Any, filename: str, file_hash: Optional[str] =
 
     Checks:
     1. If file_hash is provided, checks documents table via idx_documents_file_hash.
-    2. Checks enterprise_documents.document_id (exact filename, prefix, or stem).
+    2. Checks documents.document_id (exact filename, prefix, or stem).
 
     Supports database cursor, connection, or database URL connection string.
     """
     query_filename = """
-        SELECT 1 FROM enterprise_documents
+        SELECT 1 FROM documents
         WHERE document_id = %s 
            OR document_id LIKE %s ESCAPE '\\'
            OR document_id = %s 
@@ -78,9 +78,9 @@ def check_document_exists(target: Any, filename: str, file_hash: Optional[str] =
                 if cur.fetchone() is not None:
                     return True
             except Exception:
-                pass  # If documents table is not yet migrated, fall back to filename check
+                pass
 
-        # 2. Check by filename/prefix/stem in enterprise_documents
+        # 2. Check by filename/prefix/stem in documents
         cur.execute(query_filename, params_filename)
         return cur.fetchone() is not None
 
@@ -96,22 +96,6 @@ def check_document_exists(target: Any, filename: str, file_hash: Optional[str] =
         raise ValueError(f"Invalid target type for check_document_exists: {type(target)}")
 
 
-def _check_normalized_tables_exist(cur) -> bool:
-    """Check if normalized tables documents and document_chunks exist in PostgreSQL."""
-    try:
-        cur.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.tables 
-            WHERE table_schema = CURRENT_SCHEMA() 
-              AND table_name IN ('documents', 'document_chunks')
-            """
-        )
-        row = cur.fetchone()
-        return bool(row and row[0] >= 2)
-    except Exception:
-        return False
-
-
 def ingest_data(
     chunks: list[Document],
     embeddings_model: OpenAIEmbeddings,
@@ -120,10 +104,7 @@ def ingest_data(
     batch_size: int = 64,
 ):
     """
-    Embed and ingest document chunks into PostgreSQL.
-
-    Routes to normalized schema (documents + document_chunks) when available,
-    falling back transparently to enterprise_documents view/table.
+    Embed and ingest document chunks into normalized PostgreSQL schema (documents + document_chunks).
     """
     if not chunks:
         print("No chunks to ingest.")
@@ -147,105 +128,69 @@ def ingest_data(
     try:
         with get_db_connection(db_url) as conn:
             with conn.cursor() as cur:
-                is_normalized = _check_normalized_tables_exist(cur)
+                # Group chunks by parent source file
+                doc_groups: dict[str, list[tuple[int, str, list[float], Document]]] = {}
+                for i, (text, emb, chunk) in enumerate(zip(chunk_texts, embeddings, chunks)):
+                    src = str(chunk.metadata.get("source", f"document_{i+1}"))
+                    doc_groups.setdefault(src, []).append((i, text, emb, chunk))
 
-                if is_normalized:
-                    print("  [✓] Detected normalized schema (documents + document_chunks).")
-                    # Group chunks by parent source file
-                    doc_groups: dict[str, list[tuple[int, str, list[float], Document]]] = {}
-                    for i, (text, emb, chunk) in enumerate(zip(chunk_texts, embeddings, chunks)):
-                        src = str(chunk.metadata.get("source", f"document_{i+1}"))
-                        doc_groups.setdefault(src, []).append((i, text, emb, chunk))
+                for src, items in doc_groups.items():
+                    p = Path(src)
+                    title = p.name if src and src != "unknown" else f"Document_{items[0][0]+1}"
+                    doc_id = str(items[0][3].metadata.get("document_id") or p.stem)
+                    file_type = p.suffix.lstrip(".").lower() if p.suffix else "markdown"
+                    file_hash = items[0][3].metadata.get("file_hash")
+                    if not file_hash and p.is_file():
+                        try:
+                            file_hash = compute_file_hash(p)
+                        except Exception:
+                            file_hash = None
 
-                    for src, items in doc_groups.items():
-                        p = Path(src)
-                        title = p.name if src and src != "unknown" else f"Document_{items[0][0]+1}"
-                        doc_id = str(items[0][3].metadata.get("document_id") or p.stem)
-                        file_type = p.suffix.lstrip(".").lower() if p.suffix else "markdown"
-                        file_hash = items[0][3].metadata.get("file_hash")
-                        if not file_hash and p.is_file():
-                            try:
-                                file_hash = compute_file_hash(p)
-                            except Exception:
-                                file_hash = None
+                    # 1. Upsert master document
+                    cur.execute(
+                        """
+                        INSERT INTO documents (document_id, title, source_path, file_hash, file_type, allowed_roles, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP)
+                        ON CONFLICT (document_id) DO UPDATE 
+                        SET title = EXCLUDED.title,
+                            source_path = EXCLUDED.source_path,
+                            file_hash = EXCLUDED.file_hash,
+                            file_type = EXCLUDED.file_type,
+                            allowed_roles = EXCLUDED.allowed_roles,
+                            updated_at = CURRENT_TIMESTAMP
+                        RETURNING id
+                        """,
+                        (doc_id, title, src, file_hash, file_type, roles_json),
+                    )
+                    doc_uuid = cur.fetchone()[0]
 
-                        # 1. Upsert master document
-                        cur.execute(
-                            """
-                            INSERT INTO documents (document_id, title, source_path, file_hash, file_type, allowed_roles, updated_at)
-                            VALUES (%s, %s, %s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP)
-                            ON CONFLICT (document_id) DO UPDATE 
-                            SET title = EXCLUDED.title,
-                                source_path = EXCLUDED.source_path,
-                                file_hash = EXCLUDED.file_hash,
-                                file_type = EXCLUDED.file_type,
-                                allowed_roles = EXCLUDED.allowed_roles,
-                                updated_at = CURRENT_TIMESTAMP
-                            RETURNING id
-                            """,
-                            (doc_id, title, src, file_hash, file_type, roles_json),
-                        )
-                        doc_uuid = cur.fetchone()[0]
-
-                        # 2. Insert chunks for this document
-                        chunks_data = [
-                            (
-                                doc_uuid,
-                                str(chunk.metadata.get("chunk_id", f"{doc_id}_{idx+1}")).replace("\x00", ""),
-                                idx,
-                                text,
-                                len(text.split()),
-                                str(emb),
-                                "text-embedding-3-large",
-                            )
-                            for idx, (_, text, emb, chunk) in enumerate(items)
-                        ]
-
-                        execute_values(
-                            cur,
-                            """
-                            INSERT INTO document_chunks (document_id, chunk_id, chunk_index, content, token_count, embedding, embedding_model)
-                            VALUES %s
-                            ON CONFLICT (chunk_id) DO UPDATE 
-                            SET content = EXCLUDED.content,
-                                token_count = EXCLUDED.token_count,
-                                embedding = EXCLUDED.embedding,
-                                embedding_model = EXCLUDED.embedding_model
-                            """,
-                            chunks_data,
-                            template="(%s, %s, %s, %s, %s, %s::vector, %s)",
-                            page_size=100,
-                        )
-                else:
-                    print("  [✓] Falling back to enterprise_documents view/table.")
-                    chunk_titles = [
-                        Path(chunk.metadata.get("source", f"Chunk_{i+1}")).name.replace("\x00", "")
-                        for i, chunk in enumerate(chunks)
-                    ]
-                    data_to_insert = [
+                    # 2. Insert chunks for this document
+                    chunks_data = [
                         (
-                            str(chunk.metadata.get("document_id", f"{title}_{i+1}")).replace("\x00", ""),
-                            title,
+                            doc_uuid,
+                            str(chunk.metadata.get("chunk_id", f"{doc_id}_{idx+1}")).replace("\x00", ""),
+                            idx,
                             text,
-                            roles_json,
-                            str(embedding),
+                            len(text.split()),
+                            str(emb),
+                            "text-embedding-3-large",
                         )
-                        for i, (title, text, embedding, chunk) in enumerate(
-                            zip(chunk_titles, chunk_texts, embeddings, chunks)
-                        )
+                        for idx, (_, text, emb, chunk) in enumerate(items)
                     ]
 
                     execute_values(
                         cur,
                         """
-                        INSERT INTO enterprise_documents (document_id, title, content, allowed_roles, embedding)
+                        INSERT INTO document_chunks (document_id, chunk_id, chunk_index, content, token_count, embedding, embedding_model)
                         VALUES %s
-                        ON CONFLICT (document_id) DO UPDATE 
-                        SET title = EXCLUDED.title, content = EXCLUDED.content, 
-                            allowed_roles = EXCLUDED.allowed_roles, embedding = EXCLUDED.embedding
+                        ON CONFLICT (chunk_id) DO UPDATE 
+                        SET content = EXCLUDED.content,
+                            token_count = EXCLUDED.token_count,
+                            embedding = EXCLUDED.embedding,
+                            embedding_model = EXCLUDED.embedding_model
                         """,
-                        data_to_insert,
-                        template="(%s, %s, %s, %s::jsonb, %s::vector)",
+                        chunks_data,
+                        template="(%s, %s, %s, %s, %s, %s::vector, %s)",
                         page_size=100,
                     )
             conn.commit()
