@@ -196,6 +196,15 @@ def decode_session_cookie(cookie_str: str) -> Optional[dict]:
 # Authorization URL builder
 # ---------------------------------------------------------------------------
 
+def _normalize_redirect_uri(uri: str) -> str:
+    """Defensively clean accidental duplicate scheme prefixes (e.g. https://https://)."""
+    while uri.startswith("https://https://"):
+        uri = uri[8:]
+    while uri.startswith("http://http://"):
+        uri = uri[7:]
+    return uri
+
+
 def build_authorization_url(
     *,
     redirect_uri: str,
@@ -237,12 +246,13 @@ def build_authorization_url(
     code_challenge = derive_code_challenge(code_verifier)
     # Default to cryptographically signed stateless PKCE state
     state = state or encode_pkce_state(code_verifier)
+    clean_redirect_uri = _normalize_redirect_uri(redirect_uri)
 
     params: Dict[str, str] = {
         "client_id": client_id,
         "response_type": "code",
         "scope": " ".join(scopes or DEFAULT_SCOPES),
-        "redirect_uri": redirect_uri,
+        "redirect_uri": clean_redirect_uri,
         "state": state,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
@@ -305,7 +315,7 @@ async def exchange_code_for_tokens(
     data = {
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": redirect_uri,
+        "redirect_uri": _normalize_redirect_uri(redirect_uri),
         "client_id": client_id,
         "code_verifier": code_verifier,
     }
@@ -347,7 +357,7 @@ def exchange_code_for_tokens_sync(
     data = {
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": redirect_uri,
+        "redirect_uri": _normalize_redirect_uri(redirect_uri),
         "client_id": client_id,
         "code_verifier": code_verifier,
     }

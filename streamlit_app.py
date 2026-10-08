@@ -180,6 +180,11 @@ def _get_redirect_uri() -> str:
         # Fallback: derive from Streamlit's own URL if running on Cloud
         # In local dev this becomes http://localhost:8501/
         uri = "http://localhost:8501/"
+    # Defensive normalization: strip accidental duplicated protocol schemes (e.g. https://https://)
+    while uri.startswith("https://https://"):
+        uri = uri[8:]
+    while uri.startswith("http://http://"):
+        uri = uri[7:]
     return uri
 
 

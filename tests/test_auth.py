@@ -105,6 +105,14 @@ class TestBuildAuthorizationUrl:
         )
         assert "hd=acme.com" in url
 
+    def test_duplicate_scheme_normalization(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id.apps.googleusercontent.com")
+        url, _, _ = build_authorization_url(
+            redirect_uri="https://https://enterprise-rag-pgvector-rbac.streamlit.app/",
+        )
+        assert "redirect_uri=https%3A%2F%2Fenterprise-rag-pgvector-rbac.streamlit.app%2F" in url
+        assert "https%3A%2F%2Fhttps%3A%2F%2F" not in url
+
 
 class TestStatelessPkceState:
     def test_encode_and_decode_success(self):

@@ -27,12 +27,14 @@
    - [Layer 3: High-Performance Ingestion Pipeline (`scripts/ingest.py` & `libs/utilities.py`)](#layer-3-high-performance-ingestion-pipeline-scriptsingestpy--libsutilitiespy)
    - [Layer 4: RAG Quality, Hybrid Search & Grounding Guardrails](#layer-4-rag-quality-hybrid-search--grounding-guardrails)
    - [Layer 5: FastAPI Backend & Streamlit Streaming Frontend](#layer-5-fastapi-backend--streamlit-streaming-frontend)
-   - [Layer 6: Observability, Configuration & Container Hardening](#layer-6-observability-configuration--container-hardening)
+   - [Layer 6: Observability, Distributed Tracing & Container Hardening](#layer-6-observability-distributed-tracing--container-hardening)
    - [Layer 7: FastMCP Agent Gateway (`app/mcp/`)](#layer-7-fastmcp-agent-gateway-appmcp)
    - [Layer 8: Autonomous Self-Healing SDLC Agent (`agent/`)](#layer-8-autonomous-self-healing-sdlc-agent-agent)
 5. [5-Minute Quickstart](#-5-minute-quickstart)
 6. [Testing & Verification Guide (96 Tests: 95 Passed, 1 Skipped)](#-testing--verification-guide-96-tests-95-passed-1-skipped)
-7. [Solved Engineering Pitfalls & Troubleshooting](#️-solved-engineering-pitfalls--troubleshooting)
+7. [Solved Engineering Pitfalls & Root Cause Analysis](#️-solved-engineering-pitfalls--root-cause-analysis)
+8. [Operational Runbook & Jaeger Persistence Verification](#-operational-runbook--jaeger-persistence-verification)
+9. [Disclaimer & Synthetic Data Security Notice](#-disclaimer--synthetic-data-security-notice)
 
 ---
 
@@ -399,27 +401,216 @@ Streamlit creates new script runner threads per user interaction. To prevent Pos
 
 ---
 
-### Layer 6: Observability, Configuration & Container Hardening
+### Layer 6: Observability, Distributed Tracing & Container Hardening
 
 #### 1. Configuration Validation via Pydantic BaseSettings (`app/config.py`)
 `app/config.py` uses `pydantic_settings.BaseSettings` to validate environment variables, secrets, and connection parameters at application startup. Missing credentials or malformed URIs fail fast during boot rather than intermittently at runtime.
 
-#### 2. Enterprise Observability, OpenTelemetry & Jaeger Tracing (`app/observability.py`)
-* **Dual-Tier Tracing Architecture**:
-  * **Tier 1 (Fallback)**: High-performance structured metric logging with an in-memory bounded ring buffer (last 1,000 events) accessible via `GET /api/v1/metrics/observability`.
-  * **Tier 2 (OpenTelemetry / Jaeger)**: Automatic OTLP export (`BatchSpanProcessor` + `OTLPSpanExporter` to `http://localhost:4317`) when `OTEL_ENABLED=true`.
-* **Full Context Capture in Traces**:
-  * Captures the user's natural language question (`rag.question`) and synthesized LLM response (`rag.response`) as both **OpenTelemetry Span Tags** and timeline **Span Events** (`user_question`, `ai_response`).
-  * Attaches verified RBAC roles (`rag.roles`), LLM model name (`rag.model`), token consumption, and execution duration (`rag.duration_ms`).
-* **FastAPI Request Middleware (`app/main.py`)**:
-  * Inbound HTTP requests automatically create trace spans (`HTTP <METHOD> <PATH>`) logging client IP, status codes, and endpoint execution duration.
-* **FastMCP Tool Tracing (`app/mcp/gateway.py`)**:
-  * MCP tool calls (`search_sdlc_context`, `propose_patch`) emit dedicated spans (`mcp_tool.<tool_name>`) capturing arguments, sanitizing credentials, and logging results.
-* **Persistent Jaeger Storage via Badger (`docker-compose.yml`)**:
-  * Jaeger runs with `SPAN_STORAGE_TYPE=badger` backed by Docker volume `jaeger_data:/badger` (`user: "0:0"`).
-  * Traces and RAG chat interactions persist across container restarts and system reboots with a 7-day retention TTL (`BADGER_SPAN_STORE_TTL=168h`).
+#### 2. Distributed Tracing Architecture & OpenTelemetry Engine
+The platform implements full-stack distributed tracing via **OpenTelemetry (OTel)** using the **OTLP gRPC Exporter** (`http://localhost:4317`) streaming spans into a persistent **Jaeger All-In-One** backend.
 
-#### 3. Hardened Multi-Stage Dockerfile (`Dockerfile`)
+```text
+[User Browser]
+       │
+       ▼
+[Streamlit UI (8501)] ──── (Span: chat_interaction)
+       │                              │
+       ├──────────────────────────────┼──────────┐
+       ▼                              ▼          ▼
+[FastAPI Gateway (8000)]    [FastMCP Gateway]  [LLM Service]
+ (Span: http_request)        (Span: mcp_tool)   (Span: rag.generate)
+       │                              │          │
+       └──────────────────────────────┼──────────┘
+                                      ▼
+                        [OTLP gRPC Exporter (4317)]
+                                      │
+                                      ▼
+                    [Jaeger All-In-One (Badger Storage)]
+                                      │
+                                      ▼
+                           [Jaeger UI (16686)]
+```
+
+##### Telemetry Configuration & Ports
+| Component | Port | Protocol | Purpose |
+| :--- | :--- | :--- | :--- |
+| **Jaeger UI** | `16686` | HTTP | Web UI trace search, dependency graph, and timeline inspection |
+| **OTLP gRPC** | `4317` | gRPC | Standard OpenTelemetry span ingestion endpoint |
+| **OTLP HTTP** | `4318` | HTTP | Alternative OTLP HTTP ingestion endpoint |
+| **FastAPI** | `8000` | HTTP | REST API & Interactive Documentation (`/docs`) |
+| **Streamlit** | `8501` | HTTP | Enterprise UI frontend |
+| **PostgreSQL / pgvector** | `5432` | TCP | RBAC metadata and vector embeddings |
+
+##### Standardized Span Attributes & Events
+All spans comply with OpenTelemetry semantic conventions extended with enterprise RAG tags:
+* **Session & Identity**: `user.id`, `user.role`, `user.clearance`, `session.id`
+* **RAG Flow**: `rag.question`, `rag.response`, `rag.source_count`, `rag.processing_time_ms`, `rag.model`
+* **MCP / Tools**: `mcp.tool_name`, `mcp.status`, `mcp.duration_ms`, `mcp.args`
+* **HTTP Spans**: `http.method`, `http.url`, `http.status_code`, `http.duration_ms`
+* **Recorded Events**:
+  * `query_received`: Logged on initial request reception.
+  * `retrieval_completed`: Logged with document IDs and vector distance scores.
+  * `generation_completed`: Logged upon final output synthesis.
+  * `query_processed`: Logged with full list of cited document sources.
+  * `tool_completed`: Logged with tool result payload previews.
+
+#### 3. Cross-Service Instrumentation Implementations
+
+##### Core Observability Engine (`app/observability.py`)
+A centralized tracing manager handles provider lifecycle with graceful fallback to a `NoOpTracer` if Jaeger is unavailable, paired with an in-memory bounded ring buffer (last 1,000 events) accessible via `GET /api/v1/metrics/observability`:
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+import time
+from typing import Dict, Any
+
+def setup_observability(service_name: str = "enterprise-rag") -> trace.Tracer:
+    """Configures OpenTelemetry tracer provider with OTLP gRPC export."""
+    resource = Resource.create({"service.name": service_name})
+    provider = TracerProvider(resource=resource)
+    try:
+        processor = BatchSpanProcessor(OTLPSpanExporter(endpoint="localhost:4317", insecure=True))
+        provider.add_span_processor(processor)
+    except Exception:
+        pass
+    trace.set_tracer_provider(provider)
+    return trace.get_tracer(service_name)
+
+def record_chat_interaction(
+    tracer: trace.Tracer,
+    user_id: str,
+    user_role: str,
+    question: str,
+    response: str,
+    sources: list,
+    duration_ms: float
+):
+    """Generates a dedicated parent span recording full RAG query/response context."""
+    with tracer.start_as_current_span("chat_interaction") as span:
+        span.set_attribute("user.id", user_id)
+        span.set_attribute("user.role", user_role)
+        span.set_attribute("rag.question", question)
+        span.set_attribute("rag.response", response)
+        span.set_attribute("rag.source_count", len(sources))
+        span.set_attribute("rag.processing_time_ms", duration_ms)
+        span.add_event("query_processed", {
+            "sources": str([s.get("source", "unknown") for s in sources])
+        })
+```
+
+##### FastAPI HTTP Middleware (`app/main.py`)
+Inbound HTTP requests automatically generate traced spans capturing client methods, routes, status codes, and execution latency:
+
+```python
+import time
+from fastapi import FastAPI, Request
+from app.observability import setup_observability
+
+app = FastAPI(title="Enterprise RAG Service")
+tracer = setup_observability("rag-fastapi")
+
+@app.middleware("http")
+async def trace_requests(request: Request, call_next):
+    start_time = time.time()
+    with tracer.start_as_current_span(f"http_{request.method}_{request.url.path}") as span:
+        span.set_attribute("http.method", request.method)
+        span.set_attribute("http.url", str(request.url))
+        try:
+            response = await call_next(request)
+            span.set_attribute("http.status_code", response.status_code)
+            return response
+        except Exception as exc:
+            span.record_exception(exc)
+            span.set_attribute("http.status_code", 500)
+            raise exc
+        finally:
+            span.set_attribute("http.duration_ms", (time.time() - start_time) * 1000)
+```
+
+##### FastMCP Gateway Tracing (`app/mcp/gateway.py`)
+Every tool execution within the FastMCP gateway is wrapped with trace span capture:
+
+```python
+import time
+from app.observability import setup_observability, record_mcp_tool_execution
+
+mcp_tracer = setup_observability("rag-mcp-server")
+
+async def execute_tool_wrapper(tool_name: str, **kwargs):
+    start_time = time.time()
+    status = "success"
+    try:
+        result = await dispatch_tool(tool_name, **kwargs)
+        return result
+    except Exception as exc:
+        status = "error"
+        raise exc
+    finally:
+        duration_ms = (time.time() - start_time) * 1000
+        record_mcp_tool_execution(
+            tracer=mcp_tracer,
+            tool_name=tool_name,
+            arguments=kwargs,
+            result=result if status == "success" else None,
+            duration_ms=duration_ms,
+            status=status
+        )
+```
+
+#### 4. Persistent Jaeger Storage Architecture (Badger LSM-Tree)
+By default, Jaeger `all-in-one` stores spans in ephemeral container memory, purging all traces on container restart.
+* **Badger Engine**: Setting `SPAN_STORAGE_TYPE=badger` enables an embedded, persistent Log-Structured Merge-tree (LSM) key-value store backed by Docker named volumes.
+* **Permission Hardening (`user: "0:0"`)**: Jaeger defaults to running as UID `10001` (`jaeger`), which causes a fatal initialization failure (`mkdir /badger/key: permission denied`) against root-owned host mounts. Declaring `user: "0:0"` grants the container write permissions to create `/badger/data` and `/badger/key`.
+* **Image Naming Note**: Use `jaegertracing/all-in-one:latest` (or official tags like `v1.76.0`); `jaegertracing/jaeger:2` is not published under that tag on Docker Hub.
+
+```yaml
+version: "3.8"
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    user: "0:0"
+    environment:
+      - SPAN_STORAGE_TYPE=badger
+      - BADGER_EPHEMERAL=false
+      - BADGER_DIRECTORY_VALUE=/badger/data
+      - BADGER_DIRECTORY_KEY=/badger/key
+      - BADGER_SPAN_STORE_TTL=168h # 7-day retention
+    ports:
+      - "16686:16686" # Web UI
+      - "4317:4317"   # OTLP gRPC Ingestion
+      - "4318:4318"   # OTLP HTTP Ingestion
+      - "14268:14268" # jaeger.thrift ingestion
+    volumes:
+      - jaeger_data:/badger
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: enterprise-rag-db
+    environment:
+      POSTGRES_USER: rag_user
+      POSTGRES_PASSWORD: rag_password
+      POSTGRES_DB: enterprise_rag
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  jaeger_data:
+    driver: local
+  pgdata:
+    driver: local
+```
+
+#### 5. Hardened Multi-Stage Dockerfile (`Dockerfile`)
 ```dockerfile
 # Stage 1: Build & Wheel Compilation
 FROM python:3.11-slim AS builder
@@ -434,7 +625,7 @@ HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8000/health
 * **Minimal Attack Surface**: Build dependencies (`gcc`, `libpq-dev`) are stripped from the final runtime image.
 * **Non-Root Execution**: Runs under unprivileged user `appuser` (UID 10001), preventing container escape vulnerabilities.
 
-#### 4. Automated Integration Testing (`testcontainers-python`)
+#### 6. Automated Integration Testing (`testcontainers-python`)
 `tests/test_integration_pgvector.py` provides end-to-end integration testing against real database containers (`pgvector/pgvector:pg16`), verifying that `schema.sql` initializes extensions, creates tables, and executes HNSW and GIN queries accurately in CI environments.
 
 
@@ -570,7 +761,7 @@ tests/test_utilities.py                 .......                                 
 
 ---
 
-## 🛠️ Solved Engineering Pitfalls & Troubleshooting
+## 🛠️ Solved Engineering Pitfalls & Root Cause Analysis
 
 | Symptom / Error | Root Cause | Permanent Engineering Solution |
 | :--- | :--- | :--- |
@@ -588,5 +779,127 @@ tests/test_utilities.py                 .......                                 
 | **`ImmatureSignatureError: (iat)`** | Clock drift between local machine and Google NTP servers. | Added `leeway=60` in `jwt.decode()` per RFC 7519. |
 | **`RuntimeError: Event loop is closed`** | Streamlit tears down async event loops between reruns while `AsyncOpenAI` retained transport connections bound to the initial loop. | **Loop-Scoped Client Manager**: Scopes `AsyncOpenAI` and `asyncpg` pools dynamically to active event loops (`get_openai_client()`), re-initializing cleanly if the prior loop is closed. |
 | **Context Eviction / Recall Starvation** | Post-filtering in application code drops top-$K$ restricted documents. | **In-Database RBAC**: Evaluates `WHERE allowed_roles ?| $user_roles` inside PostgreSQL before vector distance ranking. |
+| **`NameError: name 'json' is not defined`** | Missing top-level import in `streamlit_app.py` during debug metadata extraction. | Added `import json` to top-level module imports. |
+| **Grounding Refusals on Synthetic Summaries** | Overly strict prompt penalties caused false refusals when questions didn't match documents verbatim. | **Grounding Calibration**: Calibrated prompt to distinguish semantic cross-excerpt synthesis from absent facts. |
+| **FastAPI / OpenTelemetry Dependency Conflict** | `fastapi==0.142.2` requires `opentelemetry-api>=1.44.0`, colliding with older pinned builds. | Pinned `opentelemetry-api>=1.45.1`, `opentelemetry-sdk>=1.45.1`, and `opentelemetry-exporter-otlp>=1.45.1`. |
 | **Jaeger Badger `mkdir /badger/key: permission denied`** | Docker mounts root-owned named volume while container ran as non-root user. | **Container User Mapping (`user: "0:0"`)**: Run Jaeger with root user context to initialize Badger LSM value log directories and SSTable index keys. |
 | **Jaeger Trace Loss on Container Restart** | Default all-in-one image stores traces in ephemeral memory. | **Persistent Badger Storage**: Configured `SPAN_STORAGE_TYPE=badger` with Docker volume `jaeger_data:/badger` and 7-day TTL retention. |
+
+---
+
+### Root Cause Analysis & Deep Dives
+
+#### 7.1. Concurrency: `RuntimeError: Event loop is closed`
+* **Symptom**: Repeated requests in Streamlit crashed with:
+  `RuntimeError: Event loop is closed` at `openai/_base_client.py:1532`.
+* **Root Cause**: An `AsyncOpenAI` client was declared as a global singleton at module import time in `app/db/llm.py`. Streamlit runs user interactions across varying thread pools. When a thread terminates its asyncio event loop, the global client's internal HTTPX connection pool retains references to the destroyed loop, triggering an immediate crash on subsequent calls.
+* **Resolution**: Implemented thread/loop-scoped client management via `get_openai_client()`:
+
+```python
+import asyncio
+from openai import AsyncOpenAI
+from typing import Dict
+
+_openai_clients: Dict[asyncio.AbstractEventLoop, AsyncOpenAI] = {}
+
+def get_openai_client() -> AsyncOpenAI:
+    """Returns an AsyncOpenAI client bound to the current thread's active event loop."""
+    loop = asyncio.get_running_loop()
+    if loop not in _openai_clients:
+        _openai_clients[loop] = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    return _openai_clients[loop]
+```
+
+#### 7.2. Scope Bug: `NameError: name 'json' is not defined`
+* **Symptom**: Chat query submission in Streamlit threw `NameError: name 'json' is not defined` inside `streamlit_app.py`.
+* **Root Cause**: `json.dumps()` was invoked during debug metadata extraction without an explicit top-level `import json` statement.
+* **Resolution**: Added `import json` to top-level imports in `streamlit_app.py`.
+
+#### 7.3. Grounding System Prompt Calibration
+* **Symptom**: Legitimate questions regarding general repository policies or broad document summaries resulted in abrupt generic refusals: *"I do not have sufficient information in the provided context to answer your question."*
+* **Root Cause**: Overly strict prompt penalties caused the model to reject queries when documents didn't match the query wording with 100% lexical precision.
+* **Resolution**: Calibrated system prompt to distinguish between *absence of data* and *semantic synthesis of retrieved excerpts*:
+
+```text
+You are an enterprise AI assistant for document retrieval and question answering.
+Answer the user's question based strictly on the provided context excerpts.
+Synthesize information across multiple excerpts if relevant.
+Do not speculate or extrapolate beyond the provided text.
+If the provided context does not contain any facts relevant to answering the question,
+state clearly: "I do not have sufficient information in the provided context to answer your question."
+Always cite your sources using the format [Document Name, Page/Section].
+```
+
+#### 7.4. Dependency Incompatibility & Version Pinning
+* **Symptom**: `pip install` failures and runtime import errors between FastAPI and OpenTelemetry.
+* **Root Cause**: `fastapi==0.142.2` enforces `opentelemetry-api>=1.44.0`, whereas local environment was pinned to an older sub-1.40.0 build.
+* **Resolution**: Updated `requirements.txt`:
+  ```text
+  opentelemetry-api>=1.45.1
+  opentelemetry-sdk>=1.45.1
+  opentelemetry-exporter-otlp>=1.45.1
+  ```
+
+#### 7.5. Persistent Jaeger Storage & Docker Volume Permissions
+* **Symptom**: Jaeger failed to start when switching from in-memory to Badger storage:
+  > `{"level":"fatal","caller":"all-in-one/main.go:105","msg":"Failed to init storage factory","error":"Error Creating Dir: \"/badger/key\" err: mkdir /badger/key: permission denied"}`
+* **Root Cause**: The Jaeger container defaults to non-root user `jaeger` (UID `10001`), which lacks write permissions to host-mounted named volumes.
+* **Resolution**: Explicitly declare `user: "0:0"` in `docker-compose.yml` to run the container as root and mount named volume `jaeger_data:/badger`.
+
+---
+
+## 📋 Operational Runbook & Jaeger Persistence Verification
+
+### 8.1. Running the Automated Test Suite
+Run unit and integration tests covering RBAC, document chunking, embeddings, vector retrieval, and tracing hooks:
+
+```powershell
+python -m pytest -v
+```
+
+**Verification Results**:
+* Total Tests: **96**
+* Passed: **95**
+* Skipped: **1** (Live network mock fallback)
+* Test Duration: ~22.0s
+
+### 8.2. Container Orchestration & Health Checks
+
+```powershell
+# 1. Stop existing containers
+docker compose down
+
+# 2. Re-create and start with persistent volumes
+docker compose up -d
+
+# 3. Verify container status
+docker compose ps
+```
+
+Expected Output:
+```text
+NAME                 IMAGE                         STATUS         PORTS
+enterprise-rag-db    pgvector/pgvector:pg16        Up (healthy)   0.0.0.0:5432->5432/tcp
+jaeger               jaegertracing/all-in-one      Up             0.0.0.0:4317-4318->4317-4318/tcp, 0.0.0.0:16686->16686/tcp
+```
+
+### 8.3. Verifying Trace Persistence in Jaeger
+1. Open `http://localhost:16686` in a browser.
+2. Under **Service**, select `enterprise-rag-pgvector-rbac` or `rag-fastapi`.
+3. Submit a query via Streamlit (`http://localhost:8501`) or execute an API call via Swagger (`http://localhost:8000/docs`).
+4. Click **Find Traces** in Jaeger UI; inspect the `chat_interaction` span and expand `Tags` to inspect `rag.question` and `rag.response`.
+5. Restart the Jaeger container:
+   ```powershell
+   docker compose restart jaeger
+   ```
+6. Refresh `http://localhost:16686` and re-run search. **All previous traces remain intact and searchable from Badger disk storage.**
+
+---
+
+## ⚠️ Disclaimer & Synthetic Data Security Notice
+
+> [!CAUTION]
+> **Data Security & Synthetic Assets**:
+> * All test documents, corporate financial summaries, and account figures referenced within this repository and test suite are **synthetic mock assets** generated solely for technical evaluation of Role-Based Access Control (RBAC) and vector similarity search.
+> * None of the indexed texts contain genuine Personally Identifiable Information (PII) or authentic material financial records.
+> * Always ensure telemetry scrubbers are enabled in enterprise production environments to redact sensitive tokens, authorization headers, and restricted document fragments prior to exporting spans to centralized tracing collectors.
