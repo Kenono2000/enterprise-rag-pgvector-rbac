@@ -1,9 +1,10 @@
 -- ============================================================================
 -- schema.sql
 -- PostgreSQL 16 + pgvector Normalized Architecture with Dual Indexing
+-- Consolidated Database Initialization & Migration Script
 -- ============================================================================
 
--- 1. Create Extensions (Idempotent)
+-- 1. Create Required Extensions (Idempotent)
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
@@ -34,35 +35,79 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 4. Clean up / Migrate legacy enterprise_documents table or views if present
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables 
+        WHERE table_schema = CURRENT_SCHEMA() 
+          AND table_name = 'enterprise_documents' 
+          AND table_type = 'BASE TABLE'
+    ) THEN
+        -- Migrate master documents
+        INSERT INTO documents (document_id, title, allowed_roles, created_at)
+        SELECT 
+            document_id,
+            title,
+            allowed_roles,
+            created_at
+        FROM enterprise_documents
+        ON CONFLICT (document_id) DO UPDATE
+        SET title = EXCLUDED.title, allowed_roles = EXCLUDED.allowed_roles;
+
+        -- Migrate chunks
+        INSERT INTO document_chunks (document_id, chunk_id, chunk_index, content, embedding, embedding_model, created_at)
+        SELECT 
+            d.id,
+            ed.document_id,
+            0,
+            ed.content,
+            ed.embedding,
+            COALESCE(ed.embedding_model, 'text-embedding-3-large'),
+            ed.created_at
+        FROM enterprise_documents ed
+        JOIN documents d ON ed.document_id = d.document_id
+        ON CONFLICT (chunk_id) DO UPDATE
+        SET content = EXCLUDED.content, embedding = EXCLUDED.embedding;
+
+        DROP TABLE enterprise_documents CASCADE;
+    END IF;
+END $$;
+
+-- Drop any legacy views or triggers if they exist
+DROP TRIGGER IF EXISTS trg_enterprise_docs_io_insert ON enterprise_documents;
+DROP VIEW IF EXISTS enterprise_documents CASCADE;
+DROP FUNCTION IF EXISTS trg_enterprise_documents_upsert CASCADE;
+
 -- ============================================================================
--- 4. High-Performance Dual Indexing & Lookup Indexes
+-- 5. High-Performance Dual Indexing & Lookup Indexes
 -- ============================================================================
 
--- 4.1 HNSW Vector Index: sub-millisecond approximate nearest neighbor search
+-- 5.1 HNSW Vector Index: sub-millisecond approximate nearest neighbor search
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw 
 ON document_chunks 
 USING hnsw (embedding vector_cosine_ops)
 WITH (m = 16, ef_construction = 64);
 
--- 4.2 GIN Role Index: constant-time JSONB role membership pre-filter
+-- 5.2 GIN Role Index: constant-time JSONB role membership pre-filter
 CREATE INDEX IF NOT EXISTS idx_documents_allowed_roles_gin 
 ON documents 
 USING gin (allowed_roles jsonb_path_ops);
 
--- 4.3 Unique / B-Tree Index on file_hash for cryptographic de-duplication
+-- 5.3 Unique / B-Tree Index on file_hash for cryptographic de-duplication
 CREATE INDEX IF NOT EXISTS idx_documents_file_hash 
 ON documents (file_hash);
 
--- 4.4 Foreign Key Index for low-latency joins and cascading operations
+-- 5.4 Foreign Key Index for low-latency joins and cascading operations
 CREATE INDEX IF NOT EXISTS idx_chunks_document_id 
 ON document_chunks (document_id);
 
--- 4.5 Chunk Sequence Index
+-- 5.5 Chunk Sequence Index
 CREATE INDEX IF NOT EXISTS idx_chunks_document_seq 
 ON document_chunks (document_id, chunk_index);
 
 -- ============================================================================
--- 5. Deterministic Mock Seed Data (100% Offline Testing & Initial Boot)
+-- 6. Deterministic Mock Seed Data (100% Offline Testing & Initial Boot)
 -- ============================================================================
 
 -- Master Documents Seed

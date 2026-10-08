@@ -41,22 +41,27 @@ def test_schema_sql_contains_normalized_tables_and_indexes():
     # 5. File Hash De-duplication Index
     assert "idx_documents_file_hash" in sql_text
 
-    # 6. Legacy enterprise_documents table/view is completely removed
-    assert "enterprise_documents" not in sql_text
+    # 6. Consolidated legacy migration and cleanup logic in schema.sql
+    assert "DROP TABLE enterprise_documents CASCADE;" in sql_text
+    assert "DROP VIEW IF EXISTS enterprise_documents CASCADE;" in sql_text
+    assert "DROP FUNCTION IF EXISTS trg_enterprise_documents_upsert CASCADE;" in sql_text
 
 
-def test_migration_001_script_integrity():
-    """Verify 001_normalize_documents_schema.sql has complete migration logic."""
-    migration_path = Path(__file__).resolve().parent.parent / "migrations" / "001_normalize_documents_schema.sql"
-    assert migration_path.exists(), "migration script must exist"
+def test_consolidated_schema_migration_integrity():
+    """Verify schema.sql consolidates complete initialization, migration, and seed logic."""
+    schema_path = Path(__file__).resolve().parent.parent / "schema.sql"
+    assert schema_path.exists(), "schema.sql must exist"
 
-    sql = migration_path.read_text(encoding="utf-8")
-    assert "BEGIN;" in sql and "COMMIT;" in sql
+    sql = schema_path.read_text(encoding="utf-8")
+    assert "CREATE EXTENSION IF NOT EXISTS vector;" in sql
+    assert "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";" in sql
     assert "CREATE TABLE IF NOT EXISTS documents" in sql
     assert "CREATE TABLE IF NOT EXISTS document_chunks" in sql
     assert "ON DELETE CASCADE" in sql
     assert "DROP TABLE enterprise_documents CASCADE;" in sql
     assert "DROP VIEW IF EXISTS enterprise_documents CASCADE;" in sql
+    assert "INSERT INTO documents" in sql
+    assert "INSERT INTO document_chunks" in sql
 
 
 @pytest.mark.asyncio
