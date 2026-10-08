@@ -93,18 +93,23 @@ flowchart TB
 
 ### 1. Database Layer: pgvector + Dual Indexing (`app/db/`)
 * **Dual Indexing**: Combines **HNSW** (`vector_cosine_ops`, $m=16$, $ef=64$) for sub-millisecond approximate nearest neighbor search with **GIN** (`jsonb_path_ops`) for constant-time role membership checks.
-* **The Core In-DB RBAC Query**:
+* **The Core In-DB RBAC Query (Parameterized & Injection-Proof)**:
   ```sql
   SELECT document_id, title, content, allowed_roles, 
          1 - (embedding <=> $1::vector) AS similarity
   FROM enterprise_documents
   WHERE allowed_roles ?| $2::text[]
+    AND (embedding_model = 'text-embedding-3-large' OR embedding_model IS NULL)
   ORDER BY embedding <=> $1::vector LIMIT $3;
   ```
+* **Zero-Trust Short-Circuiting**: Callers without validated roles immediately receive empty results (`[]`) without executing a database query.
+* **Defense-in-Depth Sanitization**: Vector search roles are sanitized against `KNOWN_ROLES` and identifier syntax, dropping SQL injection strings before binding to `$2::text[]`.
 * **Matryoshka 1536-d Truncation**: Truncates `text-embedding-3-large` from 3072 to 1536 dimensions, slashing PostgreSQL disk and RAM usage by **50%** while preserving **>98%** recall.
 * **Loop-Aware Connection Pool**: `asyncpg` pools recycle automatically when Streamlit event loops restart, eliminating `RuntimeError: Event loop is closed`.
 
 ### 2. Identity & Session Security (`app/auth/`)
+* **Enterprise JWKS Verification**: Verifies tokens against Google JWKS or custom enterprise IdPs (`OIDC_JWKS_URI` / `OIDC_ISSUER`), enforcing strict issuer checks to prevent JWKS cache poisoning.
+* **Multi-Source Role Claim Extraction**: `extract_roles()` extracts and normalizes claims from `app_roles`, `roles`, `groups`, `cognito:groups`, and `realm_access.roles` (Azure AD, Okta, Firebase, AWS Cognito, Keycloak).
 * **RFC 7636 OAuth 2.0 PKCE**: Uses cryptographic `code_verifier` and SHA-256 challenges for public web applications.
 * **Stateless HMAC-SHA256 State**: Embeds verifier and timestamp into signed state tokens (`{b64_data}.{sig}`). Immune to browser redirects, process recycles, and multi-worker scale-outs without Redis.
 * **Encrypted Cookie Session Persistence**: Serializes credentials into a `zlib`-compressed, HMAC-signed browser cookie so page reloads (**F5**) stay signed in.
@@ -147,7 +152,7 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-### 2. Run Automated Verification (41/41 Tests)
+### 2. Run Automated Verification (70/70 Tests)
 All tests run **100% offline** with zero external network or API dependencies:
 ```powershell
 python -m pytest -v
@@ -172,20 +177,26 @@ python -m app.mcp
 
 ---
 
-## 🧪 Test Suite Overview (41 Passing Tests)
+## 🧪 Test Suite Overview (70 Passing Tests)
 
 ```text
-tests/test_rag.py        ....                                             [ 10%]
-tests/test_auth.py       ........................                         [ 68%]
-tests/test_mcp_auth.py   .......                                          [ 85%]
-tests/test_agent.py      ......                                           [100%]
-============================= 41 passed in 10.53s ==============================
+tests/test_agent.py          ......                                           [  8%]
+tests/test_auth.py           ..................................               [ 57%]
+tests/test_ingest.py         .......                                          [ 67%]
+tests/test_mcp_auth.py       ..........                                       [ 81%]
+tests/test_rag.py            ....                                             [ 87%]
+tests/test_security_rbac.py   .....                                            [ 94%]
+tests/test_utilities.py      ....                                             [100%]
+============================== 70 passed in 13.54s ==============================
 ```
 
+* **`test_security_rbac.py` (5 tests)**: Dedicated security test suite verifying SQL injection immunity, parameterized array execution (`$2::text[]`), zero-trust empty role short-circuiting, and API header validation.
+* **`test_auth.py` (34 tests)**: PKCE verification, stateless HMAC tokens, JWKS leeway, multi-source claim extraction (`groups`, `roles`, `app_roles`, `cognito:groups`, `realm_access`), enterprise JWKS issuer validation, and **session cookie compression/tampering/expiry tests**.
 * **`test_rag.py` (4 tests)**: FastAPI endpoints, 401 unauthorized rejection, dev role fallbacks, and in-database RBAC retrieval.
-* **`test_auth.py` (24 tests)**: PKCE verification, stateless HMAC state tokens, JWKS leeway, role mappings, and **session cookie compression/tampering/expiry tests**.
-* **`test_mcp_auth.py` (7 tests)**: FastMCP ID token authentication, role extraction, and tool execution governance.
+* **`test_mcp_auth.py` (10 tests)**: FastMCP ID token authentication, role extraction, and tool execution governance.
 * **`test_agent.py` (6 tests)**: GitHub webhook HMAC verification, AST execution sink blocks, secret scanning, sandbox traversal defense, and LangGraph self-healing loop.
+* **`test_ingest.py` (7 tests)**: Pre-ingestion de-duplication, stem matching, and chunk prefix detection.
+* **`test_utilities.py` (4 tests)**: Multi-format loaders (`.pdf`, `.md`, `.docx`) and fallback parsers.
 
 ---
 
@@ -193,6 +204,7 @@ tests/test_agent.py      ......                                           [100%]
 
 | Issue | Root Cause | Engineering Solution |
 | :--- | :--- | :--- |
+| **SQL Injection in RBAC Filtering** | String-formatting user roles into SQL queries (`ARRAY[...]`). | **Parameterized Bindings & Sanitization**: Bound roles to `$2::text[]` via asyncpg, added zero-trust short-circuit on empty roles, and sanitized claims against `KNOWN_ROLES`. |
 | **OAuth State Mismatch** | Streamlit re-creates session on navigation to Google. | **Stateless HMAC-SHA256 State**: Encodes verifier & timestamp; zero server memory dependency. |
 | **F5 Reload Requiring Login** | Ephemeral Streamlit WebSocket memory is cleared on refresh. | **Encrypted Session Cookie**: Compresses & HMAC-signs session data; auto-rehydrates via `st.context.cookies`. |
 | **`ImmatureSignatureError`** | Clock skew between local machine and Google NTP servers. | Configured `leeway=60` in `jwt.decode()` per RFC 7519. |

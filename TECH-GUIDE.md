@@ -119,9 +119,12 @@ LIMIT $3;
 * **`<=>` (Cosine Distance)**: Calculates distance $1 - \cos(\theta)$. Inverted to $1 - (\text{dist})$ to produce a normalized similarity score $[0.0, 1.0]$.
 
 ### Key Database Optimizations
-1. **Matryoshka Embeddings (1536-d Truncation)**: Uses `text-embedding-3-large` truncated from 3072 to 1536 dimensions. Cuts storage and RAM by **50%** while preserving **>98%** retrieval recall.
-2. **Loop-Aware Connection Pooling**: `asyncpg` pools are bound to the running event loop. Streamlit recycles event loops across interactions; `DatabaseManager.get_pool()` detects closed/mismatched loops and safely re-creates the pool to prevent `RuntimeError: Event loop is closed`.
-3. **Deterministic Mock Vectors (Offline Testing)**:
+1. **Parameterized Query Execution & SQL Injection Immunity**: Vector search executes exclusively via parameterized array containment (`WHERE allowed_roles ?| $2::text[]`). String interpolation into `ARRAY[...]` is strictly banned.
+2. **Zero-Trust Short-Circuiting**: In [`DatabaseManager.secure_search`](app/db/manager.py), if `user_roles` is empty or `None`, the function returns `[]` immediately without executing a query against PostgreSQL.
+3. **Defense-in-Depth Sanitization**: Vector search roles are sanitized against `KNOWN_ROLES` and identifier syntax, dropping SQL injection attempts before binding to `$2::text[]`.
+4. **Matryoshka Embeddings (1536-d Truncation)**: Uses `text-embedding-3-large` truncated from 3072 to 1536 dimensions. Cuts storage and RAM by **50%** while preserving **>98%** retrieval recall.
+5. **Loop-Aware Connection Pooling**: `asyncpg` pools are bound to the running event loop. Streamlit recycles event loops across interactions; `DatabaseManager.get_pool()` detects closed/mismatched loops and safely re-creates the pool to prevent `RuntimeError: Event loop is closed`.
+6. **Deterministic Mock Vectors (Offline Testing)**:
    * **Python**: `[0.01 * (i % 5) for i in range(1536)]`
    * **SQL**: `(SELECT array_agg(0.01 * (i % 5))::vector(1536) FROM generate_series(1, 1536) i)`
    * Enables complete unit testing with zero external API calls, latency, or token costs.
@@ -185,11 +188,14 @@ flowchart TD
 
 1. **15-Minute Sliding Inactivity Timeout**: DOM event listeners track user activity (`mousedown`, `keydown`, `scroll`, `touchstart`). If 15 minutes elapse without interaction, the cookie is wiped (`max-age=0`) and the user is redirected to the sign-in page with a SOC-2 notice.
 2. **12-Hour Hard Session Ceiling**: Regardless of continuous user activity, sessions terminate after 12 hours to require re-authentication.
-3. **Role Resolution Pipeline**:
-   * **Primary**: Firebase Custom Claims (`payload["app_roles"]`).
+3. **Role Resolution Pipeline (Ticket #12 Enhancements)**:
+   * **Primary (Verified Token Claims)**: Extracts and normalizes claims from `app_roles`, `roles`, `groups`, `cognito:groups`, and `realm_access.roles` (supporting Azure AD, Okta, Firebase, AWS Cognito, Keycloak) filtered strictly against `KNOWN_ROLES`.
    * **Secondary**: Firebase Admin SDK live lookup by email.
    * **Tertiary**: Server-side email mapping in `.env` (`ROLE_MAP_<role>=email`).
-   * **Quaternary (Dev)**: `X-User-Roles` header when `REQUIRE_GOOGLE_AUTH=false`.
+   * **Quaternary (Dev)**: `X-User-Roles` header when `REQUIRE_GOOGLE_AUTH=false`, strictly validated as a JSON array and sanitized against `KNOWN_ROLES`.
+4. **Enterprise JWKS & Issuer Verification (`app/auth/jwks.py`)**:
+   * Uses `verify_jwt_token()` with `get_allowed_issuers()` to support Google accounts, Firebase, and enterprise IdPs (`OIDC_JWKS_URI` and `OIDC_ISSUER`).
+   * Performs pre-resolution issuer validation to prevent untrusted issuers from polluting the cached JWKS clients dictionary.
 
 ---
 
@@ -204,6 +210,7 @@ async def get_current_user(
 ) -> UserIdentity:
 ```
 * Enforces Google Bearer token verification with **60-second clock skew leeway** (`leeway=60`) to absorb minor time drifts between local hardware and Google NTP servers.
+* Validates and sanitizes legacy dev headers (`X-User-Roles`), rejecting non-array formats with `400 Bad Request`.
 * Returns a strongly-typed `UserIdentity(email, roles, sub)` injected into RAG queries.
 
 ### Mathematical Confidence Scoring
@@ -212,7 +219,7 @@ $$\text{confidence\_score} = \frac{1}{N} \sum_{i=1}^N \text{similarity}_i = \fra
 
 ### Streamlit Shift-Left UI (`streamlit_app.py`)
 * **Iframe Sandbox-Safe Navigation**: Uses native popup navigation (`target="_blank"`) compliant with Streamlit Community Cloud iframe sandboxing policies.
-* **Live RBAC Audit Inspector**: Displays raw generated embeddings, verified JWT claims, and executed PostgreSQL queries directly on screen.
+* **Live RBAC Audit Inspector**: Displays parameterized query templates (`WHERE allowed_roles ?| $2::text[]`) with safe JSON-serialized parameter bindings (`$1`, `$2`, `$3`), demonstrating SQL injection immunity directly on screen.
 * **Interactive Security Panel**: Real-time session elapsed time, ID token TTL countdown, manual silent refresh trigger, and token copy drawer for Swagger UI (`/docs`).
 
 ---
@@ -268,7 +275,7 @@ stateDiagram-v2
 
 ## 8. Testing & Verification Guide
 
-The project features a **100% passing test suite (41/41 tests)** that executes completely offline without external network or API dependencies:
+The project features a **100% passing test suite (70/70 tests)** that executes completely offline without external network or API dependencies:
 
 ```powershell
 python -m pytest -v
@@ -277,11 +284,14 @@ python -m pytest -v
 ### Test Suite Breakdown
 | Module | Tests | Key Invariants Verified |
 | :--- | :---: | :--- |
+| **`tests/test_security_rbac.py`** | 5 | • SQL injection immunity in vector search.<br/>• Parameterized array containment (`$2::text[]`).<br/>• Zero-Trust empty role short-circuiting.<br/>• Header validation and injection filtering. |
+| **`tests/test_auth.py`** | 34 | • RFC 7636 PKCE `code_verifier` & `code_challenge` derivation.<br/>• Stateless HMAC-SHA256 OAuth state generation & expiration (300s TTL).<br/>• Google JWKS certificate caching & `leeway=60s` clock skew tolerance.<br/>• Multi-source role claim extraction (`app_roles`, `roles`, `groups`, `cognito:groups`, `realm_access.roles`).<br/>• Enterprise JWKS issuer validation & rejection of untrusted issuers.<br/>• **Session Cookie Encoding**: Roundtrip compression, signature tampering rejection, expired TTL handling, and malformed cookie rejection. |
 | **`tests/test_rag.py`** | 4 | • Health check status.<br/>• Strict 401 rejection when unauthenticated.<br/>• Dev header fallback (`X-User-Roles`).<br/>• End-to-end vector retrieval & RBAC filtering. |
-| **`tests/test_auth.py`** | 24 | • RFC 7636 PKCE `code_verifier` & `code_challenge` derivation.<br/>• Stateless HMAC-SHA256 OAuth state generation & expiration (300s TTL).<br/>• Google JWKS certificate caching & `leeway=60s` clock skew tolerance.<br/>• Role mapping priority (Firebase custom claims vs. email fallbacks).<br/>• **Session Cookie Encoding**: Roundtrip compression, signature tampering rejection, expired TTL handling, and malformed cookie rejection. |
-| **`tests/test_mcp_auth.py`** | 7 | • FastMCP token validation and unauthenticated caller rejection.<br/>• Verified role extraction from ID tokens for tool execution.<br/>• Identity verification on patch submission. |
+| **`tests/test_mcp_auth.py`** | 10 | • FastMCP token validation and unauthenticated caller rejection.<br/>• Verified role extraction from ID tokens for tool execution.<br/>• Identity verification on patch submission. |
 | **`tests/test_agent.py`** | 6 | • GitHub webhook HMAC-SHA256 verification.<br/>• Webhook JSON parsing into typed models.<br/>• Deterministic secret scanning (API keys, private keys).<br/>• AST static inspection (`eval`, `exec`, `__import__`).<br/>• Sandbox path traversal prevention.<br/>• Full LangGraph self-healing test repair cycle. |
-| **Total** | **41** | **100% Passed (10.5s execution time)** |
+| **`tests/test_ingest.py`** | 7 | • Pre-ingestion de-duplication, stem matching, chunk prefix detection. |
+| **`tests/test_utilities.py`** | 4 | • Multi-format loaders (`.pdf`, `.md`, `.docx`) and fallback parsers. |
+| **Total** | **70** | **100% Passed (13.5s execution time)** |
 
 ---
 
@@ -305,6 +315,7 @@ python -m app.mcp
 ### Solved Engineering Pitfalls Reference
 | Symptom / Error | Root Cause | Permanent Solution |
 | :--- | :--- | :--- |
+| **SQL Injection in RBAC Filtering** | String-formatting user roles into SQL queries (`ARRAY[...]`). | **Parameterized Bindings & Sanitization**: Bound roles to `$2::text[]` via asyncpg, added zero-trust short-circuit on empty roles, and sanitized claims against `KNOWN_ROLES`. |
 | **OAuth state mismatch / CSRF** | Streamlit re-creates session on navigation away to Google. | **Stateless HMAC-SHA256 Signed State**: verifier is embedded in signed state string; zero memory dependency. |
 | **Browser reload requires re-login** | Streamlit WebSocket reset clears RAM session state. | **Encrypted Session Cookie**: `enterprise_rag_session` cookie is written to browser and rehydrated via `st.context.cookies`. |
 | **`ImmatureSignatureError: (iat)`** | Clock drift between local machine and Google NTP servers. | Added `leeway=60` in `jwt.decode()` per RFC 7519. |
@@ -312,3 +323,4 @@ python -m app.mcp
 | **`client_secret is missing`** | Google OAuth "Web Application" client type requires secret at `/token`. | Set `GOOGLE_CLIENT_SECRET` in `.env` and pass in token exchange. |
 | **`Event loop is closed` in asyncpg** | Streamlit destroys event loops across script reruns. | Loop-aware connection manager: checks `_loop.is_closed()` and recycles pool cleanly. |
 | **Recall starvation in RAG** | Post-filtering in application code drops top-$K$ restricted docs. | **In-Database RBAC**: `WHERE allowed_roles ?| $user_roles` inside the SQL query before HNSW vector ordering. |
+
