@@ -27,6 +27,8 @@ from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from psycopg2.extras import execute_values
 from utilities import (
+    compute_file_hash,
+    embed_chunks_with_retry,
     get_db_connection,
     get_documents,
     get_embedding_model,
@@ -36,15 +38,6 @@ from utilities import (
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("ingest")
-
-
-def compute_file_hash(file_path: str | Path) -> str:
-    """Compute SHA-256 hash of a file in 64KB blocks for memory efficiency."""
-    hasher = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        while chunk := f.read(65536):
-            hasher.update(chunk)
-    return hasher.hexdigest()
 
 
 def check_document_exists(target: Any, filename: str, file_hash: Optional[str] = None) -> bool:
@@ -71,16 +64,18 @@ def check_document_exists(target: Any, filename: str, file_hash: Optional[str] =
     params_filename = (filename, f"{escaped_fn}_%", stem, f"{escaped_stem}_%")
 
     def _execute_check(cur) -> bool:
-        # 1. Check by file_hash if provided
+        # 1. Check by file_hash if provided (exact content match de-duplication)
         if file_hash:
             try:
                 cur.execute("SELECT 1 FROM documents WHERE file_hash = %s LIMIT 1", (file_hash,))
                 if cur.fetchone() is not None:
                     return True
+                # If file_hash was provided but does not match, file is new or modified
+                return False
             except Exception:
                 pass
 
-        # 2. Check by filename/prefix/stem in documents
+        # 2. Check by filename/prefix/stem in documents (when file_hash is None)
         cur.execute(query_filename, params_filename)
         return cur.fetchone() is not None
 
@@ -116,12 +111,12 @@ def ingest_data(
     chunk_texts = [chunk.page_content.replace("\x00", "") for chunk in chunks]
     print(f"🚀 Generating embeddings for {len(chunk_texts)} chunks in batches of {batch_size}...")
 
-    # Batch embedding generation to prevent rate limits and memory pressure
-    embeddings: List[List[float]] = []
-    for i in range(0, len(chunk_texts), batch_size):
-        batch = chunk_texts[i : i + batch_size]
-        batch_embs = embeddings_model.embed_documents(batch)
-        embeddings.extend(batch_embs)
+    # Batch embedding generation with exponential backoff on rate limits
+    embeddings = embed_chunks_with_retry(
+        chunk_texts,
+        embeddings_model,
+        batch_size=batch_size,
+    )
     print("  [✓] All embeddings generated.")
 
     print("📦 Inserting into PostgreSQL...")
@@ -164,7 +159,10 @@ def ingest_data(
                     )
                     doc_uuid = cur.fetchone()[0]
 
-                    # 2. Insert chunks for this document
+                    # 2. Delete previous chunks if re-indexing an updated file
+                    cur.execute("DELETE FROM document_chunks WHERE document_id = %s", (doc_uuid,))
+
+                    # 3. Insert chunks for this document
                     chunks_data = [
                         (
                             doc_uuid,
@@ -239,8 +237,8 @@ def main():
                 for file_path in file_paths:
                     filename = Path(file_path).name
                     file_hash = compute_file_hash(file_path) if Path(file_path).is_file() else None
-                    if check_document_exists(cur, filename):
-                        print(f"⚠️ Skipping already ingested file: {filename} (exists in database)")
+                    if check_document_exists(cur, filename, file_hash=file_hash):
+                        print(f"⚠️ Skipping already ingested file: {filename} (content unchanged)")
                     else:
                         files_to_process.append(file_path)
         except psycopg2.Error as e:

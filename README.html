@@ -102,7 +102,7 @@ An enterprise-grade, shift-left reference implementation combining <strong>In-Da
     style Backend fill:#f0f8ff,stroke:#007acc,stroke-dasharray: 5 5
     style Agent fill:#fff9c4,stroke:#fbc02d,stroke-width:2px</pre>
 <hr>
-<h2 id="-architectural-pillars-the-5-layers">🧱 Architectural Pillars (The 5 Layers)</h2>
+<h2 id="-architectural-pillars-the-6-layers">🧱 Architectural Pillars (The 6 Layers)</h2>
 <h3 id="1-database-layer-pgvector--dual-indexing-appdb">1. Database Layer: pgvector + Dual Indexing (<code>app/db/</code>)</h3>
 <ul>
 <li><strong>Dual Indexing</strong>: Combines <strong>HNSW</strong> (<code>vector_cosine_ops</code>, <span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>m</mi><mo>=</mo><mn>16</mn></mrow><annotation encoding="application/x-tex">m=16</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.4306em;"></span><span class="mord mathnormal">m</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:0.6444em;"></span><span class="mord">16</span></span></span></span>, <span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>e</mi><mi>f</mi><mo>=</mo><mn>64</mn></mrow><annotation encoding="application/x-tex">ef=64</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.8889em;vertical-align:-0.1944em;"></span><span class="mord mathnormal">e</span><span class="mord mathnormal" style="margin-right:0.10764em;">f</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:0.6444em;"></span><span class="mord">64</span></span></span></span>) for sub-millisecond approximate nearest neighbor search with <strong>GIN</strong> (<code>jsonb_path_ops</code>) for constant-time role membership checks.</li>
@@ -117,7 +117,14 @@ An enterprise-grade, shift-left reference implementation combining <strong>In-Da
 <li><strong>Matryoshka 1536-d Truncation</strong>: Truncates <code>text-embedding-3-large</code> from 3072 to 1536 dimensions, slashing PostgreSQL disk and RAM usage by <strong>50%</strong> while preserving <strong>&gt;98%</strong> recall.</li>
 <li><strong>Loop-Aware Connection Pool</strong>: <code>asyncpg</code> pools recycle automatically when Streamlit event loops restart, eliminating <code>RuntimeError: Event loop is closed</code>.</li>
 </ul>
-<h3 id="2-identity--session-security-appauth">2. Identity &amp; Session Security (<code>app/auth/</code>)</h3>
+<h3 id="2-ingestion-pipeline">2. Ingestion Pipeline: Cryptographic De-duplication &amp; Resilient Embeddings</h3>
+<ul>
+<li><strong>Cryptographic SHA-256 De-duplication</strong>: 64KB block hashing with change detection skips identical files and purges obsolete chunks on re-indexing.</li>
+<li><strong>Tokenizer-Aware Semantic Boundary Chunking</strong>: Token limits (512–800 tokens, 10–15% overlap) preserving markdown and table structures.</li>
+<li><strong>Full Chunk Metadata Attribution</strong>: Automatically attaches <code>page</code>, <code>chunk_index</code>, <code>source</code>, <code>document_id</code>, and <code>chunk_id</code> to each chunk.</li>
+<li><strong>Resilient Batched Embeddings</strong>: Batches 64–128 items with automated exponential backoff (<code>tenacity</code>) on transient 429/503 errors.</li>
+</ul>
+<h3 id="3-identity--session-security-appauth">3. Identity &amp; Session Security (<code>app/auth/</code>)</h3>
 <ul>
 <li><strong>RFC 7636 OAuth 2.0 PKCE</strong>: Uses cryptographic <code>code_verifier</code> and SHA-256 challenges for public web applications.</li>
 <li><strong>Stateless HMAC-SHA256 State</strong>: Embeds verifier and timestamp into signed state tokens (<code>{b64_data}.{sig}</code>). Immune to browser redirects, process recycles, and multi-worker scale-outs without Redis.</li>

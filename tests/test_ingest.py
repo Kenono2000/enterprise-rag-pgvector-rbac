@@ -84,7 +84,7 @@ def test_main_skips_existing_files(
     file2.write_text("content2")
 
     # file1 exists, file2 does not exist
-    def fake_check(cur, filename):
+    def fake_check(cur, filename, *args, **kwargs):
         return filename == "already_ingested.pdf"
 
     mock_check_exists.side_effect = fake_check
@@ -132,3 +132,27 @@ def test_main_force_flag_includes_all(
     # check_document_exists should not have been called because --force bypasses it
     assert not mock_check_exists.called
     mock_get_docs.assert_called_once_with([str(file1)])
+
+
+def test_check_document_exists_with_file_hash_match():
+    mock_cursor = MagicMock(spec=["execute", "fetchone"])
+    mock_cursor.fetchone.return_value = (1,)
+
+    exists = check_document_exists(mock_cursor, "sample.md", file_hash="abc123hash")
+    assert exists is True
+    mock_cursor.execute.assert_called_once_with(
+        "SELECT 1 FROM documents WHERE file_hash = %s LIMIT 1",
+        ("abc123hash",)
+    )
+
+
+def test_check_document_exists_with_file_hash_mismatch():
+    mock_cursor = MagicMock(spec=["execute", "fetchone"])
+    mock_cursor.fetchone.return_value = None
+
+    exists = check_document_exists(mock_cursor, "modified.md", file_hash="newhash999")
+    assert exists is False
+    mock_cursor.execute.assert_called_once_with(
+        "SELECT 1 FROM documents WHERE file_hash = %s LIMIT 1",
+        ("newhash999",)
+    )

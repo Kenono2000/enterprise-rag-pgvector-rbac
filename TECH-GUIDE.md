@@ -222,7 +222,42 @@ flowchart TD
 
 ---
 
-## 5. Layer 3: FastAPI Backend & Streamlit Frontend
+## 5. Layer 3: High-Performance Ingestion Pipeline (`scripts/ingest.py` & `libs/utilities.py`)
+
+The ingestion pipeline transforms raw documents into high-dimensional vector representations stored within the normalized PostgreSQL schema, enforcing change detection, semantic boundary preservation, and fault tolerance.
+
+```mermaid
+flowchart TD
+    Raw[Raw Documents: PDF, MD, DOCX] --> Hash[compute_file_hash: 64KB Chunk SHA-256]
+    Hash --> Check{Exists in documents table?}
+    Check -->|Same Hash & Exists| Skip[Skip: Unchanged Content]
+    Check -->|Modified Hash or New| Split[split_chunks: Tiktoken-Aware Semantic Chunking]
+    Split --> Meta[Attach Chunk Metadata: page, chunk_index, source, document_id]
+    Meta --> Batch[Batch Texts: 64-128 Chunks/Call]
+    Batch --> Embed[embed_chunks_with_retry: Tenacity Exponential Backoff 429/503]
+    Embed --> Master[Upsert documents Master Record]
+    Master --> Clean[Purge Stale document_chunks for document_id]
+    Clean --> Insert[Batch Insert document_chunks with HNSW Vectors]
+```
+
+### 5.1 Cryptographic SHA-256 De-duplication
+* **Deterministic Change Detection**: Files are hashed in 64KB memory-safe chunks using SHA-256 (`compute_file_hash()`).
+* **Instant B-Tree Lookup**: `check_document_exists(cur, filename, file_hash=file_hash)` leverages `idx_documents_file_hash` on `documents(file_hash)`.
+* **Smart Update Routing**: Unchanged files are skipped with zero database or API overhead. Modified files (matching filename with divergent hash) trigger automatic re-indexing and replace previous chunks.
+* **CLI Overrides**: Passing `--force` bypasses hash checks and forces end-to-end re-ingestion.
+
+### 5.2 Token-Aware Semantic Boundary Chunking
+* **Tokenizer-Aligned Chunking**: Uses `RecursiveCharacterTextSplitter.from_tiktoken_encoder` (`model_name="text-embedding-3-large"`) with 512–800 token targets and 10–15% overlap (`chunk_size=800`, `chunk_overlap=100`).
+* **Structure Preservation**: Structured separators (`\n## `, `\n### `, `\n#### `, `\n|`, `\n\n`) prevent breaking markdown section headers and table rows across chunk seams.
+* **Metadata Attribution**: Automatically sets `page`, `chunk_index`, `source`, `document_id`, and `chunk_id` (`{document_id}_chunk_{index+1}`) on every chunk.
+
+### 5.3 Resilient Embeddings with Tenacity Backoff
+* **Batch Slicing**: Chunks are processed in batches (default `batch_size=64`, configurable up to 128) to eliminate memory spikes and token limit exceptions.
+* **Transient Error Retry**: Uses `tenacity` exponential backoff (`multiplier=1, min=2s, max=60s, attempts=5`) to automatically recover from OpenAI rate limits (`429`), timeouts, and gateway errors (`503`/`502`/`500`).
+
+---
+
+## 6. Layer 4: FastAPI Backend & Streamlit Frontend
 
 ### FastAPI Dependency Injection (`app/main.py`)
 All endpoints are secured via `get_current_user`:
@@ -247,7 +282,7 @@ $$\text{confidence\_score} = \frac{1}{N} \sum_{i=1}^N \text{similarity}_i = \fra
 
 ---
 
-## 6. Layer 4: FastMCP Agent Gateway (`app/mcp/`)
+## 7. Layer 5: FastMCP Agent Gateway (`app/mcp/`)
 
 FastMCP standardizes tool and resource access for external AI coding agents (Claude Desktop, Cursor, CLI agents):
 
@@ -259,7 +294,7 @@ FastMCP standardizes tool and resource access for external AI coding agents (Cla
 
 ---
 
-## 7. Layer 5: Autonomous Self-Healing SDLC Agent (`agent/`)
+## 8. Layer 6: Autonomous Self-Healing SDLC Agent (`agent/`)
 
 The autonomous agent listens to GitHub issue webhooks, writes code patches, audits them statically, runs tests, and autonomously repairs bugs.
 
@@ -296,9 +331,9 @@ stateDiagram-v2
 
 ---
 
-## 8. Testing & Verification Guide
+## 9. Testing & Verification Guide
 
-The project features a **100% passing test suite (76/76 tests)** that executes completely offline without external network or API dependencies:
+The project features a **100% passing test suite (81/81 tests)** that executes completely offline without external network or API dependencies:
 
 ```powershell
 python -m pytest -v
@@ -307,19 +342,19 @@ python -m pytest -v
 ### Test Suite Breakdown
 | Module | Tests | Key Invariants Verified |
 | :--- | :---: | :--- |
-| **`tests/test_database_schema.py`** | 6 | • Normalized table schemas (`documents` & `document_chunks`).<br/>• `ON DELETE CASCADE` foreign key relationship.<br/>• HNSW vector index (`m=16, ef=64`) & GIN role index.<br/>• B-tree file hash de-duplication index.<br/>• Backward-compatible view & trigger execution.<br/>• Cosine similarity calculation benchmark simulation. |
+| **`tests/test_database_schema.py`** | 6 | • Normalized table schemas (`documents` & `document_chunks`).<br/>• `ON DELETE CASCADE` foreign key relationship.<br/>• HNSW vector index (`m=16, ef=64`) & GIN role index.<br/>• B-tree file hash de-duplication index.<br/>• Consolidated migration cleanup logic in schema.sql.<br/>• Cosine similarity calculation benchmark simulation. |
 | **`tests/test_security_rbac.py`** | 5 | • SQL injection immunity in vector search.<br/>• Parameterized array containment (`$2::text[]`).<br/>• Zero-Trust empty role short-circuiting.<br/>• Header validation and injection filtering. |
 | **`tests/test_auth.py`** | 34 | • RFC 7636 PKCE `code_verifier` & `code_challenge` derivation.<br/>• Stateless HMAC-SHA256 OAuth state generation & expiration (300s TTL).<br/>• Google JWKS certificate caching & `leeway=60s` clock skew tolerance.<br/>• Multi-source role claim extraction (`app_roles`, `roles`, `groups`, `cognito:groups`, `realm_access.roles`).<br/>• Enterprise JWKS issuer validation & rejection of untrusted issuers.<br/>• **Session Cookie Encoding**: Roundtrip compression, signature tampering rejection, expired TTL handling, and malformed cookie rejection. |
 | **`tests/test_rag.py`** | 4 | • Health check status.<br/>• Strict 401 rejection when unauthenticated.<br/>• Dev header fallback (`X-User-Roles`).<br/>• End-to-end vector retrieval & RBAC filtering. |
 | **`tests/test_mcp_auth.py`** | 10 | • FastMCP token validation and unauthenticated caller rejection.<br/>• Verified role extraction from ID tokens for tool execution.<br/>• Identity verification on patch submission. |
 | **`tests/test_agent.py`** | 6 | • GitHub webhook HMAC-SHA256 verification.<br/>• Webhook JSON parsing into typed models.<br/>• Deterministic secret scanning (API keys, private keys).<br/>• AST static inspection (`eval`, `exec`, `__import__`).<br/>• Sandbox path traversal prevention.<br/>• Full LangGraph self-healing test repair cycle. |
-| **`tests/test_ingest.py`** | 7 | • Pre-ingestion de-duplication, stem matching, chunk prefix detection. |
-| **`tests/test_utilities.py`** | 4 | • Multi-format loaders (`.pdf`, `.md`, `.docx`) and fallback parsers. |
-| **Total** | **76** | **100% Passed (36.5s execution time)** |
+| **`tests/test_ingest.py`** | 9 | • Pre-ingestion SHA-256 de-duplication, modified file re-indexing detection, force flag bypass, stem matching, chunk prefix detection. |
+| **`tests/test_utilities.py`** | 7 | • Multi-format loaders (`.pdf`, `.md`, `.docx`), tokenizer-aware chunk splitting, chunk metadata attribution, 64KB block hashing, and tenacity retry on 429 rate limits. |
+| **Total** | **81** | **100% Passed (16.6s execution time)** |
 
 ---
 
-## 9. Operational Cheat Sheet & Troubleshooting
+## 10. Operational Cheat Sheet & Troubleshooting
 
 ### Service Launch Commands
 ```powershell
@@ -340,6 +375,8 @@ python -m app.mcp
 | Symptom / Error | Root Cause | Permanent Solution |
 | :--- | :--- | :--- |
 | **SQL Injection in RBAC Filtering** | String-formatting user roles into SQL queries (`ARRAY[...]`). | **Parameterized Bindings & Sanitization**: Bound roles to `$2::text[]` via asyncpg, added zero-trust short-circuit on empty roles, and sanitized claims against `KNOWN_ROLES`. |
+| **Ingestion Duplication & Edits Missed** | Filename-only prefix checks missed file edits and duplicated renamed files. | **Cryptographic SHA-256 De-duplication**: 64KB block hashing with change detection skips identical files and purges obsolete chunk sets on re-indexing. |
+| **Embedding API Rate Limits (429/503)** | Unbatched or unprotected embedding requests hit provider rate limits. | **Tenacity Exponential Backoff & 64-Item Batching**: Batch-embeds 64–128 items with automated exponential backoff (2s–60s) on transient 429/503 errors. |
 | **OAuth state mismatch / CSRF** | Streamlit re-creates session on navigation away to Google. | **Stateless HMAC-SHA256 Signed State**: verifier is embedded in signed state string; zero memory dependency. |
 | **Browser reload requires re-login** | Streamlit WebSocket reset clears RAM session state. | **Encrypted Session Cookie**: `enterprise_rag_session` cookie is written to browser and rehydrated via `st.context.cookies`. |
 | **`ImmatureSignatureError: (iat)`** | Clock drift between local machine and Google NTP servers. | Added `leeway=60` in `jwt.decode()` per RFC 7519. |

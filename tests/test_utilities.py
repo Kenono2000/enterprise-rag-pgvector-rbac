@@ -61,3 +61,72 @@ def test_get_documents_handles_invalid_file(tmp_path):
 
     docs = get_documents([str(broken_docx)])
     assert len(docs) == 0
+
+
+def test_compute_file_hash_deterministic(tmp_path):
+    import hashlib
+    from libs.utilities import compute_file_hash
+
+    test_file = tmp_path / "test_doc.md"
+    content = b"# Architecture Blueprint\nContent for cryptographic de-duplication testing."
+    test_file.write_bytes(content)
+
+    expected_hash = hashlib.sha256(content).hexdigest()
+    computed_hash = compute_file_hash(test_file)
+
+    assert computed_hash == expected_hash
+    assert len(computed_hash) == 64
+
+
+def test_split_chunks_attaches_semantic_metadata(tmp_path):
+    from libs.utilities import split_chunks
+
+    doc = Document(
+        page_content=(
+            "# Header 1\nSection text about RBAC.\n\n"
+            "## Table Section\n"
+            "| Column 1 | Column 2 |\n"
+            "| Value A  | Value B  |\n\n"
+            "Additional details about security architecture."
+        ),
+        metadata={"source": "docs/architecture.md", "page": 2}
+    )
+
+    chunks = split_chunks([doc], chunk_size=50, chunk_overlap=10)
+    assert len(chunks) >= 1
+    for idx, chunk in enumerate(chunks):
+        assert chunk.metadata["source"] == "docs/architecture.md"
+        assert chunk.metadata["document_id"] == "architecture"
+        assert chunk.metadata["chunk_index"] == idx
+        assert chunk.metadata["chunk_id"] == f"architecture_chunk_{idx + 1}"
+        assert chunk.metadata["page"] == 2
+
+
+def test_embed_chunks_with_retry():
+    import openai
+    from libs.utilities import embed_chunks_with_retry
+
+    mock_model = MagicMock()
+    call_count = 0
+
+    def mock_embed(batch):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Simulate transient 429 rate limit error on first attempt
+            err = openai.RateLimitError(
+                message="Rate limit exceeded",
+                response=MagicMock(status_code=429, headers={}),
+                body=None
+            )
+            raise err
+        return [[0.1] * 1536 for _ in batch]
+
+    mock_model.embed_documents.side_effect = mock_embed
+
+    texts = ["Text chunk 1", "Text chunk 2", "Text chunk 3"]
+    # With exponential backoff, it should retry and succeed on attempt 2
+    embeddings = embed_chunks_with_retry(texts, mock_model, batch_size=2)
+    assert len(embeddings) == 3
+    assert all(len(emb) == 1536 for emb in embeddings)
+    assert call_count >= 2

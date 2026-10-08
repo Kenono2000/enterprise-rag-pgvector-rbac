@@ -1,4 +1,6 @@
 __all__ = [
+    "compute_file_hash",
+    "embed_chunks_with_retry",
     "expand_user_roles",
     "get_db_connection",
     "get_documents",
@@ -16,6 +18,8 @@ __all__ = [
 ]
 
 import ast
+import hashlib
+import logging
 import operator
 import os
 import re
@@ -23,12 +27,14 @@ from pathlib import Path
 from typing import Union
 
 import numpy as np
+import openai
 import psycopg2
 from dotenv import load_dotenv
 from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, UnstructuredMarkdownLoader
 from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 ROLE_HIERARCHY = {
     "admin": ["admin", "executive", "finance_analyst", "engineering"],
@@ -53,6 +59,18 @@ def expand_user_roles(raw_roles: list[str]) -> list[str]:
         expanded.update(ROLE_HIERARCHY.get(role, [role]))
     return list(expanded)
 
+def compute_file_hash(file_path: Union[str, Path]) -> str:
+    """
+    Compute SHA-256 hash of a file in 64KB chunks for memory efficiency.
+    Used for cryptographic de-duplication in the ingestion pipeline.
+    """
+    hasher = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while chunk := f.read(65536):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
 def truncate_and_normalize(
     embedding: Union[list[float], "np.ndarray"],
     target_dim: int = 1536
@@ -63,6 +81,7 @@ def truncate_and_normalize(
         return vec.tolist()
     normalized_vec = vec / norm
     return normalized_vec.tolist()
+
 
 def load_config(env_path: str | None = None) -> tuple[str, str]:
     if env_path is None:
@@ -75,6 +94,7 @@ def load_config(env_path: str | None = None) -> tuple[str, str]:
     if not database_url:
         raise ValueError("DATABASE_URL missing from .env.")
     return openai_api_key, database_url
+
 
 def get_documents(file_paths: list[str]) -> list[Document]:
     print(f"📄 Loading {len(file_paths)} document(s)...")
@@ -112,22 +132,114 @@ def get_documents(file_paths: list[str]) -> list[Document]:
             print(f"❌ Failed to load {file_path}: {e}")
     return documents
 
+
 def split_chunks(
     documents: list[Document],
-    chunk_size: int = 2000,
-    chunk_overlap: int = 200,
-    separators: list[str] | None = None
+    chunk_size: int = 800,
+    chunk_overlap: int = 100,
+    separators: list[str] | None = None,
+    use_tokens: bool = True,
 ) -> list[Document]:
+    """
+    Split documents into semantic boundary chunks with token limits (512–800 tokens, 10–15% overlap)
+    preserving markdown and table structures.
+    Attaches page, chunk_index, source, and parent document_id to each chunk.
+    """
     if separators is None:
-        separators = ["\n\n", "\n", " ", ""]
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=separators
-    )
+        separators = [
+            "\n## ",
+            "\n### ",
+            "\n#### ",
+            "\n\n",
+            "\n|",
+            "\n",
+            " ",
+            "",
+        ]
+    if use_tokens:
+        try:
+            text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+                model_name="text-embedding-3-large",
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                separators=separators,
+            )
+        except Exception:
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chunk_size * 4,
+                chunk_overlap=chunk_overlap * 4,
+                separators=separators,
+            )
+    else:
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=separators,
+        )
+
     chunks = text_splitter.split_documents(documents)
+
+    # Attach chunk metadata: page, chunk_index, source, document_id, chunk_id
+    doc_chunk_counters: dict[str, int] = {}
+    for chunk in chunks:
+        src = str(chunk.metadata.get("source", "document"))
+        p = Path(src)
+        doc_id = str(chunk.metadata.get("document_id") or p.stem)
+        idx = doc_chunk_counters.get(src, 0)
+        doc_chunk_counters[src] = idx + 1
+
+        chunk.metadata["document_id"] = doc_id
+        chunk.metadata["source"] = src
+        chunk.metadata["chunk_index"] = idx
+        chunk.metadata["chunk_id"] = f"{doc_id}_chunk_{idx + 1}"
+        if "page" not in chunk.metadata:
+            chunk.metadata["page"] = chunk.metadata.get("page_number", 1)
+
     print(f"✂️ Created {len(chunks)} text chunks.")
     return chunks
+
+
+def _is_retryable_embedding_error(exc: BaseException) -> bool:
+    """Determine if an embedding API exception is transient (429 rate limit or 5xx server error)."""
+    if isinstance(exc, (openai.RateLimitError, openai.APIConnectionError, openai.InternalServerError, openai.APITimeoutError)):
+        return True
+    status_code = getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
+    if status_code in (429, 500, 502, 503, 504):
+        return True
+    err_msg = str(exc).lower()
+    return "429" in err_msg or "rate limit" in err_msg or "503" in err_msg or "timeout" in err_msg
+
+
+@retry(
+    retry=retry_if_exception(_is_retryable_embedding_error),
+    wait=wait_exponential(multiplier=1, min=2, max=60),
+    stop=stop_after_attempt(5),
+    reraise=True,
+)
+def _embed_batch_with_retry(batch: list[str], model: OpenAIEmbeddings) -> list[list[float]]:
+    return model.embed_documents(batch)
+
+
+def embed_chunks_with_retry(
+    texts: list[str],
+    embeddings_model: OpenAIEmbeddings,
+    batch_size: int = 64,
+) -> list[list[float]]:
+    """
+    Batch chunk embeddings (64–128 items per call) with exponential backoff
+    via tenacity for rate limits (429/503).
+    """
+    if not texts:
+        return []
+    embeddings: list[list[float]] = []
+    total_batches = (len(texts) + batch_size - 1) // batch_size
+    print(f"🚀 Generating embeddings for {len(texts)} chunks across {total_batches} batches (batch_size={batch_size})...")
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+        batch_embs = _embed_batch_with_retry(batch, embeddings_model)
+        embeddings.extend(batch_embs)
+    return embeddings
+
 
 def get_embedding_model(api_key: str) -> OpenAIEmbeddings:
     return OpenAIEmbeddings(
