@@ -60,12 +60,6 @@ from app.observability import tracer
 import time
 
 
-try:
-    import nest_asyncio
-    nest_asyncio.apply()
-except ImportError:
-    pass
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
