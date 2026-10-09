@@ -46,6 +46,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from app.auth import (
+    KNOWN_ROLES,
     verify_google_token,
     build_authorization_url,
     decode_pkce_state,
@@ -135,6 +136,15 @@ def _secret(key: str) -> Optional[str]:
         except Exception:
             pass
     return value
+
+
+def _is_google_auth_required() -> bool:
+    """Check if Google OAuth is strictly required (defaults to False if explicitly configured as false)."""
+    val = _secret("REQUIRE_GOOGLE_AUTH")
+    if val is None:
+        return False
+    return str(val).strip().lower() in ("true", "1", "yes")
+
 
 
 def run_async(coro):
@@ -584,47 +594,121 @@ def _render_sign_in_page() -> None:
             "⚠️ **Session Terminated:** Maximum session duration (12 hours) reached. Please sign in again."
         )
 
-    st.markdown(
-        """
-        <div style="text-align:center;padding:2rem 0">
-            <h1>🛡️ Zero-Trust Enterprise RAG</h1>
-            <p style="color:gray">Sign in with your Google account to access the secured knowledge base.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.divider()
+    # Check whether Google OAuth is strictly required
+    google_auth_required = _is_google_auth_required()
 
-    col_l, col_c, col_r = st.columns([1, 2, 1])
-    with col_c:
-        client_id = _secret("GOOGLE_CLIENT_ID")
-        if not client_id:
-            st.error(
-                "**GOOGLE_CLIENT_ID** is not configured.\n\n"
-                "Add it to your `.env` file or Streamlit secrets."
-            )
-            return
-
-        try:
-            auth_url, code_verifier, state = build_authorization_url(
-                redirect_uri=_get_redirect_uri(),
-            )
-            # Store in server-side dict — survives the browser round-trip to Google.
-            _pkce_store_put(state, code_verifier)
-        except Exception as exc:
-            st.error(f"Failed to build authorization URL: {exc}")
-            return
-
-        # Native link button opens Google OAuth in a new tab (target="_blank"):
-        # This complies with Streamlit Community Cloud iframe sandboxing (which allows popups
-        # but disallows top-frame navigation via target="_top").
-        st.link_button(
-            "🔐 Sign in with Google",
-            auth_url,
-            type="primary",
-            use_container_width=True,
+    if google_auth_required:
+        st.markdown(
+            """
+            <div style="text-align:center;padding:2rem 0">
+                <h1>🛡️ Zero-Trust Enterprise RAG</h1>
+                <p style="color:gray">Sign in with your Google account to access the secured knowledge base.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
+        st.divider()
 
+        col_l, col_c, col_r = st.columns([1, 2, 1])
+        with col_c:
+            client_id = _secret("GOOGLE_CLIENT_ID")
+            if not client_id:
+                st.error(
+                    "**GOOGLE_CLIENT_ID** is not configured.\n\n"
+                    "Add it to your `.env` file or Streamlit secrets."
+                )
+                return
+
+            try:
+                auth_url, code_verifier, state = build_authorization_url(
+                    redirect_uri=_get_redirect_uri(),
+                )
+                # Store in server-side dict — survives the browser round-trip to Google.
+                _pkce_store_put(state, code_verifier)
+            except Exception as exc:
+                st.error(f"Failed to build authorization URL: {exc}")
+                return
+
+            # Native link button opens Google OAuth in a new tab (target="_blank"):
+            # This complies with Streamlit Community Cloud iframe sandboxing (which allows popups
+            # but disallows top-frame navigation via target="_top").
+            st.link_button(
+                "🔐 Sign in with Google",
+                auth_url,
+                type="primary",
+                use_container_width=True,
+            )
+    else:
+        # Development / Permissive RBAC Simulator mode
+        st.markdown(
+            """
+            <div style="text-align:center;padding:1.5rem 0">
+                <h1>🛡️ Zero-Trust Enterprise RAG</h1>
+                <span style="background-color:#ffeeba;color:#856404;padding:4px 10px;border-radius:12px;font-size:0.85rem;font-weight:600;">
+                    DEVELOPMENT RBAC SIMULATOR (REQUIRE_GOOGLE_AUTH=false)
+                </span>
+                <p style="color:gray;margin-top:0.5rem">
+                    Google OAuth is disabled for this environment. Select or enter test user roles below to evaluate zero-trust retrieval policies.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.divider()
+
+        col_l, col_c, col_r = st.columns([1, 2, 1])
+        with col_c:
+            with st.form("dev_login_form"):
+                dev_email = st.text_input(
+                    "👤 Test User Identity (Email)",
+                    value="dev-engineer@enterprise.internal",
+                    help="Simulated email identity for audit trails and RBAC evaluation.",
+                )
+                
+                sorted_roles = sorted(list(KNOWN_ROLES))
+                selected_roles = st.multiselect(
+                    "🔑 Application Roles",
+                    options=sorted_roles,
+                    default=["engineer"],
+                    help="Roles that will be evaluated directly against PostgreSQL allowed_roles arrays.",
+                )
+
+                custom_role = st.text_input(
+                    "➕ Add Custom Role (Optional)",
+                    placeholder="e.g. security_auditor",
+                    help="Add any additional or non-standard role claim.",
+                )
+
+                submitted = st.form_submit_button(
+                    "🚀 Enter Knowledge Workspace",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+                if submitted:
+                    effective_roles = list(selected_roles)
+                    if custom_role and custom_role.strip():
+                        clean_custom = custom_role.strip().lower()
+                        if clean_custom not in effective_roles:
+                            effective_roles.append(clean_custom)
+
+                    now = _time.time()
+                    st.session_state["authenticated"] = True
+                    st.session_state["id_token"] = "mock-dev-token-require-google-auth-false"
+                    st.session_state["access_token"] = "mock-dev-access-token"
+                    st.session_state["refresh_token"] = ""
+                    st.session_state["token_exp"] = now + MAX_SESSION_SECONDS
+                    st.session_state["token_iat"] = now
+                    st.session_state["auth_time"] = now
+                    st.session_state["login_time"] = now
+                    st.session_state["last_activity"] = now
+                    st.session_state["user_sub"] = f"dev-user-{dev_email}"
+                    st.session_state["user_email"] = dev_email
+                    st.session_state["user_name"] = dev_email.split("@")[0].replace(".", " ").title()
+                    st.session_state["user_picture"] = ""
+                    st.session_state["app_roles"] = effective_roles
+                    st.session_state.pop("_just_signed_out", None)
+                    st.rerun()
 
     st.divider()
     st.caption(
@@ -652,26 +736,51 @@ def _render_user_header() -> None:
         st.caption(email)
         st.divider()
         st.markdown("**Application Roles**")
-        if roles:
-            for r in roles:
-                st.badge(r, icon="🔑")
+        google_auth_required = _is_google_auth_required()
+        if not google_auth_required:
+            sorted_known = sorted(list(KNOWN_ROLES))
+            # Merge current roles with known roles for multi-select options
+            all_opts = sorted(list(set(sorted_known + roles)))
+            new_roles = st.multiselect(
+                "Modify Active Roles (Dev Mode)",
+                options=all_opts,
+                default=roles if all(r in all_opts for r in roles) else sorted_known[:1],
+                help="Switch roles live to simulate different access levels without logging out.",
+                key="dev_sidebar_role_select",
+            )
+            if new_roles != roles:
+                st.session_state["app_roles"] = new_roles
+                st.rerun()
         else:
-            st.warning("No application roles assigned.\nContact your administrator.")
-        st.divider()
-        with st.expander("🔑 Copy Google ID Token"):
-            st.code(st.session_state.get("id_token", ""), language="text")
-            st.caption("Paste into Swagger UI (`/docs`) → **Authorize** button.")
+            if roles:
+                for r in roles:
+                    st.badge(r, icon="🔑")
+            else:
+                st.warning("No application roles assigned.\nContact your administrator.")
 
         st.divider()
-        st.markdown("**⏱️ Session & Token Security**")
-        now = _time.time()
-        token_exp = st.session_state.get("token_exp", 0)
-        mins_left = max(0, int((token_exp - now) / 60)) if token_exp else 60
-        login_mins_ago = int((now - st.session_state.get("login_time", now)) / 60)
+        if google_auth_required:
+            with st.expander("🔑 Copy Google ID Token"):
+                st.code(st.session_state.get("id_token", ""), language="text")
+                st.caption("Paste into Swagger UI (`/docs`) → **Authorize** button.")
 
-        st.caption(f"• **Session**: Active ({login_mins_ago}m elapsed)")
-        st.caption(f"• **ID Token TTL**: ~{mins_left}m remaining")
-        st.caption("• **Idle Timeout**: 15m limit (SOC-2)")
+            st.divider()
+            st.markdown("**⏱️ Session & Token Security**")
+            now = _time.time()
+            token_exp = st.session_state.get("token_exp", 0)
+            mins_left = max(0, int((token_exp - now) / 60)) if token_exp else 60
+            login_mins_ago = int((now - st.session_state.get("login_time", now)) / 60)
+
+            st.caption(f"• **Session**: Active ({login_mins_ago}m elapsed)")
+            st.caption(f"• **ID Token TTL**: ~{mins_left}m remaining")
+            st.caption("• **Idle Timeout**: 15m limit (SOC-2)")
+        else:
+            with st.expander("🛠️ Dev Mode Active"):
+                st.caption(
+                    "Google authentication is disabled (`REQUIRE_GOOGLE_AUTH=false`). "
+                    "Use the role picker above to simulate any RBAC access level in realtime."
+                )
+
 
         if st.session_state.get("refresh_token"):
             st.caption("• **Refresh Token**: Stored (Offline Access)")
@@ -723,17 +832,30 @@ def _render_rag_interface() -> None:
 
 
     st.title("🛡️ Zero-Trust Enterprise RAG")
-    st.markdown(
-        "Authenticated via Google OAuth 2.0 PKCE. "
-        "Your role claims are enforced **inside the SQL query** — the LLM never sees "
-        "documents outside your access domain."
-    )
+    google_auth_required = _is_google_auth_required()
+    if google_auth_required:
+        st.markdown(
+            "Authenticated via Google OAuth 2.0 PKCE. "
+            "Your role claims are enforced **inside the SQL query** — the LLM never sees "
+            "documents outside your access domain."
+        )
+        st.subheader("1. Identity & Access")
+        st.info(
+            f"🔑 **Verified Google Identity:** `{st.session_state.get('user_email', 'unknown')}`  \n"
+            f"📋 **Active JWT Role Claims:** `{roles}`"
+        )
+    else:
+        st.markdown(
+            "Running in **Development RBAC Simulation Mode** (`REQUIRE_GOOGLE_AUTH=false`). "
+            "Your simulated role claims are enforced **inside the SQL query** — the LLM never sees "
+            "documents outside your active role domain."
+        )
+        st.subheader("1. Identity & Access")
+        st.info(
+            f"👤 **Simulated User Identity:** `{st.session_state.get('user_email', 'dev-user')}`  \n"
+            f"📋 **Active Evaluated Roles:** `{roles}`"
+        )
 
-    st.subheader("1. Identity & Access")
-    st.info(
-        f"🔑 **Verified Google Identity:** `{st.session_state.get('user_email', 'unknown')}`  \n"
-        f"📋 **Active JWT Role Claims:** `{roles}`"
-    )
 
     # -------------------------------------------------------------
     # 2. Interactive Conversational Chat Interface
