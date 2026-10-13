@@ -60,7 +60,7 @@ class Citation(BaseModel):
 
 
 class RAGQueryRequest(BaseModel):
-    question: str = Field(..., example="What were the Q3 financial results?")
+    question: str = Field(..., example="What does the Mindstream report say about AI agents?")
 
 
 class RAGResponse(BaseModel):

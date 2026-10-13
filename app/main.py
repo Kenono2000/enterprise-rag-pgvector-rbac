@@ -49,7 +49,7 @@ class Citation(BaseModel):
 
 
 class RAGQueryRequest(BaseModel):
-    question: str = Field(..., json_schema_extra={"example": "What were the Q3 financial results?"})
+    question: str = Field(..., json_schema_extra={"example": "What does the Mindstream report say about AI agents?"})
     mode: str = Field(default="hybrid", description="Retrieval mode: 'hybrid' (vector + full-text RRF) or 'dense'")
 
 
@@ -233,7 +233,10 @@ async def query_rag(
     query_vector = await generate_embedding(request.question)
 
     from unittest.mock import AsyncMock, MagicMock
-    if isinstance(DatabaseManager.secure_search, (AsyncMock, MagicMock)) and not isinstance(DatabaseManager.hybrid_search, (AsyncMock, MagicMock)):
+    if os.getenv("RETRIEVAL_BACKEND", "").lower() == "azure":
+        from app.db.azure_search import azure_hybrid_search
+        rows = await azure_hybrid_search(request.question, query_vector, user.roles, limit=3)
+    elif isinstance(DatabaseManager.secure_search, (AsyncMock, MagicMock)) and not isinstance(DatabaseManager.hybrid_search, (AsyncMock, MagicMock)):
         rows = await DatabaseManager.secure_search(query_vector, user.roles)
     elif request.mode == "dense":
         rows = await DatabaseManager.secure_search(query_vector, user.roles)

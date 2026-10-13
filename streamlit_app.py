@@ -896,7 +896,7 @@ def _render_rag_interface() -> None:
                     st.code(msg["sql"], language="sql")
 
     # Chat input
-    if prompt_input := st.chat_input("Ask a question about internal documentation..."):
+    if prompt_input := st.chat_input("What does the Mindstream report say about AI agents?"):
         t_start_chat = time.perf_counter()
         st.session_state.messages.append({"role": "user", "content": prompt_input})
         with st.chat_message("user"):
@@ -906,11 +906,18 @@ def _render_rag_interface() -> None:
         with st.chat_message("assistant"):
             with st.status("Querying knowledge base...", expanded=True) as status:
                 async def perform_search():
-                    await DatabaseManager.get_pool()
-                    emb = await generate_embedding(prompt_input)
-                    rows = await DatabaseManager.hybrid_search(prompt_input, emb, roles, limit=3)
-                    if not rows:
-                        rows = await DatabaseManager.secure_search(emb, roles, limit=3)
+                    backend = os.getenv("RETRIEVAL_BACKEND", "").lower()
+                    if backend == "azure":
+                        from app.db.azure_search import azure_hybrid_search
+                        emb = await generate_embedding(prompt_input)
+                        rows = await azure_hybrid_search(prompt_input, emb, roles, limit=3)
+                    else:
+                        await DatabaseManager.get_pool()
+                        emb = await generate_embedding(prompt_input)
+                        rows = await DatabaseManager.hybrid_search(prompt_input, emb, roles, limit=3)
+                        if not rows:
+                            rows = await DatabaseManager.secure_search(emb, roles, limit=3)
+
                     if not rows:
                         return None
                     context = "\n\n".join(
@@ -934,25 +941,37 @@ def _render_rag_interface() -> None:
 
                 result = run_async(perform_search())
                 roles_repr = json.dumps(roles)
-                sql_query = (
-                    "-- 1. Dense Vector Retrieval (HNSW Cosine Similarity)\n"
-                    "SELECT c.id, d.document_id, d.title, c.chunk_index, c.content,\n"
-                    "       1 - (c.embedding <=> $1::vector) AS similarity\n"
-                    "FROM document_chunks c\n"
-                    "JOIN documents d ON c.document_id = d.id\n"
-                    "WHERE d.allowed_roles ?| $2::text[]\n"
-                    "ORDER BY c.embedding <=> $1::vector LIMIT 6;\n\n"
-                    "-- 2. Sparse Full-Text Retrieval (GIN tsvector / ts_rank)\n"
-                    "SELECT c.id, d.document_id, d.title, c.chunk_index, c.content,\n"
-                    "       ts_rank(c.tsv, plainto_tsquery('english', $3)) AS text_rank\n"
-                    "FROM document_chunks c\n"
-                    "JOIN documents d ON c.document_id = d.id\n"
-                    "WHERE d.allowed_roles ?| $2::text[]\n"
-                    "  AND c.tsv @@ plainto_tsquery('english', $3)\n"
-                    "ORDER BY text_rank DESC LIMIT 6;\n\n"
-                    "-- 3. Reciprocal Rank Fusion: RRF_Score = sum( 1 / (60 + rank) )\n"
-                    f"-- Parameter bindings: $1=<1536-dim vector>, $2={roles_repr}, $3={json.dumps(prompt_input)}"
-                )
+                backend_current = os.getenv("RETRIEVAL_BACKEND", "pgvector").lower()
+                if backend_current == "azure":
+                    sql_query = (
+                        "-- Azure AI Search Query (VectorizedQuery + OData RBAC Filter + Semantic Re-ranker)\n"
+                        f"-- Endpoint: {os.getenv('AZURE_SEARCH_ENDPOINT', 'https://<azure-search-instance>.search.windows.net')}\n"
+                        f"-- Index: {os.getenv('AZURE_SEARCH_INDEX_NAME', 'enterprise-documents-index')}\n"
+                        f"-- Search Text: {json.dumps(prompt_input)}\n"
+                        f"-- OData RBAC Filter: allowed_roles/any(r: " + " or ".join([f"r eq '{role}'" for role in roles]) + ")\n"
+                        "-- Query Type: semantic (Bing Semantic Ranker 'semantic-config')\n"
+                        "-- Top-K: 3"
+                    )
+                else:
+                    sql_query = (
+                        "-- 1. Dense Vector Retrieval (HNSW Cosine Similarity)\n"
+                        "SELECT c.id, d.document_id, d.title, c.chunk_index, c.content,\n"
+                        "       1 - (c.embedding <=> $1::vector) AS similarity\n"
+                        "FROM document_chunks c\n"
+                        "JOIN documents d ON c.document_id = d.id\n"
+                        "WHERE d.allowed_roles ?| $2::text[]\n"
+                        "ORDER BY c.embedding <=> $1::vector LIMIT 6;\n\n"
+                        "-- 2. Sparse Full-Text Retrieval (GIN tsvector / ts_rank)\n"
+                        "SELECT c.id, d.document_id, d.title, c.chunk_index, c.content,\n"
+                        "       ts_rank(c.tsv, plainto_tsquery('english', $3)) AS text_rank\n"
+                        "FROM document_chunks c\n"
+                        "JOIN documents d ON c.document_id = d.id\n"
+                        "WHERE d.allowed_roles ?| $2::text[]\n"
+                        "  AND c.tsv @@ plainto_tsquery('english', $3)\n"
+                        "ORDER BY text_rank DESC LIMIT 6;\n\n"
+                        "-- 3. Reciprocal Rank Fusion: RRF_Score = sum( 1 / (60 + rank) )\n"
+                        f"-- Parameter bindings: $1=<1536-dim vector>, $2={roles_repr}, $3={json.dumps(prompt_input)}"
+                    )
                 if not result:
                     status.update(label="Access Denied / Not Found", state="error", expanded=False)
                     response_text = (

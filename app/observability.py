@@ -30,9 +30,20 @@ class ObservabilityTracer:
         self._metrics: List[Dict[str, Any]] = []
         self._otel_tracer = None
         
-        # Check if OpenTelemetry is configured and installed
+        # Check if Azure Application Insights or OpenTelemetry is configured
         import os
-        if os.getenv("OTEL_ENABLED", "false").lower() == "true":
+        appinsights_connection = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
+        if appinsights_connection:
+            try:
+                from azure.monitor.opentelemetry import configure_azure_monitor
+                from opentelemetry import trace
+                configure_azure_monitor(connection_string=appinsights_connection)
+                self._otel_tracer = trace.get_tracer(self.service_name)
+                logger.info("Azure Application Insights OpenTelemetry initialized for service: %s", self.service_name)
+            except Exception as exc:
+                logger.warning("Azure Application Insights setup failed (%s); falling back to standard tracer.", exc)
+
+        if not self._otel_tracer and os.getenv("OTEL_ENABLED", "false").lower() == "true":
             try:
                 from opentelemetry import trace
                 from opentelemetry.sdk.trace import TracerProvider

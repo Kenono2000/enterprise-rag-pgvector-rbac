@@ -13,6 +13,7 @@
 | **Interactive UI** | Shift-Left In-Database RBAC & Session Monitor | [enterprise-rag-pgvector-rbac.streamlit.app](https://enterprise-rag-pgvector-rbac.streamlit.app) |
 | **API Docs** | Live OpenAPI / Interactive Swagger UI | [enterprise-rag-api-ksez.onrender.com/docs](https://enterprise-rag-api-ksez.onrender.com/docs) |
 | **Source Code** | Auditable Source Repository & Offline Test Suite | [github.com/Kenono2000/enterprise-rag-pgvector-rbac](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac) |
+| **Master Playbook** | Multi-Cloud Architecture & Runbook Guide | [`docs/MASTER_PLAYBOOK.md`](docs/MASTER_PLAYBOOK.md) |
 
 ---
 
@@ -31,7 +32,7 @@
    - [Layer 7: FastMCP Agent Gateway (`app/mcp/`)](#layer-7-fastmcp-agent-gateway-appmcp)
    - [Layer 8: Autonomous Self-Healing SDLC Agent (`agent/`)](#layer-8-autonomous-self-healing-sdlc-agent-agent)
 5. [5-Minute Quickstart](#-5-minute-quickstart)
-6. [Testing & Verification Guide (96 Tests: 95 Passed, 1 Skipped)](#-testing--verification-guide-96-tests-95-passed-1-skipped)
+6. [Testing & Verification Guide (102 Tests: 101 Passed, 1 Skipped)](#-testing--verification-guide-102-tests-101-passed-1-skipped)
 7. [Solved Engineering Pitfalls & Root Cause Analysis](#️-solved-engineering-pitfalls--root-cause-analysis)
 8. [Operational Runbook & Jaeger Persistence Verification](#-operational-runbook--jaeger-persistence-verification)
 9. [Disclaimer & Synthetic Data Security Notice](#-disclaimer--synthetic-data-security-notice)
@@ -80,8 +81,13 @@ flowchart TB
         pool["Loop-Aware asyncpg Pool"]
     end
 
-    subgraph Database ["PostgreSQL 16 + pgvector"]
-        db[("documents + document_chunks<br/>• GIN: allowed_roles jsonb_path_ops<br/>• HNSW: embedding vector_cosine_ops")]
+    subgraph Database ["Data & Retrieval Providers (Dual-Mode)"]
+        db[("PostgreSQL 16 + pgvector<br/>• GIN: allowed_roles jsonb_path_ops<br/>• HNSW: embedding vector_cosine_ops")]
+        azure_search[("Azure AI Search<br/>• OData RBAC: allowed_roles/any<br/>• HNSW Vector Search (3072-d)<br/>• Bing Semantic Re-ranker")]
+    end
+
+    subgraph LLM ["Inference & Embedding Providers"]
+        openai_svc["OpenAI API / Azure OpenAI Service<br/>• text-embedding-3-large<br/>• gpt-4o Chat Completions"]
     end
 
     subgraph Agent ["Autonomous SDLC Agent (agent/)"]
@@ -94,10 +100,12 @@ flowchart TB
     browser -->|3. Encrypted Cookie / Bearer| cookie
     browser -->|4. Authenticated Request| api
     api -->|5. Verify Token & Leeway| jwks
-    api -->|6. Generate Embedding| embed
-    api -->|7. In-DB RBAC SQL| pool
-    pool -->|8. GIN Filter + Cosine Distance| db
+    api -->|6. Generate Embedding| openai_svc
+    api -->|7. Dual-Mode Retrieval Router| pool
+    pool -->|8a. RETRIEVAL_BACKEND=pgvector| db
+    api -->|8b. RETRIEVAL_BACKEND=azure| azure_search
     db -->|9. Authorized Top-K Only| api
+    azure_search -->|9. Filtered + Re-ranked Top-K| api
     api -->|10. Grounded Response| browser
 
     mcp_client -->|Governed Tool Call| api
@@ -117,9 +125,12 @@ flowchart TB
 enterprise-rag-pgvector-rbac/
 ├── app/                        # 🛡️ Zero-Trust RAG Microservice
 │   ├── auth/                   # Identity: PKCE, JWKS verification, session cookies, role mapping
-│   ├── db/                     # Data & AI: asyncpg pooling, pgvector search, OpenAI & local mocks
+│   ├── db/                     # Data & AI: asyncpg pooling, pgvector search, Azure AI Search, OpenAI & Azure OpenAI
+│   │   ├── azure_search.py     # Azure AI Search client with OData collection RBAC filtering
+│   │   ├── llm.py              # Dual-model LLM abstraction (Azure OpenAI + standard OpenAI)
+│   │   └── manager.py          # PostgreSQL asyncpg pool manager & hybrid search
 │   ├── mcp.py                  # FastMCP tools & policy resources for external AI agents
-│   ├── observability.py        # Observability metrics, execution timers, and tracing
+│   ├── observability.py        # Observability metrics, Azure Application Insights & OTel tracing
 │   ├── config.py               # Pydantic BaseSettings environment validation
 │   └── main.py                 # FastAPI REST API (/api/v1/query, /healthz, /readyz, /webhooks/github)
 │
@@ -132,10 +143,13 @@ enterprise-rag-pgvector-rbac/
 │   └── utilities.py            # Tiktoken chunk splitting, SHA-256 de-dup, RRF fusion, Cross-Encoder
 │
 ├── scripts/                    # ⚙️ Operational & Ingestion Scripts
-│   └── ingest.py               # Enterprise multi-format batch ingestion with SHA-256 change detection
+│   ├── ingest.py               # Enterprise multi-format batch ingestion with SHA-256 change detection
+│   ├── setup_azure_search.py   # Azure AI Search index provisioning with HNSW & semantic config
+│   └── migrate_pg_to_azure.py  # Batch migration pipeline copying documents & vectors from PG to Azure Search
 │
-├── tests/                      # 🧪 Automated Test Suite (96 Tests, 100% Offline)
+├── tests/                      # 🧪 Automated Test Suite (99 Tests: 98 Passed, 1 Skipped)
 │   ├── test_auth.py            # PKCE cryptography, JWKS leeway, session cookie tests
+│   ├── test_azure_search.py    # Azure AI Search hybrid search, OData RBAC filters, dual-backend routing
 │   ├── test_database_schema.py # Normalized DDL, indexes, cascading deletes, benchmark simulation
 │   ├── test_hybrid_search.py   # RRF math, candidate re-ranking, GroundingGuardrail validation
 │   ├── test_ingest.py          # SHA-256 de-duplication, stem matching, modified file re-indexing
@@ -694,7 +708,7 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-### 2. Run Automated Verification (96 Tests)
+### 2. Run Automated Verification (102 Tests)
 All tests run **100% offline** with zero external network or API dependencies:
 ```powershell
 python -m pytest -v
@@ -725,27 +739,29 @@ python -m app.mcp
 
 ---
 
-## 🧪 Testing & Verification Guide (96 Tests: 95 Passed, 1 Skipped)
+## 🧪 Testing & Verification Guide (102 Tests: 101 Passed, 1 Skipped)
 
 ```text
 tests/test_agent.py                     ......                                           [  6%]
-tests/test_auth.py                      ..................................               [ 42%]
+tests/test_auth.py                      ..................................               [ 39%]
+tests/test_azure_search.py              ...                                              [ 42%]
 tests/test_database_schema.py           ......                                           [ 48%]
 tests/test_hybrid_search.py             ......                                           [ 54%]
-tests/test_ingest.py                    .........                                        [ 64%]
-tests/test_integration_pgvector.py      s.                                               [ 66%]
-tests/test_mcp_auth.py                  ..........                                       [ 76%]
-tests/test_observability_and_health.py  .......                                          [ 83%]
-tests/test_rag.py                       ....                                             [ 87%]
-tests/test_security_rbac.py             .....                                            [ 92%]
+tests/test_ingest.py                    .........                                        [ 63%]
+tests/test_integration_pgvector.py      s.                                               [ 65%]
+tests/test_mcp_auth.py                  ..........                                       [ 75%]
+tests/test_observability_and_health.py  ........                                         [ 82%]
+tests/test_rag.py                       ....                                             [ 86%]
+tests/test_security_rbac.py             .....                                            [ 91%]
 tests/test_utilities.py                 .......                                          [100%]
-================== 95 passed, 1 skipped, 1 warning in 22.04s ===================
+================== 101 passed, 1 skipped, 2 warnings in 22.61s ===================
 ```
 
 ### Test Suite Breakdown
 
 | Module | Tests | Key Invariants Verified |
 | :--- | :---: | :--- |
+| **`tests/test_azure_search.py`** | 3 | • Zero-Trust short circuiting when `user_roles` is empty.<br/>• OData collection RBAC filter (`allowed_roles/any(...)`) syntax.<br/>• Dynamic routing to Azure AI Search when `RETRIEVAL_BACKEND="azure"`. |
 | **`tests/test_hybrid_search.py`** | 6 | • Reciprocal Rank Fusion (RRF) math validation.<br/>• Zero-Trust empty role short-circuiting.<br/>• Heuristic & cross-encoder candidate re-ranking.<br/>• GroundingGuardrail citation and missing context admission checks. |
 | **`tests/test_observability_and_health.py`** | 7 | • Liveness (`/healthz`) and readiness (`/readyz`) probes.<br/>• Telemetry endpoint (`/api/v1/metrics/observability`).<br/>• 503 DB failure handling.<br/>• Pydantic `BaseSettings` validation.<br/>• `ObservabilityTracer` metric recording.<br/>• Token streaming sync and async generators. |
 | **`tests/test_integration_pgvector.py`** | 2 | • Testcontainers `pgvector/pgvector:pg16` end-to-end integration harness.<br/>• Verification of schema.sql DDL, HNSW index, and GIN full-text search. |
@@ -757,7 +773,7 @@ tests/test_utilities.py                 .......                                 
 | **`tests/test_agent.py`** | 6 | • GitHub webhook HMAC-SHA256 verification.<br/>• Webhook JSON parsing into typed models.<br/>• Deterministic secret scanning (API keys, private keys).<br/>• AST static inspection (`eval`, `exec`, `__import__`).<br/>• Sandbox path traversal prevention.<br/>• Full LangGraph self-healing test repair cycle. |
 | **`tests/test_ingest.py`** | 9 | • Pre-ingestion SHA-256 de-duplication, modified file re-indexing detection, force flag bypass, stem matching, chunk prefix detection. |
 | **`tests/test_utilities.py`** | 7 | • Multi-format loaders (`.pdf`, `.md`, `.docx`), tokenizer-aware chunk splitting, chunk metadata attribution, 64KB block hashing, and tenacity retry on 429 rate limits. |
-| **Total** | **96** | **95 Passed, 1 Skipped** |
+| **Total** | **99** | **98 Passed, 1 Skipped** |
 
 ---
 
