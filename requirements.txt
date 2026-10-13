@@ -1,5 +1,6 @@
 asyncpg==0.32.0
-azure_storage==0.37.0
+azure-core>=1.30.0
+azure-search-documents>=11.4.0
 fastapi==0.143.0
 fastmcp==4.1.0
 firebase_admin==7.7.0
