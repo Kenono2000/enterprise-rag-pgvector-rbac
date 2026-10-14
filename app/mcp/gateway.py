@@ -88,7 +88,12 @@ async def search_sdlc_context(
         return res
 
     query_vector = await generate_embedding(question)
-    rows = await DatabaseManager.secure_search(query_vector, roles)
+
+    if os.getenv("RETRIEVAL_BACKEND", "").lower() == "azure":
+        from app.db.azure_search import azure_hybrid_search
+        rows = await azure_hybrid_search(question, query_vector, roles, limit=3)
+    else:
+        rows = await DatabaseManager.secure_search(query_vector, roles)
 
     if not rows:
         duration_ms = round((time.perf_counter() - t_start) * 1000, 2)

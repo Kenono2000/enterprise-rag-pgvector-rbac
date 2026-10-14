@@ -9,7 +9,12 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
+
+# Ensure project root is in sys.path so 'app' package can be resolved
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 load_dotenv(find_dotenv(), override=True)
 
@@ -75,7 +80,7 @@ async def migrate():
     async with client:
         print(f"Uploading {len(azure_docs)} documents to Azure AI Search...")
         result = await client.upload_documents(documents=azure_docs)
-        print(f"✅ Successfully uploaded {len(result)} documents to Azure AI Search!")
+        print(f"[OK] Successfully uploaded {len(result)} documents to Azure AI Search!")
 
 
 if __name__ == "__main__":

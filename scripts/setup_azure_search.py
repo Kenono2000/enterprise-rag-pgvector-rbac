@@ -29,15 +29,23 @@ from azure.search.documents.indexes.models import (
 )
 
 
-def create_index() -> SearchIndex:
+def create_index(recreate: bool = False) -> SearchIndex:
     endpoint = os.getenv("AZURE_SEARCH_ENDPOINT")
     key = os.getenv("AZURE_SEARCH_API_KEY")
     index_name = os.getenv("AZURE_SEARCH_INDEX_NAME", "enterprise-documents-index")
+    vector_dims = int(os.getenv("AZURE_SEARCH_VECTOR_DIMENSIONS", "1536"))
 
     if not endpoint or not key:
         raise ValueError("❌ AZURE_SEARCH_ENDPOINT and AZURE_SEARCH_API_KEY must be configured in environment.")
 
     client = SearchIndexClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+
+    if recreate:
+        try:
+            client.delete_index(index_name)
+            print(f"[RECREATE] Deleted existing index: {index_name}")
+        except Exception as e:
+            print(f"Index did not exist or could not be deleted: {e}")
 
     # Configure HNSW vector search profile
     vector_search = VectorSearch(
@@ -66,12 +74,12 @@ def create_index() -> SearchIndex:
             type=SearchFieldDataType.Collection(SearchFieldDataType.String),
             filterable=True,
         ),
-        # 3072 dimensions for text-embedding-3-large
+        # 1536 dimensions matching PostgreSQL pgvector embeddings
         SearchField(
             name="embedding",
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
             searchable=True,
-            vector_search_dimensions=3072,
+            vector_search_dimensions=vector_dims,
             vector_search_profile_name="vector-profile",
         ),
     ]
@@ -83,10 +91,23 @@ def create_index() -> SearchIndex:
         semantic_search=SemanticSearch(configurations=[semantic_config]),
     )
 
-    created_or_updated = client.create_or_update_index(index)
-    print(f"✅ Successfully created / updated Azure AI Search index: {index_name}")
+    try:
+        created_or_updated = client.create_or_update_index(index)
+    except Exception as e:
+        if "Cannot change" in str(e) or "dimensions" in str(e).lower():
+            print(f"Index dimension/schema changed, deleting and recreating index {index_name}...")
+            client.delete_index(index_name)
+            created_or_updated = client.create_or_update_index(index)
+        else:
+            raise
+
+    print(f"[OK] Successfully created / updated Azure AI Search index: {index_name}")
     return created_or_updated
 
 
 if __name__ == "__main__":
-    create_index()
+    import argparse
+    parser = argparse.ArgumentParser(description="Create or update Azure AI Search index.")
+    parser.add_argument("--recreate", action="store_true", help="Delete and recreate index if it exists.")
+    args = parser.parse_args()
+    create_index(recreate=args.recreate)

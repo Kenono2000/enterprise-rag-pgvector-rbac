@@ -35,7 +35,8 @@
 6. [Testing & Verification Guide (102 Tests: 101 Passed, 1 Skipped)](#-testing--verification-guide-102-tests-101-passed-1-skipped)
 7. [Solved Engineering Pitfalls & Root Cause Analysis](#️-solved-engineering-pitfalls--root-cause-analysis)
 8. [Operational Runbook & Jaeger Persistence Verification](#-operational-runbook--jaeger-persistence-verification)
-9. [Disclaimer & Synthetic Data Security Notice](#-disclaimer--synthetic-data-security-notice)
+9. [Azure AI Migration Playbook & Multi-Cloud Architecture](#-azure-ai-migration-playbook--multi-cloud-architecture)
+10. [Disclaimer & Synthetic Data Security Notice](#-disclaimer--synthetic-data-security-notice)
 
 ---
 
@@ -769,11 +770,11 @@ tests/test_utilities.py                 .......                                 
 | **`tests/test_security_rbac.py`** | 5 | • SQL injection immunity in vector search.<br/>• Parameterized array containment (`$2::text[]`).<br/>• Zero-Trust empty role short-circuiting.<br/>• Header validation and injection filtering. |
 | **`tests/test_auth.py`** | 34 | • RFC 7636 PKCE `code_verifier` & `code_challenge` derivation.<br/>• Stateless HMAC-SHA256 OAuth state generation & expiration (300s TTL).<br/>• Google JWKS certificate caching & `leeway=60s` clock skew tolerance.<br/>• Multi-source role claim extraction (`app_roles`, `roles`, `groups`, `cognito:groups`, `realm_access.roles`).<br/>• Enterprise JWKS issuer validation & rejection of untrusted issuers.<br/>• **Session Cookie Encoding**: Roundtrip compression, signature tampering rejection, expired TTL handling, and malformed cookie rejection. |
 | **`tests/test_rag.py`** | 4 | • Health check status.<br/>• Strict 401 rejection when unauthenticated.<br/>• Dev header fallback (`X-User-Roles`).<br/>• End-to-end vector retrieval & RBAC filtering. |
-| **`tests/test_mcp_auth.py`** | 10 | • FastMCP token validation and unauthenticated caller rejection.<br/>• Verified role extraction from ID tokens for tool execution.<br/>• Identity verification on patch submission. |
+| **`tests/test_mcp_auth.py`** | 11 | • FastMCP token validation and unauthenticated caller rejection.<br/>• Verified role extraction from ID tokens for tool execution.<br/>• Identity verification on patch submission.<br/>• Multi-transport server verification (stdio, SSE). |
 | **`tests/test_agent.py`** | 6 | • GitHub webhook HMAC-SHA256 verification.<br/>• Webhook JSON parsing into typed models.<br/>• Deterministic secret scanning (API keys, private keys).<br/>• AST static inspection (`eval`, `exec`, `__import__`).<br/>• Sandbox path traversal prevention.<br/>• Full LangGraph self-healing test repair cycle. |
 | **`tests/test_ingest.py`** | 9 | • Pre-ingestion SHA-256 de-duplication, modified file re-indexing detection, force flag bypass, stem matching, chunk prefix detection. |
 | **`tests/test_utilities.py`** | 7 | • Multi-format loaders (`.pdf`, `.md`, `.docx`), tokenizer-aware chunk splitting, chunk metadata attribution, 64KB block hashing, and tenacity retry on 429 rate limits. |
-| **Total** | **99** | **98 Passed, 1 Skipped** |
+| **Total** | **102** | **101 Passed, 1 Skipped** |
 
 ---
 
@@ -874,10 +875,10 @@ python -m pytest -v
 ```
 
 **Verification Results**:
-* Total Tests: **96**
-* Passed: **95**
+* Total Tests: **99**
+* Passed: **98**
 * Skipped: **1** (Live network mock fallback)
-* Test Duration: ~22.0s
+* Test Duration: ~28.9s
 
 ### 8.2. Container Orchestration & Health Checks
 
@@ -909,6 +910,42 @@ jaeger               jaegertracing/all-in-one      Up             0.0.0.0:4317-4
    docker compose restart jaeger
    ```
 6. Refresh `http://localhost:16686` and re-run search. **All previous traces remain intact and searchable from Badger disk storage.**
+
+---
+
+## ☁️ Azure AI Migration Playbook & Multi-Cloud Architecture
+
+For organizations deploying across Microsoft Azure, the platform includes a **Dual-Mode Backend** allowing runtime switching between PostgreSQL (`pgvector`) and **Azure AI Search** + **Azure OpenAI Service**.
+
+### 1. Dual-Backend Mapping
+
+| Function | Open Source / Local | Microsoft Azure AI |
+| :--- | :--- | :--- |
+| **Vector Retrieval** | PostgreSQL 16 + `pgvector` (HNSW) | **Azure AI Search** (HNSW Vector Profile, 3072-d) |
+| **Lexical Search** | PostgreSQL `tsvector` / GIN Index | **Azure AI Search BM25** Engine |
+| **Re-Ranking** | Reciprocal Rank Fusion (RRF) | **Bing Semantic Ranker** (`semantic-config`) |
+| **Zero-Trust RBAC** | SQL `WHERE allowed_roles ?| $roles::text[]` | OData Filter: `allowed_roles/any(r: r eq '...')` |
+| **Chat & Embeddings** | Public OpenAI API (`gpt-4o`, `text-embedding-3-large`) | **Azure OpenAI Service** (Private Tenant Deployments) |
+| **Telemetry** | Jaeger All-In-One (Persistent Badger LSM-tree) | **Azure Application Insights** (Azure Monitor OTel) |
+
+### 2. Migration Execution Commands
+
+```powershell
+# 1. Provision Azure AI Search Index with HNSW profile & Semantic Ranker
+python scripts/setup_azure_search.py
+
+# 2. Extract and migrate existing PostgreSQL documents & vectors to Azure AI Search
+python scripts/migrate_pg_to_azure.py
+
+# 3. Run Azure AI Search verification test suite
+python -m pytest tests/test_azure_search.py -v
+
+# 4. Switch live traffic to Azure in .env
+# RETRIEVAL_BACKEND="azure"
+```
+
+> [!TIP]
+> Comprehensive end-to-end portal navigation steps, OData role filter mechanics, and streaming troubleshooting are documented in the **[Master Architecture Playbook](docs/MASTER_PLAYBOOK.md)**.
 
 ---
 

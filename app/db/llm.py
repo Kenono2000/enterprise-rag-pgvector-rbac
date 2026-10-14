@@ -117,6 +117,8 @@ async def chat_completion_stream(prompt: str, model: str = "gpt-4o", temperature
             stream=True,
         )
         async for chunk in stream:
+            if not chunk.choices:
+                continue
             content = chunk.choices[0].delta.content or ""
             if content:
                 yield content
@@ -143,6 +145,8 @@ def chat_completion_stream_sync(prompt: str, model: str = "gpt-4o", temperature:
             stream=True,
         )
         for chunk in stream:
+            if not chunk.choices:
+                continue
             content = chunk.choices[0].delta.content or ""
             if content:
                 yield content
@@ -155,6 +159,8 @@ def chat_completion_stream_sync(prompt: str, model: str = "gpt-4o", temperature:
             stream=True,
         )
         for chunk in stream:
+            if not chunk.choices:
+                continue
             content = chunk.choices[0].delta.content or ""
             if content:
                 yield content

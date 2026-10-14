@@ -1,17 +1,23 @@
 # Enterprise RAG & Multi-Cloud Architecture Master Playbook
 
-Comprehensive operational guide, configuration reference, and architecture evolution roadmap for the **Zero-Trust Enterprise RAG (`enterprise-rag-pgvector-rbac`)** platform.
+Comprehensive operational guide, configuration reference, and architecture evolution roadmap for the **Zero-Trust Enterprise RAG (`enterprise-rag-pgvector-rbac`)** platform across **PostgreSQL + pgvector** and **Microsoft Azure AI**.
 
 ---
 
-## Table of Contents
+## 📑 Table of Contents
 1. [Executive Summary & System Baseline](#1-executive-summary--system-baseline)
-2. [Agent Skills Standard & Discovered Catalog](#2-agent-skills-standard--discovered-catalog)
-3. [Zero-Trust Authentication & RBAC Simulation](#3-zero-trust-authentication--rbac-simulation)
-4. [Dependency & Lockfile Troubleshooting Playbook](#4-dependency--lockfile-troubleshooting-playbook)
-5. [Google Cloud Platform (GCP) & Databricks Migration Roadmap](#5-google-cloud-platform-gcp--databricks-migration-roadmap)
-6. [Azure AI Migration Playbook (Zero-to-One Implementation)](#6-azure-ai-migration-playbook-zero-to-one-implementation)
+2. [Dual-Backend Architecture Matrix (PostgreSQL vs. Azure AI)](#2-dual-backend-architecture-matrix-postgresql-vs-azure-ai)
+3. [Zero-to-One Azure AI Migration Guide](#3-zero-to-one-azure-ai-migration-guide)
+   - [Phase 1: Azure Subscription & Portal Resource Setup](#phase-1-azure-subscription--portal-resource-setup)
+   - [Phase 2: Environment Configuration & Dependencies](#phase-2-environment-configuration--dependencies)
+   - [Phase 3: Index Provisioning with Vector Profiles & Semantic Ranker](#phase-3-index-provisioning-with-vector-profiles--semantic-ranker)
+   - [Phase 4: Data & Vector Migration (PostgreSQL ➔ Azure AI Search)](#phase-4-data--vector-migration-postgresql--azure-ai-search)
+   - [Phase 5: Dual-Mode Application Routing (FastAPI & Streamlit)](#phase-5-dual-mode-application-routing-fastapi--streamlit)
+4. [Zero-Trust RBAC: In-Database vs. In-Engine OData Filtering](#4-zero-trust-rbac-in-database-vs-in-engine-odata-filtering)
+5. [Telemetry & Observability: Jaeger Badger vs. Azure Application Insights](#5-telemetry--observability-jaeger-badger-vs-azure-application-insights)
+6. [Solved Engineering Pitfalls & Azure Migration RCA](#6-solved-engineering-pitfalls--azure-migration-rca)
 7. [Enterprise Verification & Quality Assurance Runbook](#7-enterprise-verification--quality-assurance-runbook)
+8. [Multi-Cloud Evolution: GCP Vertex AI & Databricks Roadmap](#8-multi-cloud-evolution-gcp-vertex-ai--databricks-roadmap)
 
 ---
 
@@ -20,157 +26,250 @@ Comprehensive operational guide, configuration reference, and architecture evolu
 ### Repository Metadata
 - **Repository Root**: `C:\src\enterprise-rag-pgvector-rbac`
 - **Active Git Branch**: `feature/issues-15-16-17-hardening`
-- **Core Technology Stack**: Python 3.11, PostgreSQL with `pgvector`, FastAPI, FastMCP, Streamlit, OpenTelemetry.
-- **Verification Baseline**: 102 tests (101 passed, 1 skipped) via `pytest`.
+- **Core Technology Stack**: Python 3.11, PostgreSQL 16 (`pgvector`), Azure AI Search, Azure OpenAI (`gpt-4o`, `text-embedding-3-large`), FastAPI, Streamlit, FastMCP, OpenTelemetry.
+- **Verification Baseline**: 99 offline tests (98 passed, 1 skipped) via `pytest`.
 
 ### Architectural Pillars
-- **Zero-Trust Retrieval**: Vector cosine distance and BM25 full-text queries strictly bound inside PostgreSQL SQL statements with in-database array checks (`allowed_roles ?| $user_roles`).
-- **Cryptographic Security**: Google OAuth 2.0 PKCE with stateless HMAC session tokens and regulatory session bounds (15-min idle timeout, 12-hour ceiling for SOC-2/HIPAA compliance).
-- **Full-Stack Telemetry**: OpenTelemetry spans traversing Streamlit UI (`chat_interaction`), FastAPI REST endpoints (`http_request`), and MCP tool executions (`mcp_tool`) exported to Jaeger Badger storage or Honeycomb.
+1. **Zero-Trust Retrieval**: Permissions are enforced strictly in the data engine prior to ranking. Documents outside a user's verified role claims never touch memory, cache, or LLM context.
+2. **Dual-Mode Backend Resilience**: Seamless runtime switching between PostgreSQL (`RETRIEVAL_BACKEND="pgvector"`) and Microsoft Azure (`RETRIEVAL_BACKEND="azure"`).
+3. **Cryptographic Session Security**: Google OAuth 2.0 PKCE with stateless HMAC tokens, encrypted browser session cookies, and 15-min idle / 12-hour maximum ceiling bounds.
+4. **Full-Stack Observability**: Spans traverse Streamlit (`chat_interaction`), FastAPI REST endpoints (`http_request`), and MCP tool calls (`mcp_tool`), streaming into Jaeger Badger storage or Azure Application Insights.
 
 ---
 
-## 2. Agent Skills Standard & Discovered Catalog
+## 2. Dual-Backend Architecture Matrix (PostgreSQL vs. Azure AI)
 
-All 10 required skills from the `aicodedecode/awesome-muse-skills` catalog have been created and permanently enforced in the repository under `.agent/skills/`.
-
-### Permanent Policy Enforcement
-- **Root Policy**: [`AGENTS.md`](file:///C:/src/enterprise-rag-pgvector-rbac/AGENTS.md)
-- **Contextual Rules**: [`.agent/rules/skills_enforcement.md`](file:///C:/src/enterprise-rag-pgvector-rbac/.agent/rules/skills_enforcement.md)
-
-### Skills Inventory
-| # | Skill Directory & File | Category | Operational Purpose |
-| :- | :--- | :--- | :--- |
-| 1 | [`getting-started-with-muse-skills`](file:///C:/src/enterprise-rag-pgvector-rbac/.agent/skills/getting-started-with-muse-skills/SKILL.md) | `muse` | Baseline onboarding for skill frontmatter anatomy and clipboard activation. |
-| 2 | [`code-reviewer`](file:///C:/src/enterprise-rag-pgvector-rbac/.agent/skills/code-reviewer/SKILL.md) | `development` | Layered code audits (`correctness` → `design` → `readability` → `security` → `performance`) with standardized comment taxonomy (`blocking:`, `nit:`). |
-| 3 | [`skill-creator`](file:///C:/src/enterprise-rag-pgvector-rbac/.agent/skills/skill-creator/SKILL.md) | `workflow-automation` | Meta-skill to design, trigger-optimize, and validate production-grade agent skills. |
-| 4 | [`viral-animation-prompting`](file:///C:/src/enterprise-rag-pgvector-rbac/.agent/skills/viral-animation-prompting/SKILL.md) | `creative-design` | 5-layer video and motion prompting (camera kinematics, volumetric lighting, motion vectors). |
-| 5 | [`personal-research-assistant`](file:///C:/src/enterprise-rag-pgvector-rbac/.agent/skills/personal-research-assistant/SKILL.md) | `ai-research` | High-rigor investigative procedures, dated primary source primacy, and comparison matrices. |
-| 6 | [`briefing-and-inbox-triage`](file:///C:/src/enterprise-rag-pgvector-rbac/.agent/skills/briefing-and-inbox-triage/SKILL.md) | `productivity` | 4-bucket triage model (Act Today / Delegate / Defer / Archive) and action item extraction. |
-| 7 | [`rag-evaluator`](file:///C:/src/enterprise-rag-pgvector-rbac/.agent/skills/rag-evaluator/SKILL.md) | `ai-research` | RAG Triad evaluation (Context Relevance, Faithfulness, Answer Relevance). |
-| 8 | [`fleet-planner`](file:///C:/src/enterprise-rag-pgvector-rbac/.agent/skills/fleet-planner/SKILL.md) | `ai-maestro` | Multi-agent coordination: Orchestrator vs. Worker subagents, context isolation. |
-| 9 | [`content-brief-and-calendar-generator`](file:///C:/src/enterprise-rag-pgvector-rbac/.agent/skills/content-brief-and-calendar-generator/SKILL.md) | `business-marketing` | Technical content briefs, search intent targeting, and multi-week editorial roadmaps. |
-| 10 | [`regex-and-cron-utility`](file:///C:/src/enterprise-rag-pgvector-rbac/.agent/skills/regex-and-cron-utility/SKILL.md) | `utilities` | Regex and cron parsing, ReDoS safety, and next-execution time calculation. |
+| Architecture Component | Primary: On-Premises / Open Source | Alternative: Microsoft Azure AI | Operational Benefit |
+| :--- | :--- | :--- | :--- |
+| **Vector Storage & Distance** | PostgreSQL 16 + `pgvector` (HNSW cosine ops) | **Azure AI Search** (HNSW Vector Profile) | Managed scaling, SLA-backed, zero DB maintenance. |
+| **Lexical Keyword Search** | PostgreSQL Full-Text Search (`tsvector`, `ts_rank`) | **Azure AI Search BM25** Engine | Native inverted index optimized for document collections. |
+| **Re-Ranking Engine** | Reciprocal Rank Fusion (RRF) + Heuristic / Cross-Encoder | **Bing Semantic Ranker** (`semantic-config`) | Deep transformer-based multi-lingual re-ranking. |
+| **Access Control (RBAC)** | SQL Parameterized GIN filter: `WHERE allowed_roles ?| $user_roles` | **OData Collection Filter**: `allowed_roles/any(r: r eq '...')` | Zero memory leaks: unauthorized items pruned inside search engine. |
+| **Embedding Generation** | OpenAI API `text-embedding-3-large` (1536-d) | **Azure OpenAI** `text-embedding-3-large` (3072-d / 1536-d) | Private VPC connectivity, no data used for AI training. |
+| **Chat Generation (LLM)** | OpenAI API `gpt-4o` | **Azure OpenAI** `gpt-4o` (Deployments) | Private tenant hosting, enterprise compliance (SOC2/HIPAA). |
+| **Distributed Tracing** | Jaeger All-In-One (Persistent Badger LSM-tree) | **Azure Application Insights** (Azure Monitor OTel) | Serverless telemetry dashboard with zero storage management. |
 
 ---
 
-## 3. Zero-Trust Authentication & RBAC Simulation
+## 3. Zero-to-One Azure AI Migration Guide
 
-### What `REQUIRE_GOOGLE_AUTH=false` Means
-- **When `true` (Production)**: Enforces strict Google ID token verification via JWKS (`Authorization: Bearer <token>`). Unauthenticated requests are rejected with `HTTP 401`.
-- **When `false` (Dev/Test)**: Disables compulsory Google OAuth. Allows local development, test automation, and UI-driven role simulation without external Google Cloud credentials.
+### Phase 1: Azure Subscription & Portal Resource Setup
 
-### Streamlit UI Implementation ([`streamlit_app.py`](file:///C:/src/enterprise-rag-pgvector-rbac/streamlit_app.py))
-The Streamlit application dynamically inspects the environment and renders one of two distinct flows:
+#### Step 1.1: Create a Dedicated Resource Group
+1. Sign in to the [Azure Portal](https://portal.azure.com/).
+2. Navigate to **Resource groups** ➔ Click **+ Create**.
+3. Set **Resource group name**: `rg-enterprise-rag-dev` (or `rg-enterprise-rag-prod`).
+4. Set **Region**: Select a region with model availability (e.g., `East US 2` or `Sweden Central`).
+5. Click **Review + create** ➔ **Create**.
 
-```mermaid
-flowchart TD
-    Start([App Launch]) --> CheckMode{REQUIRE_GOOGLE_AUTH == true?}
-    CheckMode -- Yes --> RenderGoogle["Render Google OAuth PKCE Login<br>('Sign in with Google' Button)"]
-    CheckMode -- No --> RenderDev["Render Development RBAC Simulator<br>(Interactive Form & Role Selection)"]
-    RenderDev --> EnterUI["Enter Knowledge Workspace<br>(Mock Dev Identity Staged)"]
-    RenderGoogle --> AuthSuccess["Exchange Code & Stage ID Token"]
-    EnterUI --> MainApp["Knowledge Chat Interface"]
-    AuthSuccess --> MainApp
-    MainApp --> SidebarCheck{Dev Mode Active?}
-    SidebarCheck -- Yes --> LiveRoleEdit["Sidebar: Live Role Multi-Select<br>(Instant Switching Without Logout)"]
-    SidebarCheck -- No --> StaticBadges["Sidebar: Static Verified JWT Badges<br>+ Token Exporter"]
+#### Step 1.2: Deploy Azure OpenAI Service & Models
+1. Search for **Azure OpenAI** ➔ Click **+ Create**.
+2. Select Resource Group `rg-enterprise-rag-dev`.
+3. Provide a name: e.g., `oai-enterprise-rag`.
+4. Pricing tier: **Standard S0** ➔ Click **Review + create** ➔ **Create**.
+5. Once deployed, open the resource:
+   - Navigate to **Keys and Endpoint** in the left sidebar.
+   - Record **Endpoint** (`https://<name>.openai.azure.com/`) and **Key 1**.
+6. Click **Go to Azure AI Foundry portal** (or Azure OpenAI Studio):
+   - Under **Deployments**, click **+ Deploy model** ➔ **Deploy base model**.
+   - Deploy `text-embedding-3-large` (Deployment name: `text-embedding-3-large`).
+   - Click **+ Deploy model** ➔ Deploy `gpt-4o` (Deployment name: `gpt-4o`).
+
+#### Step 1.3: Deploy Azure AI Search with Semantic Ranker
+1. Search for **AI Search** ➔ Click **+ Create**.
+2. Select Resource Group `rg-enterprise-rag-dev`.
+3. Name: e.g., `search-enterprise-rag`.
+4. Pricing tier: **Standard** (Standard is required for the Semantic Ranker).
+5. Click **Review + create** ➔ **Create**.
+6. When completed, open the resource:
+   - In **Settings** ➔ **Keys**, copy the **URL** and **Primary admin key**.
+   - In **Settings** ➔ **Semantic ranker**, enable the **Free** or Standard plan.
+
+#### Step 1.4: Deploy Azure Application Insights
+1. Search for **Application Insights** ➔ Click **+ Create**.
+2. Select Resource Group `rg-enterprise-rag-dev`, Name: `appi-enterprise-rag`.
+3. Click **Review + create** ➔ **Create**.
+4. In the resource Overview blade, copy the **Connection String** (`InstrumentationKey=...`).
+
+---
+
+### Phase 2: Environment Configuration & Dependencies
+
+Install required client packages:
+```powershell
+pip install azure-search-documents azure-identity azure-monitor-opentelemetry openai
 ```
 
-#### Key Capabilities Added:
-1. **Dynamic Login Form**: In dev mode, hides the Google link button and presents a role multi-select containing all [`KNOWN_ROLES`](file:///C:/src/enterprise-rag-pgvector-rbac/app/auth/role_mapper.py#L39-L41) (`engineer`, `finance_executive`, `compliance_auditor`, `hr_manager`, `executive`) plus custom role inputs.
-2. **Live Sidebar Role Switching**: Developers can change active roles directly in the sidebar during an active session to test row-level access controls in real-time.
-3. **Contextual Identity Badges**: Displays simulated identity metadata while hiding Google-specific token refresh buttons.
+Configure `.env` in Dual-Mode:
+```ini
+# ==============================================================================
+# Backend Provider Switcher: 'pgvector' OR 'azure'
+# ==============================================================================
+RETRIEVAL_BACKEND="azure"
 
----
+# ==============================================================================
+# Azure OpenAI Configuration
+# ==============================================================================
+AZURE_OPENAI_ENDPOINT="https://oai-enterprise-rag.openai.azure.com/"
+AZURE_OPENAI_API_KEY="<your-azure-openai-key-1>"
+AZURE_OPENAI_API_VERSION="2024-06-01"
+AZURE_OPENAI_CHAT_DEPLOYMENT="gpt-4o"
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT="text-embedding-3-large"
 
-## 4. Dependency & Lockfile Troubleshooting Playbook
+# ==============================================================================
+# Azure AI Search Configuration
+# ==============================================================================
+AZURE_SEARCH_ENDPOINT="https://search-enterprise-rag.search.windows.net"
+AZURE_SEARCH_API_KEY="<your-azure-search-primary-admin-key>"
+AZURE_SEARCH_INDEX_NAME="enterprise-documents-index"
 
-### PNPM Duplicate Mapping Key Error
-When running `pnpm install --frozen-lockfile` produces:
-```text
-ERROR duplicated mapping key (618:7)
- 615 | '@suntiq/experience':
- 618 | '@suntiq/fleet':
+# ==============================================================================
+# Azure Application Insights (Telemetry)
+# ==============================================================================
+APPLICATIONINSIGHTS_CONNECTION_STRING="InstrumentationKey=...;IngestionEndpoint=..."
 ```
 
-#### Diagnostic
-In YAML, declaring the exact same key (`'@suntiq/fleet':`) twice within a single mapping block is invalid. The strict parser in PNPM fails during lockfile validation.
+---
 
-#### Resolution Options
-- **Option 1 (Fastest / Recommended)**: Regenerate the lockfile from clean workspace dependencies:
-  ```bash
-  rm pnpm-lock.yaml
-  pnpm install
-  pnpm install --frozen-lockfile
-  ```
-- **Option 2 (Surgical)**: Open `pnpm-lock.yaml`, navigate to line 618, and delete the redundant 3-line block for `@suntiq/fleet`.
-- **Option 3 (Root-Cause Check)**: Inspect the target project's `package.json` to ensure the package isn't duplicated in both `dependencies` and `devDependencies`.
+### Phase 3: Index Provisioning with Vector Profiles & Semantic Ranker
+
+The index schema is defined in [`scripts/setup_azure_search.py`](file:///C:/src/enterprise-rag-pgvector-rbac/scripts/setup_azure_search.py). It provisions:
+- **HNSW Vector Profile**: 3072 dimensions matching `text-embedding-3-large`.
+- **Bing Semantic Configuration**: Prioritized fields on `title` and `content`.
+- **Multi-Role RBAC Field**: Collection of Strings (`allowed_roles`) configured as `filterable=True`.
+
+Run index creation:
+```powershell
+python scripts/setup_azure_search.py
+# Output: ✅ Successfully created / updated Azure AI Search index: enterprise-documents-index
+```
 
 ---
 
-## 5. Google Cloud Platform (GCP) & Databricks Migration Roadmap
+### Phase 4: Data & Vector Migration (PostgreSQL ➔ Azure AI Search)
 
-### Architecture Mapping
-- **Vector Search**: Databricks Vector Search (Delta Sync Index) or Vertex AI Vector Search.
-- **Data Governance & RBAC**: Databricks Unity Catalog Row Filters (`is_account_group_member(...)`) replacing custom PostgreSQL array filters.
-- **LLM & Embeddings**: Google Vertex AI (`gemini-1.5-pro`, `gemini-1.5-flash`, `text-embedding-004`) or Databricks Mosaic AI Model Serving.
-- **Pipelines**: Delta Live Tables (DLT) or Cloud Dataflow (Apache Beam) for streaming document chunking.
-- **Observability**: MLflow Tracing combined with Google Cloud Trace (Operations Suite).
+The data pipeline in [`scripts/migrate_pg_to_azure.py`](file:///C:/src/enterprise-rag-pgvector-rbac/scripts/migrate_pg_to_azure.py):
+1. Connects to PostgreSQL via loop-aware `asyncpg`.
+2. Queries normalized master `documents` joined to `document_chunks`.
+3. Normalizes vector embeddings and JSONB role arrays into typed Azure Search documents.
+4. Executes atomic batch upload via `SearchClient.upload_documents(...)`.
+
+Run data migration:
+```powershell
+python scripts/migrate_pg_to_azure.py
+# Output: ✅ Successfully uploaded documents to Azure AI Search!
+```
 
 ---
 
-## 6. Azure AI Migration Playbook (Zero-to-One Implementation)
+### Phase 5: Dual-Mode Application Routing (FastAPI & Streamlit)
 
-For teams transitioning from self-hosted PostgreSQL + public OpenAI to **Microsoft Azure AI**:
-
-### 6.1 Service Equivalencies
-- **Azure OpenAI Service**: Private enterprise deployments of `gpt-4o` and `text-embedding-3-large`.
-- **Azure AI Search**: Serverless managed hybrid search (Vector HNSW + BM25 Lexical + Bing Semantic Re-ranker) with native role filtering.
-- **Azure Application Insights**: Managed OpenTelemetry APM without container storage overhead.
-
-### 6.2 Implementation Checklist
-1. **Azure Portal Setup**:
-   - Create Resource Group `rg-enterprise-rag-dev`.
-   - Deploy Azure OpenAI (`gpt-4o`, `text-embedding-3-large`).
-   - Deploy Azure AI Search (Standard tier for Semantic Ranker).
-   - Deploy Application Insights and capture connection strings.
-2. **Configuration Updates ([`.env`](file:///C:/src/enterprise-rag-pgvector-rbac/.env))**:
-   ```ini
-   RETRIEVAL_BACKEND="azure"
-   AZURE_OPENAI_ENDPOINT="https://<your-instance>.openai.azure.com/"
-   AZURE_OPENAI_API_KEY="<your-key>"
-   AZURE_OPENAI_CHAT_DEPLOYMENT="gpt-4o"
-   AZURE_OPENAI_EMBEDDING_DEPLOYMENT="text-embedding-3-large"
-   AZURE_SEARCH_ENDPOINT="https://<your-search>.search.windows.net"
-   AZURE_SEARCH_API_KEY="<your-search-key>"
-   AZURE_SEARCH_INDEX_NAME="enterprise-documents-index"
-   APPLICATIONINSIGHTS_CONNECTION_STRING="InstrumentationKey=..."
+1. **FastAPI Dispatch ([`app/main.py`](file:///C:/src/enterprise-rag-pgvector-rbac/app/main.py))**:
+   ```python
+   if os.getenv("RETRIEVAL_BACKEND", "").lower() == "azure":
+       from app.db.azure_search import azure_hybrid_search
+       rows = await azure_hybrid_search(request.question, query_vector, user.roles, limit=3)
+   else:
+       rows = await DatabaseManager.hybrid_search(request.question, query_vector, user.roles)
    ```
-3. **Execution Scripts**:
-   - Run index provisioning script to configure the 3072-dimension HNSW profile and `allowed_roles` collection.
-   - Run migration script to transfer existing chunks and embeddings from PostgreSQL directly into Azure AI Search.
-   - Activate dual-provider routing in the FastAPI and Streamlit search execution paths.
+
+2. **Streamlit UI ([`streamlit_app.py`](file:///C:/src/enterprise-rag-pgvector-rbac/streamlit_app.py))**:
+   - Queries `azure_hybrid_search(...)` when configured.
+   - Formats and displays executed OData query specifications in the **🔍 Executed RBAC Query** inspection panel.
+
+---
+
+## 4. Zero-Trust RBAC: In-Database vs. In-Engine OData Filtering
+
+### PostgreSQL In-Database RBAC
+```sql
+SELECT d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles, 
+       1 - (c.embedding <=> $1::vector) AS similarity
+FROM document_chunks c
+JOIN documents d ON c.document_id = d.id
+WHERE d.allowed_roles ?| $2::text[]
+ORDER BY c.embedding <=> $1::vector
+LIMIT $3;
+```
+
+### Azure AI Search OData RBAC
+```python
+role_clauses = " or ".join([f"r eq '{role}'" for role in sanitized_roles])
+role_filter = f"allowed_roles/any(r: {role_clauses})"
+
+results = await client.search(
+    search_text=query_text,
+    vector_queries=[vector_query],
+    filter=role_filter,
+    query_type="semantic",
+    semantic_configuration_name="semantic-config",
+    top=limit,
+)
+```
+
+**Zero-Trust Guarantee**: In both implementations, if a user presents no verified roles (`user_roles = []`), the system terminates immediately and returns `[]` without querying the search engine.
+
+---
+
+## 5. Telemetry & Observability: Jaeger Badger vs. Azure Application Insights
+
+In [`app/observability.py`](file:///C:/src/enterprise-rag-pgvector-rbac/app/observability.py), observability dynamically adapts to the deployment target:
+
+1. **Azure Application Insights**: Configured automatically when `APPLICATIONINSIGHTS_CONNECTION_STRING` is detected using `azure.monitor.opentelemetry.configure_azure_monitor`.
+2. **Jaeger Badger Exporter**: Uses standard OTLP gRPC (`http://localhost:4317`) pointing to the persistent Badger LSM-Tree container when running in local Docker or Kubernetes.
+
+---
+
+## 6. Solved Engineering Pitfalls & Azure Migration RCA
+
+### RCA 1: Azure OpenAI Streaming `IndexError: list index out of range`
+- **Symptom**: Streamlit threw `IndexError: list index out of range` at line 146 in `chat_completion_stream_sync`.
+- **Root Cause**: Unlike public OpenAI which populates choices on all chunks, Azure OpenAI emits trailing chunks with empty `chunk.choices = []` containing moderation/filter annotations and prompt tokens. Unconditionally indexing `chunk.choices[0]` triggered an exception.
+- **Resolution**: Added empty choices guards across all streaming generators in [`app/db/llm.py`](file:///C:/src/enterprise-rag-pgvector-rbac/app/db/llm.py):
+  ```python
+  for chunk in stream:
+      if not chunk.choices:
+          continue
+      content = chunk.choices[0].delta.content or ""
+  ```
+
+### RCA 2: Windows IDE Pre-Tool Hook Node.js Crash
+- **Symptom**: Automated tool calls failed with `Cannot find module ...\Ken Wong\...`.
+- **Root Cause**: A pre-tool telemetry hook script failed to quote spaces in Windows user profile directories (`C:\Users\Ken Wong`).
+- **Resolution**: Guarded against manual PowerShell string escapes (avoiding backtick `` `n `` artifacts) and verified offline test isolation.
+
+### RCA 3: `python-dotenv` Syntax Warnings
+- **Symptom**: `python-dotenv could not parse statement starting at line X`.
+- **Root Cause**: Inline comment formatting and unquoted multi-line private keys in `.env`.
+- **Resolution**: Cleaned `.env` key-value pairs with strict double quotes.
 
 ---
 
 ## 7. Enterprise Verification & Quality Assurance Runbook
 
-### Local Development Commands
+### Running Azure Search Tests
 ```powershell
-# 1. Run full test suite with coverage
-python -m pytest -q
-
-# 2. Run Streamlit in RBAC Simulation Mode
-$env:REQUIRE_GOOGLE_AUTH="false"
-python -m streamlit run streamlit_app.py
-
-# 3. Run FastAPI Gateway with OpenAPI documentation
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-# Access Swagger UI at http://localhost:8000/docs
+# Run Azure AI Search unit and RBAC tests
+python -m pytest tests/test_azure_search.py -v
 ```
 
-### Production Verification Rules
-- Prior to production deployment, guarantee `REQUIRE_GOOGLE_AUTH=true`.
-- Validate that all Jaeger badger volumes or Application Insights connection strings are mapped.
-- Ensure all pull requests follow the [`code-reviewer`](file:///C:/src/enterprise-rag-pgvector-rbac/.agent/skills/code-reviewer/SKILL.md) and [`rag-evaluator`](file:///C:/src/enterprise-rag-pgvector-rbac/.agent/skills/rag-evaluator/SKILL.md) standards.
+### Running Complete Regression Suite
+```powershell
+# Run all 99 automated unit, auth, schema, and vector tests
+python -m pytest -q
+# Target: 98 passed, 1 skipped
+```
+
+### Manual Verification Matrix
+1. **Empty Roles**: Query with `X-User-Roles: []` ➔ Confirm immediate 0 results returned.
+2. **Role Isolation**: Query as `engineer` ➔ Confirm Financial Audits are never returned.
+3. **Bing Re-Ranking**: Inspect search results to verify `@search.reranker_score` is populated.
+
+---
+
+## 8. Multi-Cloud Evolution: GCP Vertex AI & Databricks Roadmap
+
+For enterprise architectures spanning Google Cloud or Databricks:
+- **Databricks Vector Search**: Sync Delta tables directly to managed HNSW indices.
+- **Unity Catalog Row Filters**: Enforce `is_account_group_member(...)` for governance.
+- **Google Cloud Vertex AI**: Deploy `gemini-1.5-pro` and `text-embedding-004` with Cloud Trace.
