@@ -13,7 +13,6 @@
 | **Interactive UI** | Shift-Left In-Database RBAC & Session Monitor | [enterprise-rag-pgvector-rbac.streamlit.app](https://enterprise-rag-pgvector-rbac.streamlit.app) |
 | **API Docs** | Live OpenAPI / Interactive Swagger UI | [enterprise-rag-api-ksez.onrender.com/docs](https://enterprise-rag-api-ksez.onrender.com/docs) |
 | **Source Code** | Auditable Source Repository & Offline Test Suite | [github.com/Kenono2000/enterprise-rag-pgvector-rbac](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac) |
-| **Master Playbook** | Multi-Cloud Architecture & Runbook Guide | [`docs/MASTER_PLAYBOOK.md`](docs/MASTER_PLAYBOOK.md) |
 
 ---
 
@@ -65,57 +64,74 @@ Traditional enterprise RAG architectures filter permissions **after** vector ret
 
 ```mermaid
 flowchart TB
-    subgraph Client ["Client & Consumer Layer"]
+    subgraph Clients ["Client & Consumer Layer"]
         browser["Streamlit UI / Web Client<br/>(localhost:8501)"]
         mcp_client["AI Agent / Cursor / Claude Desktop"]
     end
 
-    subgraph Identity ["Identity & Session Security"]
+    subgraph Security ["Identity & Session Security (PKCE)"]
         google["Google OAuth 2.0 PKCE<br/>(accounts.google.com)"]
-        jwks["Google JWKS (RS256)<br/>clock skew leeway=60s"]
-        cookie["Encrypted Session Cookie<br/>(F5 reload persistence + 15m idle)"]
+        jwks["Google JWKS (RS256)<br/>leeway=60s"]
+        cookie["Encrypted Session Cookie<br/>(15m idle / 12h ceiling)"]
     end
 
-    subgraph Backend ["FastAPI Zero-Trust Core (app/)"]
-        api["API Gateway (POST /api/v1/query)<br/>Dependency: get_current_user"]
-        embed["Embedding Engine<br/>text-embedding-3-large (1536-d)"]
+    subgraph PythonEnv ["🐍 Python Local / Container Environment (RETRIEVAL_BACKEND='pgvector')"]
+        api["FastAPI Gateway (:8000)<br/>POST /api/v1/query"]
+        mcp_gw["FastMCP Server<br/>Tool: search_sdlc_context"]
         pool["Loop-Aware asyncpg Pool"]
+        local_db[("PostgreSQL 16 + pgvector (:5432)<br/>• GIN: allowed_roles jsonb_path_ops<br/>• HNSW: embedding vector_cosine_ops")]
+        openai_api["OpenAI API (Public Endpoint)<br/>• text-embedding-3-large (1536-d)<br/>• gpt-4o Chat Completions"]
+        jaeger["Jaeger All-In-One (:16686)<br/>Persistent Badger LSM Storage"]
     end
 
-    subgraph Database ["Data & Retrieval Providers (Dual-Mode)"]
-        db[("PostgreSQL 16 + pgvector<br/>• GIN: allowed_roles jsonb_path_ops<br/>• HNSW: embedding vector_cosine_ops")]
-        azure_search[("Azure AI Search<br/>• OData RBAC: allowed_roles/any<br/>• HNSW Vector Search (3072-d)<br/>• Bing Semantic Re-ranker")]
+    subgraph AzureEnv ["☁️ Microsoft Azure Cloud Environment (RETRIEVAL_BACKEND='azure')"]
+        azure_search[("Azure AI Search<br/>• Index: enterprise-documents-index<br/>• OData RBAC: allowed_roles/any(...)<br/>• 3072-d HNSW Vector Search<br/>• Bing Semantic Re-ranker")]
+        azure_oai["Azure OpenAI Service<br/>• Deployment: text-embedding-3-large<br/>• Deployment: gpt-4o"]
+        app_insights["Azure Application Insights<br/>Managed OpenTelemetry Dashboard"]
     end
 
-    subgraph LLM ["Inference & Embedding Providers"]
-        openai_svc["OpenAI API / Azure OpenAI Service<br/>• text-embedding-3-large<br/>• gpt-4o Chat Completions"]
-    end
-
-    subgraph Agent ["Autonomous SDLC Agent (agent/)"]
+    subgraph AgentEngine ["🤖 Autonomous SDLC Agent (agent/)"]
         langgraph["LangGraph State Machine<br/>propose ➔ apply ➔ audit ➔ test ➔ repair"]
         guardrails["PolicyEngine<br/>Deterministic AST + Secret Scanner"]
     end
 
+    %% Auth Flow
     browser -->|1. PKCE Auth Code| google
     google -->|2. RS256 ID Token| browser
     browser -->|3. Encrypted Cookie / Bearer| cookie
     browser -->|4. Authenticated Request| api
     api -->|5. Verify Token & Leeway| jwks
-    api -->|6. Generate Embedding| openai_svc
-    api -->|7. Dual-Mode Retrieval Router| pool
-    pool -->|8a. RETRIEVAL_BACKEND=pgvector| db
-    api -->|8b. RETRIEVAL_BACKEND=azure| azure_search
-    db -->|9. Authorized Top-K Only| api
-    azure_search -->|9. Filtered + Re-ranked Top-K| api
-    api -->|10. Grounded Response| browser
 
-    mcp_client -->|Governed Tool Call| api
-    Agent -->|Context Hydration| api
+    %% In-process Gateways & Agent Coordination
+    mcp_client -->|Governed Tool Call| mcp_gw
+    AgentEngine -->|Context Hydration| api
 
-    style Database fill:#f9f,stroke:#333,stroke-width:2px
-    style Identity fill:#dfd,stroke:#333,stroke-width:2px
-    style Backend fill:#f0f8ff,stroke:#007acc,stroke-dasharray: 5 5
-    style Agent fill:#fff9c4,stroke:#fbc02d,stroke-width:2px
+    %% Python Env Routing
+    api -.->|RETRIEVAL_BACKEND='pgvector'| pool
+    mcp_gw -.->|RETRIEVAL_BACKEND='pgvector'| pool
+    pool -->|GIN Filter + Cosine Distance| local_db
+    local_db -->|Authorized Top-K| api
+    api -.->|Generate Vectors / Chat| openai_api
+    api -.->|OTel Tracing| jaeger
+
+    %% Azure Env Routing
+    api ==>|RETRIEVAL_BACKEND='azure'| azure_search
+    mcp_gw ==>|RETRIEVAL_BACKEND='azure'| azure_search
+    azure_search ==>|OData Filtered + Semantic Top-K| api
+    api ==>|Private VPC Inference| azure_oai
+    api ==>|Azure Monitor Telemetry| app_insights
+
+    %% User Response
+    api -->|Grounded Answer + Citations| browser
+
+    %% Visual Styling
+    style PythonEnv fill:#f0f9ff,stroke:#0284c7,stroke-width:2px,stroke-dasharray: 4 4
+    style AzureEnv fill:#fdf4ff,stroke:#c026d3,stroke-width:2px
+    style Security fill:#f0fdf4,stroke:#16a34a,stroke-width:2px
+    style Clients fill:#fefce8,stroke:#ca8a04,stroke-width:2px
+    style AgentEngine fill:#fffbeb,stroke:#d97706,stroke-width:2px
+    style local_db fill:#e0f2fe,stroke:#0369a1,stroke-width:2px
+    style azure_search fill:#fae8ff,stroke:#a21caf,stroke-width:2px
 ```
 
 ---
@@ -340,6 +356,9 @@ flowchart TD
     Embed --> Master[Upsert documents Master Record]
     Master --> Clean[Purge Stale document_chunks for document_id]
     Clean --> Insert[Batch Insert document_chunks with HNSW Vectors]
+
+    Insert --> Migrate[scripts/migrate_pg_to_azure.py]
+    Migrate --> AzureIndex[("Azure AI Search<br/>enterprise-documents-index<br/>• 3072-d HNSW Vector Profile<br/>• OData allowed_roles Collection")]
 ```
 
 #### 1. Cryptographic SHA-256 De-duplication
@@ -424,26 +443,20 @@ Streamlit creates new script runner threads per user interaction. To prevent Pos
 #### 2. Distributed Tracing Architecture & OpenTelemetry Engine
 The platform implements full-stack distributed tracing via **OpenTelemetry (OTel)** using the **OTLP gRPC Exporter** (`http://localhost:4317`) streaming spans into a persistent **Jaeger All-In-One** backend.
 
-```text
-[User Browser]
-       │
-       ▼
-[Streamlit UI (8501)] ──── (Span: chat_interaction)
-       │                              │
-       ├──────────────────────────────┼──────────┐
-       ▼                              ▼          ▼
-[FastAPI Gateway (8000)]    [FastMCP Gateway]  [LLM Service]
- (Span: http_request)        (Span: mcp_tool)   (Span: rag.generate)
-       │                              │          │
-       └──────────────────────────────┼──────────┘
-                                      ▼
-                        [OTLP gRPC Exporter (4317)]
-                                      │
-                                      ▼
-                    [Jaeger All-In-One (Badger Storage)]
-                                      │
-                                      ▼
-                           [Jaeger UI (16686)]
+```mermaid
+flowchart TD
+    Browser["User Browser / Streamlit Client"] -->|Span: chat_interaction| UI["Streamlit UI (Port 8501)"]
+    UI -->|Span: http_request| API["FastAPI Gateway (Port 8000)"]
+    UI -->|Span: mcp_tool| MCP["FastMCP Server (app/mcp)"]
+    API -->|Span: rag.generate| LLM["LLM Service (OpenAI / Azure OpenAI)"]
+
+    API --> OTel["OpenTelemetry Tracing Engine (app/observability.py)"]
+    UI --> OTel
+    MCP --> OTel
+    LLM --> OTel
+
+    OTel -->|OTEL_ENABLED=true| Jaeger["Jaeger All-In-One (Badger LSM-Tree Storage)<br/>OTLP gRPC :4317 ➔ Jaeger UI :16686"]
+    OTel -->|APPLICATIONINSIGHTS_CONNECTION_STRING| AppInsights["Azure Application Insights<br/>Managed Azure Monitor Dashboard"]
 ```
 
 ##### Telemetry Configuration & Ports
@@ -917,35 +930,116 @@ jaeger               jaegertracing/all-in-one      Up             0.0.0.0:4317-4
 
 For organizations deploying across Microsoft Azure, the platform includes a **Dual-Mode Backend** allowing runtime switching between PostgreSQL (`pgvector`) and **Azure AI Search** + **Azure OpenAI Service**.
 
-### 1. Dual-Backend Mapping
+### 1. Architectural Component Mapping
 
-| Function | Open Source / Local | Microsoft Azure AI |
-| :--- | :--- | :--- |
-| **Vector Retrieval** | PostgreSQL 16 + `pgvector` (HNSW) | **Azure AI Search** (HNSW Vector Profile, 3072-d) |
-| **Lexical Search** | PostgreSQL `tsvector` / GIN Index | **Azure AI Search BM25** Engine |
-| **Re-Ranking** | Reciprocal Rank Fusion (RRF) | **Bing Semantic Ranker** (`semantic-config`) |
-| **Zero-Trust RBAC** | SQL `WHERE allowed_roles ?| $roles::text[]` | OData Filter: `allowed_roles/any(r: r eq '...')` |
-| **Chat & Embeddings** | Public OpenAI API (`gpt-4o`, `text-embedding-3-large`) | **Azure OpenAI Service** (Private Tenant Deployments) |
-| **Telemetry** | Jaeger All-In-One (Persistent Badger LSM-tree) | **Azure Application Insights** (Azure Monitor OTel) |
+| Function | Open Source / Local | Microsoft Azure AI | Operational Benefit |
+| :--- | :--- | :--- | :--- |
+| **Vector Storage & Distance** | PostgreSQL 16 + `pgvector` (HNSW cosine ops) | **Azure AI Search** (HNSW Vector Profile, 3072-d) | Managed scaling, SLA-backed, zero database maintenance. |
+| **Lexical Keyword Search** | PostgreSQL Full-Text Search (`tsvector`, `ts_rank`) | **Azure AI Search BM25** Engine | Native inverted index optimized for document collections. |
+| **Re-Ranking Engine** | Reciprocal Rank Fusion (RRF) + Heuristic / Cross-Encoder | **Bing Semantic Ranker** (`semantic-config`) | Deep transformer-based multi-lingual re-ranking. |
+| **Access Control (RBAC)** | SQL Parameterized GIN filter: `WHERE allowed_roles ?| $user_roles` | **OData Collection Filter**: `allowed_roles/any(r: r eq '...')` | Zero memory leaks: unauthorized items pruned inside search engine. |
+| **Embedding Generation** | OpenAI API `text-embedding-3-large` (1536-d) | **Azure OpenAI** `text-embedding-3-large` (3072-d) | Private VPC connectivity, no customer data used for AI training. |
+| **Chat Generation (LLM)** | OpenAI API `gpt-4o` | **Azure OpenAI** `gpt-4o` (Deployments) | Private tenant hosting, enterprise compliance (SOC2/HIPAA). |
+| **Distributed Tracing** | Jaeger All-In-One (Persistent Badger LSM-tree) | **Azure Application Insights** (Azure Monitor OTel) | Serverless telemetry dashboard with zero storage management. |
 
-### 2. Migration Execution Commands
+---
 
+### 2. Zero-to-One Step-by-Step Setup Guide
+
+#### Phase 1: Azure Portal Resource Provisioning
+1. **Resource Group**:
+   - Create Resource Group `rg-enterprise-rag-dev` in a region with high model availability (e.g. `East US 2` or `Sweden Central`).
+2. **Azure OpenAI Service**:
+   - Create resource `oai-enterprise-rag` (Pricing tier: **Standard S0**).
+   - Under **Keys and Endpoint**, copy **Endpoint** and **Key 1**.
+   - Open **Azure AI Foundry / OpenAI Studio** ➔ **Deployments**:
+     - Deploy base model **`text-embedding-3-large`** (Deployment name: `text-embedding-3-large`).
+     - Deploy base model **`gpt-4o`** (Deployment name: `gpt-4o`).
+3. **Azure AI Search**:
+   - Create resource `search-enterprise-rag` (Pricing tier: **Standard** for Semantic Ranker support).
+   - Under **Keys**, copy **URL** and **Primary admin key**.
+   - Under **Semantic ranker**, select the **Free** (or Standard) plan.
+4. **Application Insights**:
+   - Create resource `appi-enterprise-rag` and copy the **Connection String** (`InstrumentationKey=...`).
+
+#### Phase 2: Dual-Mode Environment Configuration (`.env`)
+```ini
+# Switch between 'pgvector' (default) and 'azure'
+RETRIEVAL_BACKEND="azure"
+
+# Azure OpenAI Service
+AZURE_OPENAI_ENDPOINT="https://oai-enterprise-rag.openai.azure.com/"
+AZURE_OPENAI_API_KEY="<your-azure-openai-key-1>"
+AZURE_OPENAI_API_VERSION="2024-06-01"
+AZURE_OPENAI_CHAT_DEPLOYMENT="gpt-4o"
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT="text-embedding-3-large"
+
+# Azure AI Search Service
+AZURE_SEARCH_ENDPOINT="https://search-enterprise-rag.search.windows.net"
+AZURE_SEARCH_API_KEY="<your-azure-search-primary-admin-key>"
+AZURE_SEARCH_INDEX_NAME="enterprise-documents-index"
+
+# Azure Application Insights Telemetry
+APPLICATIONINSIGHTS_CONNECTION_STRING="InstrumentationKey=...;IngestionEndpoint=..."
+```
+
+#### Phase 3: Automated Migration & Ingestion Execution
 ```powershell
-# 1. Provision Azure AI Search Index with HNSW profile & Semantic Ranker
+# 1. Provision Azure AI Search index with HNSW vector profile and Semantic Ranker
 python scripts/setup_azure_search.py
 
-# 2. Extract and migrate existing PostgreSQL documents & vectors to Azure AI Search
+# 2. Extract and batch-migrate existing PostgreSQL documents & vectors to Azure Search
 python scripts/migrate_pg_to_azure.py
 
 # 3. Run Azure AI Search verification test suite
 python -m pytest tests/test_azure_search.py -v
-
-# 4. Switch live traffic to Azure in .env
-# RETRIEVAL_BACKEND="azure"
 ```
 
-> [!TIP]
-> Comprehensive end-to-end portal navigation steps, OData role filter mechanics, and streaming troubleshooting are documented in the **[Master Architecture Playbook](docs/MASTER_PLAYBOOK.md)**.
+---
+
+### 3. Zero-Trust RBAC: In-Database vs. In-Engine OData Filtering
+
+#### PostgreSQL In-Database RBAC
+```sql
+SELECT d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles, 
+       1 - (c.embedding <=> $1::vector) AS similarity
+FROM document_chunks c
+JOIN documents d ON c.document_id = d.id
+WHERE d.allowed_roles ?| $2::text[]
+ORDER BY c.embedding <=> $1::vector
+LIMIT $3;
+```
+
+#### Azure AI Search OData Collection RBAC
+```python
+role_clauses = " or ".join([f"r eq '{role}'" for role in sanitized_roles])
+role_filter = f"allowed_roles/any(r: {role_clauses})"
+
+results = await client.search(
+    search_text=query_text,
+    vector_queries=[vector_query],
+    filter=role_filter,
+    query_type="semantic",
+    semantic_configuration_name="semantic-config",
+    top=limit,
+)
+```
+
+**Zero-Trust Guarantee**: In both implementations, if a caller presents no verified roles (`user_roles = []`), the query engine short-circuits immediately and returns `[]` without querying disk or network.
+
+---
+
+### 4. Solved Azure Engineering Pitfalls & Root Cause Analysis
+
+1. **Azure OpenAI Streaming `IndexError: list index out of range`**:
+   - **Root Cause**: Azure OpenAI emits trailing metadata/filter chunks with empty `chunk.choices = []`. Unconditional indexing `chunk.choices[0]` threw an uncaught exception.
+   - **Resolution**: Added `if not chunk.choices: continue` guards across all streaming generators in [`app/db/llm.py`](app/db/llm.py).
+2. **FastMCP Server `[WinError 1225]` Connection Refused**:
+   - **Root Cause**: FastMCP tool `search_sdlc_context` was hardcoded to local PostgreSQL (`127.0.0.1:5432`). When transitioning to Azure, local PostgreSQL was offline.
+   - **Resolution**: Integrated the Dual-Backend router in [`app/mcp/gateway.py`](app/mcp/gateway.py) so FastMCP tools route to `azure_hybrid_search` when `RETRIEVAL_BACKEND="azure"`.
+3. **`python-dotenv` Syntax Parsing Warnings**:
+   - **Root Cause**: Trailing comments without whitespace and unquoted multi-line private keys in `.env`.
+   - **Resolution**: Standardized key-value pairs with clean quoting.
 
 ---
 
