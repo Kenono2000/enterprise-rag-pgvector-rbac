@@ -89,6 +89,23 @@ async def migrate_to_gcp(output_jsonl: str = "scripts/gcp_datapoints.jsonl"):
             f.write(json.dumps(dp) + "\n")
     print(f"[OK] Exported {len(gcp_datapoints)} Vertex AI datapoints to {out_path}")
 
+    # Write metadata cache for fast, zero-failure chunk hydration
+    cache_path = PROJECT_ROOT / "app" / "db" / "gcp_chunks_cache.json"
+    cache_data = {
+        str(r["id"]): {
+            "id": str(r["id"]),
+            "document_id": str(r["document_id"]),
+            "title": str(r["title"]),
+            "content": str(r["content"]),
+            "chunk_index": int(r["chunk_index"]) if r["chunk_index"] is not None else 0,
+            "allowed_roles": json.loads(r["allowed_roles"]) if isinstance(r["allowed_roles"], str) else list(r["allowed_roles"]),
+        }
+        for r in records
+    }
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(cache_data, f, indent=2)
+    print(f"[OK] Exported {len(cache_data)} chunk metadata records to {cache_path}")
+
     # If GCP index is reachable via API, upsert datapoints
     config = get_gcp_config()
     target_index_id = os.getenv("GCP_INDEX_ID") or config["index_endpoint_id"]

@@ -13,6 +13,7 @@ import os
 import json
 import logging
 from typing import List, Dict, Any, Optional
+from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 import httpx
 
@@ -238,7 +239,22 @@ async def gcp_hybrid_search(
 
     ids = [str(item.get("id")) for item in raw_results if item.get("id")]
     hydrated_map: Dict[str, Dict[str, Any]] = {}
-    if ids:
+
+    # Check local chunk cache first for zero-latency, thread-safe hydration
+    cache_path = Path(__file__).resolve().parent / "gcp_chunks_cache.json"
+    if cache_path.exists():
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                local_cache = json.load(f)
+                for cid in ids:
+                    if cid in local_cache:
+                        hydrated_map[cid] = local_cache[cid]
+        except Exception as exc:
+            logger.debug("Local chunk cache read deferred: %s", exc)
+
+    # For any remaining IDs not in cache, fallback to PostgreSQL
+    missing_ids = [cid for cid in ids if cid not in hydrated_map]
+    if missing_ids:
         try:
             from app.db.manager import DatabaseManager
             pool = await DatabaseManager.get_pool()
@@ -250,12 +266,12 @@ async def gcp_hybrid_search(
                     JOIN documents d ON c.document_id = d.id
                     WHERE c.id::text = ANY($1::text[])
                     """,
-                    ids,
+                    missing_ids,
                 )
                 for r in records:
                     hydrated_map[str(r["id"])] = dict(r)
         except Exception as exc:
-            logger.debug("Database chunk hydration deferred: %s", exc)
+            logger.warning("Database chunk hydration deferred: %s", exc)
 
     matched_rows: List[Dict[str, Any]] = []
     for item in raw_results:
