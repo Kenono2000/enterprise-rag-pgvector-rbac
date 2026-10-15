@@ -907,13 +907,18 @@ def _render_rag_interface() -> None:
             with st.status("Querying knowledge base...", expanded=True) as status:
                 async def perform_search():
                     backend = os.getenv("RETRIEVAL_BACKEND", "").lower()
+                    emb = await generate_embedding(prompt_input)
                     if backend == "azure":
                         from app.db.azure_search import azure_hybrid_search
-                        emb = await generate_embedding(prompt_input)
                         rows = await azure_hybrid_search(prompt_input, emb, roles, limit=3)
+                    elif backend in ("gcp", "google_cloud", "vertex"):
+                        from app.db.gcp_search import gcp_hybrid_search
+                        rows = await gcp_hybrid_search(prompt_input, emb, roles, limit=3)
+                    elif backend in ("databricks", "databrick"):
+                        from app.db.databricks_search import databricks_hybrid_search
+                        rows = await databricks_hybrid_search(prompt_input, emb, roles, limit=3)
                     else:
                         await DatabaseManager.get_pool()
-                        emb = await generate_embedding(prompt_input)
                         rows = await DatabaseManager.hybrid_search(prompt_input, emb, roles, limit=3)
                         if not rows:
                             rows = await DatabaseManager.secure_search(emb, roles, limit=3)
@@ -950,6 +955,24 @@ def _render_rag_interface() -> None:
                         f"-- Search Text: {json.dumps(prompt_input)}\n"
                         f"-- OData RBAC Filter: allowed_roles/any(r: " + " or ".join([f"r eq '{role}'" for role in roles]) + ")\n"
                         "-- Query Type: semantic (Bing Semantic Ranker 'semantic-config')\n"
+                        "-- Top-K: 3"
+                    )
+                elif backend_current in ("gcp", "google_cloud", "vertex"):
+                    sql_query = (
+                        "-- Google Cloud Vertex AI Vector Search (findNeighbors + Restricts RBAC Filter)\n"
+                        f"-- Project: {os.getenv('GCP_PROJECT_ID', os.getenv('PROJECT_ID', 'gcp-project'))}\n"
+                        f"-- Index Endpoint: {os.getenv('GCP_INDEX_ENDPOINT_ID', 'endpoint-id')}\n"
+                        f"-- Deployed Index: {os.getenv('GCP_DEPLOYED_INDEX_ID', 'enterprise_rag_index')}\n"
+                        f"-- Restricts: namespace='allowed_roles', allowList={roles_repr}\n"
+                        "-- Algorithm: ScaNN / Tree-AH HNSW cosine similarity\n"
+                        "-- Neighbor Count: 3"
+                    )
+                elif backend_current in ("databricks", "databrick"):
+                    sql_query = (
+                        "-- Databricks Mosaic AI Vector Search Query (Direct Vector Access + Unity Catalog RBAC)\n"
+                        f"-- Host: {os.getenv('DATABRICKS_HOST', 'dbc-xxxx.cloud.databricks.com')}\n"
+                        f"-- Index: {os.getenv('DATABRICKS_INDEX_NAME', 'main.enterprise_rag.document_chunks_index')}\n"
+                        f"-- Filters JSON: " + json.dumps({"allowed_roles": roles}) + "\n"
                         "-- Top-K: 3"
                     )
                 else:

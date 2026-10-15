@@ -15,8 +15,10 @@
 8. **`fleet-planner`**: Multi-agent coordination, Lead Orchestrator vs. Worker subagent roles, context isolation, and deterministic contracts.
 9. **`content-brief-and-calendar-generator`**: Search intent analysis, developer persona profiling, and multi-week editorial scheduling.
 10. **`regex-and-cron-utility`**: Dialect validation, ReDoS prevention, regex test matrices, and 5/6-field cron schedule breakdowns.
+11. **`mermaid-diagram-optimizer`**: Compact multi-stage flowchart restructuring, 16:9/4:3 aspect ratio targeting, line wrapping (`<br/>` <= 22 chars), universal quoted syntax, and Dagre rank splay prevention.
 
 ### Behavioral Enforcement
 - Whenever planning or executing engineering tasks, check task scope against relevant skills.
 - When generating or auditing code in this repository, strictly adhere to `code-reviewer` standards and verify RAG retrieval/prompts using `rag-evaluator`.
 - When coordinating multi-step or multi-agent workflows, follow `fleet-planner` patterns.
+- When authoring or refactoring architecture or workflow diagrams, apply `mermaid-diagram-optimizer`.

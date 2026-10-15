@@ -23,11 +23,35 @@ class Settings(BaseSettings):
         description="PostgreSQL connection string with pgvector extension enabled",
     )
 
-    # LLM & Vector Embeddings
-    OPENAI_API_KEY: Optional[str] = Field(
-        default=None,
-        description="OpenAI API key for text-embedding-3-large and gpt-4o",
+    # Multi-Cloud Backend Provider Switcher: 'pgvector', 'azure', 'gcp', 'databricks'
+    RETRIEVAL_BACKEND: str = Field(
+        default="pgvector",
+        description="Active vector retrieval backend: 'pgvector', 'azure', 'gcp', or 'databricks'",
     )
+
+    # Azure AI Configuration
+    AZURE_OPENAI_ENDPOINT: Optional[str] = Field(default=None, description="Azure OpenAI Endpoint")
+    AZURE_OPENAI_API_KEY: Optional[str] = Field(default=None, description="Azure OpenAI API Key")
+    AZURE_OPENAI_API_VERSION: str = Field(default="2024-06-01", description="Azure OpenAI API Version")
+    AZURE_OPENAI_CHAT_DEPLOYMENT: str = Field(default="gpt-4o", description="Azure OpenAI Chat Deployment")
+    AZURE_OPENAI_EMBEDDING_DEPLOYMENT: str = Field(default="text-embedding-3-large", description="Azure OpenAI Embedding Deployment")
+    AZURE_SEARCH_ENDPOINT: Optional[str] = Field(default=None, description="Azure AI Search Endpoint")
+    AZURE_SEARCH_API_KEY: Optional[str] = Field(default=None, description="Azure AI Search API Key")
+    AZURE_SEARCH_INDEX_NAME: str = Field(default="enterprise-documents-index", description="Azure AI Search Index Name")
+
+    # Google Cloud Vertex AI / BigQuery Configuration
+    GCP_PROJECT_ID: Optional[str] = Field(default=None, description="Google Cloud Project ID")
+    GCP_REGION: str = Field(default="us-central1", description="Google Cloud Region for Vertex AI")
+    GCP_INDEX_ENDPOINT_ID: Optional[str] = Field(default=None, description="Vertex AI Vector Search Index Endpoint ID")
+    GCP_DEPLOYED_INDEX_ID: str = Field(default="enterprise_rag_index", description="Vertex AI Deployed Index ID")
+    GCP_VECTOR_STORE: str = Field(default="vertex_ai", description="GCP vector store: 'vertex_ai' or 'bigquery'")
+    GEMINI_API_KEY: Optional[str] = Field(default=None, description="Google Gemini API Key")
+
+    # Databricks Mosaic AI Configuration
+    DATABRICKS_HOST: Optional[str] = Field(default=None, description="Databricks workspace host")
+    DATABRICKS_TOKEN: Optional[str] = Field(default=None, description="Databricks Personal Access Token (PAT)")
+    DATABRICKS_VECTOR_SEARCH_ENDPOINT_NAME: str = Field(default="enterprise_vs_endpoint", description="Databricks Vector Search endpoint name")
+    DATABRICKS_INDEX_NAME: str = Field(default="main.enterprise_rag.document_chunks_index", description="Databricks Unity Catalog 3-level index name")
 
     # Google OAuth 2.0 & RBAC
     REQUIRE_GOOGLE_AUTH: bool = Field(

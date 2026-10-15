@@ -89,9 +89,16 @@ async def search_sdlc_context(
 
     query_vector = await generate_embedding(question)
 
-    if os.getenv("RETRIEVAL_BACKEND", "").lower() == "azure":
+    backend = os.getenv("RETRIEVAL_BACKEND", "").lower()
+    if backend == "azure":
         from app.db.azure_search import azure_hybrid_search
         rows = await azure_hybrid_search(question, query_vector, roles, limit=3)
+    elif backend in ("gcp", "google_cloud", "vertex"):
+        from app.db.gcp_search import gcp_hybrid_search
+        rows = await gcp_hybrid_search(question, query_vector, roles, limit=3)
+    elif backend in ("databricks", "databrick"):
+        from app.db.databricks_search import databricks_hybrid_search
+        rows = await databricks_hybrid_search(question, query_vector, roles, limit=3)
     else:
         rows = await DatabaseManager.secure_search(query_vector, roles)
 

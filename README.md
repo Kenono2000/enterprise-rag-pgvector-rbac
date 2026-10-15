@@ -6,40 +6,41 @@
 
 ---
 
-## 🚀 Live Interactive Artifacts
+## Live Interactive Artifacts
 
 | Component | Description | Access Link |
 | :--- | :--- | :--- |
 | **Interactive UI** | Shift-Left In-Database RBAC & Session Monitor | [enterprise-rag-pgvector-rbac.streamlit.app](https://enterprise-rag-pgvector-rbac.streamlit.app) |
 | **API Docs** | Live OpenAPI / Interactive Swagger UI | [enterprise-rag-api-ksez.onrender.com/docs](https://enterprise-rag-api-ksez.onrender.com/docs) |
 | **Source Code** | Auditable Source Repository & Offline Test Suite | [github.com/Kenono2000/enterprise-rag-pgvector-rbac](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac) |
+| **Master Playbook** | End-to-End Architecture, Operational Runbook & STRIDE Matrix | [`master-playbook.md`](file:///c:/src/enterprise-rag-pgvector-rbac/docs/enterprise-rag-pgvector-rbac-master-playbook.md) |
 
 ---
 
-## 📑 Table of Contents
+## Table of Contents
 
-1. [The Core Value: Why In-Database RBAC?](#-the-core-value-why-in-database-rbac)
-2. [System Architecture](#️-system-architecture)
-3. [Codebase Organization](#-codebase-organization)
-4. [Architectural Deep Dive: The 8 Engineering Layers](#-architectural-deep-dive-the-8-engineering-layers)
-   - [Layer 1: Database & pgvector RBAC (`schema.sql` & `app/db/`)](#layer-1-database--pgvector-rbac-schemasql--appdb)
-   - [Layer 2: Identity, Tokens & Session Security (`app/auth/`)](#layer-2-identity-tokens--session-security-appauth)
-   - [Layer 3: High-Performance Ingestion Pipeline (`scripts/ingest.py` & `libs/utilities.py`)](#layer-3-high-performance-ingestion-pipeline-scriptsingestpy--libsutilitiespy)
+1. [The Core Value: Why In-Database RBAC?](#the-core-value-why-in-database-rbac)
+2. [System Architecture](#system-architecture)
+3. [Codebase Organization](#codebase-organization)
+4. [Architectural Deep Dive: The 8 Engineering Layers](#architectural-deep-dive-the-8-engineering-layers)
+   - [Layer 1: Database & pgvector RBAC (schema.sql & app/db/)](#layer-1-database--pgvector-rbac-schemasql--appdb)
+   - [Layer 2: Identity, Tokens & Session Security (app/auth/)](#layer-2-identity-tokens--session-security-appauth)
+   - [Layer 3: High-Performance Ingestion Pipeline (scripts/ingest.py & libs/utilities.py)](#layer-3-high-performance-ingestion-pipeline-scriptsingestpy--libsutilitiespy)
    - [Layer 4: RAG Quality, Hybrid Search & Grounding Guardrails](#layer-4-rag-quality-hybrid-search--grounding-guardrails)
    - [Layer 5: FastAPI Backend & Streamlit Streaming Frontend](#layer-5-fastapi-backend--streamlit-streaming-frontend)
    - [Layer 6: Observability, Distributed Tracing & Container Hardening](#layer-6-observability-distributed-tracing--container-hardening)
-   - [Layer 7: FastMCP Agent Gateway (`app/mcp/`)](#layer-7-fastmcp-agent-gateway-appmcp)
-   - [Layer 8: Autonomous Self-Healing SDLC Agent (`agent/`)](#layer-8-autonomous-self-healing-sdlc-agent-agent)
-5. [5-Minute Quickstart](#-5-minute-quickstart)
-6. [Testing & Verification Guide (102 Tests: 101 Passed, 1 Skipped)](#-testing--verification-guide-102-tests-101-passed-1-skipped)
-7. [Solved Engineering Pitfalls & Root Cause Analysis](#️-solved-engineering-pitfalls--root-cause-analysis)
-8. [Operational Runbook & Jaeger Persistence Verification](#-operational-runbook--jaeger-persistence-verification)
-9. [Azure AI Migration Playbook & Multi-Cloud Architecture](#-azure-ai-migration-playbook--multi-cloud-architecture)
-10. [Disclaimer & Synthetic Data Security Notice](#-disclaimer--synthetic-data-security-notice)
+   - [Layer 7: FastMCP Agent Gateway (app/mcp/)](#layer-7-fastmcp-agent-gateway-appmcp)
+   - [Layer 8: Autonomous Self-Healing SDLC Agent (agent/)](#layer-8-autonomous-self-healing-sdlc-agent-agent)
+5. [5-Minute Quickstart](#5-minute-quickstart)
+6. [Testing & Verification Guide (110 Tests: 109 Passed, 1 Skipped)](#testing--verification-guide-110-tests-109-passed-1-skipped)
+7. [Solved Engineering Pitfalls & Root Cause Analysis](#solved-engineering-pitfalls--root-cause-analysis)
+8. [Operational Runbook & Jaeger Persistence Verification](#operational-runbook--jaeger-persistence-verification)
+9. [Multi-Cloud Migration Playbook & Architecture (Azure, GCP, Databricks)](#multi-cloud-migration-playbook--architecture-azure-gcp-databricks)
+10. [Disclaimer & Synthetic Data Security Notice](#disclaimer--synthetic-data-security-notice)
 
 ---
 
-## 💡 The Core Value: Why In-Database RBAC?
+## The Core Value: Why In-Database RBAC?
 
 Traditional enterprise RAG architectures filter permissions **after** vector retrieval in application memory. This creates two catastrophic flaws:
 
@@ -60,7 +61,7 @@ Traditional enterprise RAG architectures filter permissions **after** vector ret
 
 ---
 
-## 🏛️ System Architecture
+## System Architecture
 
 ```mermaid
 flowchart TB
@@ -79,15 +80,26 @@ flowchart TB
         api["FastAPI Gateway (:8000)<br/>POST /api/v1/query"]
         mcp_gw["FastMCP Server<br/>Tool: search_sdlc_context"]
         pool["Loop-Aware asyncpg Pool"]
-        local_db[("PostgreSQL 16 + pgvector (:5432)<br/>• GIN: allowed_roles jsonb_path_ops<br/>• HNSW: embedding vector_cosine_ops")]
+        local_db["PostgreSQL 16 + pgvector (:5432)<br/>• GIN: allowed_roles jsonb_path_ops<br/>• HNSW: embedding vector_cosine_ops"]
         openai_api["OpenAI API (Public Endpoint)<br/>• text-embedding-3-large (1536-d)<br/>• gpt-4o Chat Completions"]
         jaeger["Jaeger All-In-One (:16686)<br/>Persistent Badger LSM Storage"]
     end
 
-    subgraph AzureEnv ["☁️ Microsoft Azure Cloud Environment (RETRIEVAL_BACKEND='azure')"]
-        azure_search[("Azure AI Search<br/>• Index: enterprise-documents-index<br/>• OData RBAC: allowed_roles/any(...)<br/>• 3072-d HNSW Vector Search<br/>• Bing Semantic Re-ranker")]
-        azure_oai["Azure OpenAI Service<br/>• Deployment: text-embedding-3-large<br/>• Deployment: gpt-4o"]
-        app_insights["Azure Application Insights<br/>Managed OpenTelemetry Dashboard"]
+    subgraph MultiCloudEnv ["☁️ Multi-Cloud Managed Enterprise Environments"]
+        direction TB
+        subgraph AzureEnv ["Microsoft Azure (RETRIEVAL_BACKEND='azure')"]
+            azure_search["Azure AI Search<br/>• allowed_roles/any(...)<br/>• Bing Semantic Ranker"]
+            azure_oai["Azure OpenAI Service<br/>• text-embedding-3-large<br/>• gpt-4o Deployments"]
+            app_insights["Azure Application Insights<br/>Managed OpenTelemetry Dashboard"]
+        end
+        subgraph GcpEnv ["Google Cloud (RETRIEVAL_BACKEND='gcp')"]
+            gcp_search["Vertex AI Vector Search<br/>• Restricts: allowed_roles<br/>• ScaNN 1536-d Index"]
+            gcp_gemini["Vertex AI / Gemini API<br/>• text-embedding-004<br/>• Gemini 1.5 Pro / Flash"]
+        end
+        subgraph DbxEnv ["Databricks (RETRIEVAL_BACKEND='databricks')"]
+            dbx_search["Mosaic AI Vector Search<br/>• Unity Catalog RBAC<br/>• Delta Lake Direct Index"]
+            dbx_serving["Databricks Model Serving<br/>• bge-large-en<br/>• DBRX / Llama 3.1 70B"]
+        end
     end
 
     subgraph AgentEngine ["🤖 Autonomous SDLC Agent (agent/)"]
@@ -114,39 +126,56 @@ flowchart TB
     api -.->|Generate Vectors / Chat| openai_api
     api -.->|OTel Tracing| jaeger
 
-    %% Azure Env Routing
+    %% Multi-Cloud Routing
     api ==>|RETRIEVAL_BACKEND='azure'| azure_search
     mcp_gw ==>|RETRIEVAL_BACKEND='azure'| azure_search
     azure_search ==>|OData Filtered + Semantic Top-K| api
     api ==>|Private VPC Inference| azure_oai
     api ==>|Azure Monitor Telemetry| app_insights
 
+    api ==>|RETRIEVAL_BACKEND='gcp'| gcp_search
+    mcp_gw ==>|RETRIEVAL_BACKEND='gcp'| gcp_search
+    gcp_search ==>|Restricts Filtered Top-K| api
+    api ==>|Gemini Model APIs| gcp_gemini
+
+    api ==>|RETRIEVAL_BACKEND='databricks'| dbx_search
+    mcp_gw ==>|RETRIEVAL_BACKEND='databricks'| dbx_search
+    dbx_search ==>|UC Filtered Top-K| api
+    api ==>|Serving Endpoint LLM| dbx_serving
+
     %% User Response
     api -->|Grounded Answer + Citations| browser
 
     %% Visual Styling
     style PythonEnv fill:#f0f9ff,stroke:#0284c7,stroke-width:2px,stroke-dasharray: 4 4
-    style AzureEnv fill:#fdf4ff,stroke:#c026d3,stroke-width:2px
+    style MultiCloudEnv fill:#fdf4ff,stroke:#c026d3,stroke-width:2px
+    style AzureEnv fill:#ffffff,stroke:#9333ea,stroke-width:1.5px
+    style GcpEnv fill:#ffffff,stroke:#ea4335,stroke-width:1.5px
+    style DbxEnv fill:#ffffff,stroke:#ff3621,stroke-width:1.5px
     style Security fill:#f0fdf4,stroke:#16a34a,stroke-width:2px
     style Clients fill:#fefce8,stroke:#ca8a04,stroke-width:2px
     style AgentEngine fill:#fffbeb,stroke:#d97706,stroke-width:2px
     style local_db fill:#e0f2fe,stroke:#0369a1,stroke-width:2px
     style azure_search fill:#fae8ff,stroke:#a21caf,stroke-width:2px
+    style gcp_search fill:#fee2e2,stroke:#b91c1c,stroke-width:2px
+    style dbx_search fill:#ffedd5,stroke:#c2410c,stroke-width:2px
 ```
 
 ---
 
-## 📂 Codebase Organization
+## Codebase Organization
 
 ```text
 enterprise-rag-pgvector-rbac/
 ├── app/                        # 🛡️ Zero-Trust RAG Microservice
 │   ├── auth/                   # Identity: PKCE, JWKS verification, session cookies, role mapping
-│   ├── db/                     # Data & AI: asyncpg pooling, pgvector search, Azure AI Search, OpenAI & Azure OpenAI
+│   ├── db/                     # Data & AI: asyncpg pooling, pgvector, Azure AI Search, GCP Vertex AI, Databricks
 │   │   ├── azure_search.py     # Azure AI Search client with OData collection RBAC filtering
-│   │   ├── llm.py              # Dual-model LLM abstraction (Azure OpenAI + standard OpenAI)
+│   │   ├── gcp_search.py       # Google Cloud Vertex AI Vector Search client with RBAC restricts
+│   │   ├── databricks_search.py# Databricks Mosaic AI Vector Search client with Unity Catalog filters
+│   │   ├── llm.py              # Multi-model LLM abstraction (Azure OpenAI, Gemini, Databricks, OpenAI)
 │   │   └── manager.py          # PostgreSQL asyncpg pool manager & hybrid search
-│   ├── mcp.py                  # FastMCP tools & policy resources for external AI agents
+│   ├── mcp/                    # FastMCP tools & policy resources for external AI agents
 │   ├── observability.py        # Observability metrics, Azure Application Insights & OTel tracing
 │   ├── config.py               # Pydantic BaseSettings environment validation
 │   └── main.py                 # FastAPI REST API (/api/v1/query, /healthz, /readyz, /webhooks/github)
@@ -162,11 +191,17 @@ enterprise-rag-pgvector-rbac/
 ├── scripts/                    # ⚙️ Operational & Ingestion Scripts
 │   ├── ingest.py               # Enterprise multi-format batch ingestion with SHA-256 change detection
 │   ├── setup_azure_search.py   # Azure AI Search index provisioning with HNSW & semantic config
-│   └── migrate_pg_to_azure.py  # Batch migration pipeline copying documents & vectors from PG to Azure Search
+│   ├── migrate_pg_to_azure.py  # Batch migration pipeline copying documents & vectors from PG to Azure Search
+│   ├── setup_gcp_vector_search.py # Google Cloud Vertex AI / BigQuery Vector Search setup
+│   ├── migrate_pg_to_gcp.py    # Batch migration pipeline copying documents & vectors from PG to Vertex AI
+│   ├── setup_databricks_vector_search.py # Databricks Unity Catalog & Mosaic AI Vector Search setup
+│   ├── migrate_pg_to_databricks.py # Batch migration pipeline copying documents & vectors to Databricks
+│   └── migrate_multicloud.py   # Unified multi-cloud migration orchestrator (--target azure|gcp|databricks|all)
 │
-├── tests/                      # 🧪 Automated Test Suite (99 Tests: 98 Passed, 1 Skipped)
+├── tests/                      # 🧪 Automated Test Suite (110 Tests: 109 Passed, 1 Skipped)
 │   ├── test_auth.py            # PKCE cryptography, JWKS leeway, session cookie tests
 │   ├── test_azure_search.py    # Azure AI Search hybrid search, OData RBAC filters, dual-backend routing
+│   ├── test_multicloud_search.py # Google Cloud Vertex AI & Databricks Mosaic AI search & routing
 │   ├── test_database_schema.py # Normalized DDL, indexes, cascading deletes, benchmark simulation
 │   ├── test_hybrid_search.py   # RRF math, candidate re-ranking, GroundingGuardrail validation
 │   ├── test_ingest.py          # SHA-256 de-duplication, stem matching, modified file re-indexing
@@ -186,9 +221,9 @@ enterprise-rag-pgvector-rbac/
 
 ---
 
-## 🧱 Architectural Deep Dive: The 8 Engineering Layers
+## Architectural Deep Dive: The 8 Engineering Layers
 
-### Layer 1: Database & pgvector RBAC (`schema.sql` & `app/db/`)
+### Layer 1: Database & pgvector RBAC (schema.sql & app/db/)
 
 #### Normalized Schema & Dual-Index Strategy (`schema.sql`)
 The schema cleanly decouples master document records from vector embeddings using a foreign key with `ON DELETE CASCADE`. This eliminates duplicate metadata storage and simplifies document lifecycle management:
@@ -271,7 +306,7 @@ LIMIT $3;
 
 ---
 
-### Layer 2: Identity, Tokens & Session Security (`app/auth/`)
+### Layer 2: Identity, Tokens & Session Security (app/auth/)
 
 #### 1. RFC 7636 OAuth 2.0 PKCE Flow
 PKCE protects authorization codes from interception in public web and single-page applications:
@@ -317,13 +352,17 @@ To avoid server-side session dependencies during OAuth redirects:
 
 #### 5. Session Expiration & Termination Rules (SOC-2 / HIPAA)
 ```mermaid
-flowchart TD
-    Check[Session Event / Periodic Check] --> Idle{Idle > 15 minutes?}
-    Idle -->|Yes| Terminate[Terminate Session:<br/>Wipe Cookie + Redirect to Login]
-    Idle -->|No| Ceiling{Elapsed > 12 hours?}
+flowchart LR
+    Check["Session Event<br/>(Periodic Check)"] --> Idle{"Inactivity<br/>> 15 min?"}
+    Idle -->|Yes| Terminate["Terminate Session<br/>(Wipe Cookie & Login)"]
+    Idle -->|No| Ceiling{"Total Session<br/>> 12 hours?"}
     Ceiling -->|Yes| Terminate
-    Ceiling -->|No| Refresh[Silent Token Refresh via Google /token]
-    Refresh --> OK[Session Active & Protected]
+    Ceiling -->|No| Refresh["Silent Token Refresh<br/>(via Google /token)"]
+    Refresh --> OK["Session Active<br/>& Protected"]
+
+    style Terminate fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
+    style OK fill:#dcfce7,stroke:#22c55e,stroke-width:1.5px
+    style Check fill:#f3e8ff,stroke:#a855f7,stroke-width:1.5px
 ```
 
 1. **15-Minute Sliding Inactivity Timeout**: DOM event listeners track user activity (`mousedown`, `keydown`, `scroll`, `touchstart`). If 15 minutes elapse without interaction, the cookie is wiped (`max-age=0`) and the user is redirected to the sign-in page with a SOC-2 notice.
@@ -340,25 +379,51 @@ flowchart TD
 
 ---
 
-### Layer 3: High-Performance Ingestion Pipeline (`scripts/ingest.py` & `libs/utilities.py`)
+### Layer 3: High-Performance Ingestion Pipeline (scripts/ingest.py & libs/utilities.py)
 
 The ingestion pipeline transforms raw documents into high-dimensional vector representations stored within the normalized PostgreSQL schema, enforcing change detection, semantic boundary preservation, and fault tolerance:
 
 ```mermaid
-flowchart TD
-    Raw[Raw Documents: PDF, MD, DOCX] --> Hash[compute_file_hash: 64KB Chunk SHA-256]
-    Hash --> Check{Exists in documents table?}
-    Check -->|Same Hash & Exists| Skip[Skip: Unchanged Content]
-    Check -->|Modified Hash or New| Split[split_chunks: Tiktoken-Aware Semantic Chunking]
-    Split --> Meta[Attach Chunk Metadata: page, chunk_index, source, document_id]
-    Meta --> Batch[Batch Texts: 64-128 Chunks/Call]
-    Batch --> Embed[embed_chunks_with_retry: Tenacity Exponential Backoff 429/503]
-    Embed --> Master[Upsert documents Master Record]
-    Master --> Clean[Purge Stale document_chunks for document_id]
-    Clean --> Insert[Batch Insert document_chunks with HNSW Vectors]
+flowchart LR
+    subgraph Stage1 ["1. Intake & Change Detection"]
+        direction TB
+        Raw["Raw Documents<br/>(PDF, MD, DOCX)"]
+        Hash["SHA-256 Hashing<br/>(64KB Blocks)"]
+        Check{"Exists in DB<br/>Same Hash?"}
+        Skip["Skip Content<br/>(Zero Overhead)"]
+        
+        Raw --> Hash --> Check
+        Check -->|Yes| Skip
+    end
 
-    Insert --> Migrate[scripts/migrate_pg_to_azure.py]
-    Migrate --> AzureIndex[("Azure AI Search<br/>enterprise-documents-index<br/>• 3072-d HNSW Vector Profile<br/>• OData allowed_roles Collection")]
+    subgraph Stage2 ["2. Chunking & Embedding"]
+        direction TB
+        Split["Semantic Split<br/>(512-800 Tokens)"]
+        Meta["Attach Metadata<br/>(doc_id, index)"]
+        Embed["Batch Embed<br/>(Tenacity Retry)"]
+        
+        Split --> Meta --> Embed
+    end
+
+    subgraph Stage3 ["3. Dual Persistence"]
+        direction TB
+        Master["Upsert Master &<br/>Purge Stale Chunks"]
+        PG["PostgreSQL 16<br/>(HNSW + GIN)"]
+        Azure["Azure AI Search<br/>(OData RBAC + HNSW)"]
+        
+        Master --> PG
+        Master -.->|Sync| Azure
+    end
+
+    Check -->|Modified / New| Split
+    Embed --> Master
+
+    style Stage1 fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style Stage2 fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style Stage3 fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
+    style Skip fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
+    style PG fill:#e0f2fe,stroke:#0369a1,stroke-width:1.5px
+    style Azure fill:#fae8ff,stroke:#a21caf,stroke-width:1.5px
 ```
 
 #### 1. Cryptographic SHA-256 De-duplication
@@ -444,19 +509,40 @@ Streamlit creates new script runner threads per user interaction. To prevent Pos
 The platform implements full-stack distributed tracing via **OpenTelemetry (OTel)** using the **OTLP gRPC Exporter** (`http://localhost:4317`) streaming spans into a persistent **Jaeger All-In-One** backend.
 
 ```mermaid
-flowchart TD
-    Browser["User Browser / Streamlit Client"] -->|Span: chat_interaction| UI["Streamlit UI (Port 8501)"]
-    UI -->|Span: http_request| API["FastAPI Gateway (Port 8000)"]
-    UI -->|Span: mcp_tool| MCP["FastMCP Server (app/mcp)"]
-    API -->|Span: rag.generate| LLM["LLM Service (OpenAI / Azure OpenAI)"]
+flowchart LR
+    subgraph Sources ["1. Trace Producers"]
+        direction TB
+        Browser["User Browser<br/>(Client Session)"]
+        UI["Streamlit UI<br/>(Port :8501)"]
+        API["FastAPI Gateway<br/>(Port :8000)"]
+        MCP["FastMCP Server<br/>(app/mcp)"]
+        LLM["LLM Service<br/>(OpenAI / Azure)"]
 
-    API --> OTel["OpenTelemetry Tracing Engine (app/observability.py)"]
-    UI --> OTel
-    MCP --> OTel
-    LLM --> OTel
+        Browser -->|chat_interaction| UI
+        UI -->|http_request| API
+        UI -->|mcp_tool| MCP
+        API -->|rag.generate| LLM
+    end
 
-    OTel -->|OTEL_ENABLED=true| Jaeger["Jaeger All-In-One (Badger LSM-Tree Storage)<br/>OTLP gRPC :4317 ➔ Jaeger UI :16686"]
-    OTel -->|APPLICATIONINSIGHTS_CONNECTION_STRING| AppInsights["Azure Application Insights<br/>Managed Azure Monitor Dashboard"]
+    subgraph Core ["2. Telemetry Engine"]
+        OTel["OpenTelemetry SDK<br/>(app/observability.py)<br/>• BatchSpanProcessor<br/>• Standard Semantic Tags"]
+    end
+
+    subgraph Sinks ["3. Tracing Backends"]
+        direction TB
+        Jaeger["Jaeger All-In-One<br/>• OTLP gRPC (:4317)<br/>• Persistent Badger LSM<br/>• Web UI (:16686)"]
+        AppInsights["Azure App Insights<br/>• Managed Azure Monitor<br/>• Cloud Dashboard"]
+    end
+
+    Sources ==>|OTLP Spans| OTel
+    OTel -->|Local Jaeger| Jaeger
+    OTel -->|Azure Monitor| AppInsights
+
+    style Sources fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style Core fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
+    style Sinks fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style Jaeger fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style AppInsights fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
 ```
 
 ##### Telemetry Configuration & Ports
@@ -659,7 +745,7 @@ HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8000/health
 
 ---
 
-### Layer 7: FastMCP Agent Gateway (`app/mcp/`)
+### Layer 7: FastMCP Agent Gateway (app/mcp/)
 
 FastMCP standardizes tool and resource access for external AI coding agents (Claude Desktop, Cursor, CLI agents):
 
@@ -671,26 +757,61 @@ FastMCP standardizes tool and resource access for external AI coding agents (Cla
 
 ---
 
-### Layer 8: Autonomous Self-Healing SDLC Agent (`agent/`)
+### Layer 8: Autonomous Self-Healing SDLC Agent (agent/)
 
 The autonomous agent listens to GitHub issue webhooks, writes code patches, audits them statically, runs tests, and autonomously repairs bugs:
 
 ```mermaid
-stateDiagram-v2
-    [*] --> initialize
-    initialize --> propose_patches
-    propose_patches --> apply_patches
-    apply_patches --> audit_patches
-    
-    audit_patches --> run_tests : Security Gate PASSED
-    audit_patches --> [*] : Security Gate FAILED (Policy Violation)
-    
-    run_tests --> finalize : Tests PASSED (Clean Commit & PR)
-    run_tests --> repair_patches : Tests FAILED (Attempts < Max)
-    run_tests --> [*] : Max Attempts Reached
-    
-    repair_patches --> apply_patches
-    finalize --> [*]
+flowchart LR
+    subgraph Intake ["1. Webhook & Init"]
+        direction TB
+        Hook["GitHub Issue Webhook<br/>(HMAC-SHA256 Verified)"]
+        Init["Initialize State<br/>& Checkout Branch"]
+        Hook --> Init
+    end
+
+    subgraph Gen ["2. Patch Synthesis"]
+        direction TB
+        Propose["Propose Patch<br/>(Targeted LLM Prompt)"]
+        Apply["Apply to Sandbox<br/>(Path Traversal Guard)"]
+        Propose --> Apply
+    end
+
+    subgraph Audit ["3. Security Gate"]
+        direction TB
+        Inspect["AST & Secret Audit<br/>(eval, exec & key checks)"]
+        Reject["Policy Violation<br/>(Execution Blocked)"]
+        Inspect -->|Failed| Reject
+    end
+
+    subgraph Verify ["4. Test & Self-Healing"]
+        direction TB
+        Test{"Run Pytest<br/>Offline Suite"}
+        Repair["Repair Patch<br/>(Traceback Injected)"]
+        Escalate["Max Retries (3)<br/>(Escalate to Human)"]
+
+        Test -->|Failed: Retries < 3| Repair
+        Test -->|Failed: Retries >= 3| Escalate
+    end
+
+    subgraph Done ["5. PR Delivery"]
+        PR["Clean Git Commit<br/>& Open Pull Request"]
+    end
+
+    Init --> Propose
+    Apply --> Inspect
+    Inspect -->|Passed| Test
+    Repair --> Apply
+    Test -->|Tests Passed| PR
+
+    style Intake fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style Gen fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style Audit fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style Verify fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
+    style Done fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
+    style Reject fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
+    style Escalate fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
+    style PR fill:#dcfce7,stroke:#22c55e,stroke-width:1.5px
 ```
 
 #### LangGraph Workflow Nodes (`agent/workflow.py`)
@@ -708,7 +829,7 @@ stateDiagram-v2
 
 ---
 
-## ⚡ 5-Minute Quickstart
+## 5-Minute Quickstart
 
 ### 1. Environment Setup
 ```powershell
@@ -753,22 +874,23 @@ python -m app.mcp
 
 ---
 
-## 🧪 Testing & Verification Guide (102 Tests: 101 Passed, 1 Skipped)
+## Testing & Verification Guide (110 Tests: 109 Passed, 1 Skipped)
 
 ```text
-tests/test_agent.py                     ......                                           [  6%]
-tests/test_auth.py                      ..................................               [ 39%]
-tests/test_azure_search.py              ...                                              [ 42%]
-tests/test_database_schema.py           ......                                           [ 48%]
-tests/test_hybrid_search.py             ......                                           [ 54%]
-tests/test_ingest.py                    .........                                        [ 63%]
-tests/test_integration_pgvector.py      s.                                               [ 65%]
-tests/test_mcp_auth.py                  ..........                                       [ 75%]
-tests/test_observability_and_health.py  ........                                         [ 82%]
-tests/test_rag.py                       ....                                             [ 86%]
+tests/test_agent.py                     ......                                           [  5%]
+tests/test_auth.py                      ..................................               [ 36%]
+tests/test_azure_search.py              ...                                              [ 39%]
+tests/test_database_schema.py           ......                                           [ 44%]
+tests/test_hybrid_search.py             ......                                           [ 50%]
+tests/test_ingest.py                    .........                                        [ 58%]
+tests/test_integration_pgvector.py      s.                                               [ 60%]
+tests/test_mcp_auth.py                  ..........                                       [ 69%]
+tests/test_multicloud_search.py         ........                                         [ 76%]
+tests/test_observability_and_health.py  ........                                         [ 83%]
+tests/test_rag.py                       ....                                             [ 87%]
 tests/test_security_rbac.py             .....                                            [ 91%]
 tests/test_utilities.py                 .......                                          [100%]
-================== 101 passed, 1 skipped, 2 warnings in 22.61s ===================
+================== 109 passed, 1 skipped, 2 warnings in 41.82s ===================
 ```
 
 ### Test Suite Breakdown
@@ -776,6 +898,7 @@ tests/test_utilities.py                 .......                                 
 | Module | Tests | Key Invariants Verified |
 | :--- | :---: | :--- |
 | **`tests/test_azure_search.py`** | 3 | • Zero-Trust short circuiting when `user_roles` is empty.<br/>• OData collection RBAC filter (`allowed_roles/any(...)`) syntax.<br/>• Dynamic routing to Azure AI Search when `RETRIEVAL_BACKEND="azure"`. |
+| **`tests/test_multicloud_search.py`** | 8 | • Google Cloud Vertex AI Vector Search Restricts pre-filtering (`allowed_roles`).<br/>• Databricks Mosaic AI Vector Search Unity Catalog filters (`filters_json`).<br/>• Dynamic runtime dispatch in `app/main.py` and `app/mcp/gateway.py`.<br/>• Zero-Trust empty role immediate return invariant. |
 | **`tests/test_hybrid_search.py`** | 6 | • Reciprocal Rank Fusion (RRF) math validation.<br/>• Zero-Trust empty role short-circuiting.<br/>• Heuristic & cross-encoder candidate re-ranking.<br/>• GroundingGuardrail citation and missing context admission checks. |
 | **`tests/test_observability_and_health.py`** | 7 | • Liveness (`/healthz`) and readiness (`/readyz`) probes.<br/>• Telemetry endpoint (`/api/v1/metrics/observability`).<br/>• 503 DB failure handling.<br/>• Pydantic `BaseSettings` validation.<br/>• `ObservabilityTracer` metric recording.<br/>• Token streaming sync and async generators. |
 | **`tests/test_integration_pgvector.py`** | 2 | • Testcontainers `pgvector/pgvector:pg16` end-to-end integration harness.<br/>• Verification of schema.sql DDL, HNSW index, and GIN full-text search. |
@@ -787,11 +910,11 @@ tests/test_utilities.py                 .......                                 
 | **`tests/test_agent.py`** | 6 | • GitHub webhook HMAC-SHA256 verification.<br/>• Webhook JSON parsing into typed models.<br/>• Deterministic secret scanning (API keys, private keys).<br/>• AST static inspection (`eval`, `exec`, `__import__`).<br/>• Sandbox path traversal prevention.<br/>• Full LangGraph self-healing test repair cycle. |
 | **`tests/test_ingest.py`** | 9 | • Pre-ingestion SHA-256 de-duplication, modified file re-indexing detection, force flag bypass, stem matching, chunk prefix detection. |
 | **`tests/test_utilities.py`** | 7 | • Multi-format loaders (`.pdf`, `.md`, `.docx`), tokenizer-aware chunk splitting, chunk metadata attribution, 64KB block hashing, and tenacity retry on 429 rate limits. |
-| **Total** | **102** | **101 Passed, 1 Skipped** |
+| **Total** | **110** | **109 Passed, 1 Skipped** |
 
 ---
 
-## 🛠️ Solved Engineering Pitfalls & Root Cause Analysis
+## Solved Engineering Pitfalls & Root Cause Analysis
 
 | Symptom / Error | Root Cause | Permanent Engineering Solution |
 | :--- | :--- | :--- |
@@ -878,7 +1001,7 @@ Always cite your sources using the format [Document Name, Page/Section].
 
 ---
 
-## 📋 Operational Runbook & Jaeger Persistence Verification
+## Operational Runbook & Jaeger Persistence Verification
 
 ### 8.1. Running the Automated Test Suite
 Run unit and integration tests covering RBAC, document chunking, embeddings, vector retrieval, and tracing hooks:
@@ -926,73 +1049,80 @@ jaeger               jaegertracing/all-in-one      Up             0.0.0.0:4317-4
 
 ---
 
-## ☁️ Azure AI Migration Playbook & Multi-Cloud Architecture
+## Multi-Cloud Migration Playbook & Architecture (Azure, GCP, Databricks)
 
-For organizations deploying across Microsoft Azure, the platform includes a **Dual-Mode Backend** allowing runtime switching between PostgreSQL (`pgvector`) and **Azure AI Search** + **Azure OpenAI Service**.
+For organizations deploying across hybrid and multi-cloud environments, the platform includes a **Quad-Mode Multi-Cloud Backend** allowing runtime switching between:
+- **PostgreSQL (`pgvector`)**: Local / On-prem / Cloud SQL / Aurora
+- **Microsoft Azure AI**: Azure AI Search + Azure OpenAI Service ([`docs/Azure-RAG-Migration.md`](file:///c:/src/enterprise-rag-pgvector-rbac/docs/Azure-RAG-Migration.md))
+- **Google Cloud Platform**: Vertex AI Vector Search (ScaNN) + Gemini API ([`docs/MultiCloud-GCP-Databricks-Migration.md`](file:///c:/src/enterprise-rag-pgvector-rbac/docs/MultiCloud-GCP-Databricks-Migration.md))
+- **Databricks Lakehouse**: Mosaic AI Vector Search + Unity Catalog Delta Lake ([`docs/MultiCloud-GCP-Databricks-Migration.md`](file:///c:/src/enterprise-rag-pgvector-rbac/docs/MultiCloud-GCP-Databricks-Migration.md))
 
-### 1. Architectural Component Mapping
+### 1. Architectural Component Mapping Across Clouds
 
-| Function | Open Source / Local | Microsoft Azure AI | Operational Benefit |
-| :--- | :--- | :--- | :--- |
-| **Vector Storage & Distance** | PostgreSQL 16 + `pgvector` (HNSW cosine ops) | **Azure AI Search** (HNSW Vector Profile, 3072-d) | Managed scaling, SLA-backed, zero database maintenance. |
-| **Lexical Keyword Search** | PostgreSQL Full-Text Search (`tsvector`, `ts_rank`) | **Azure AI Search BM25** Engine | Native inverted index optimized for document collections. |
-| **Re-Ranking Engine** | Reciprocal Rank Fusion (RRF) + Heuristic / Cross-Encoder | **Bing Semantic Ranker** (`semantic-config`) | Deep transformer-based multi-lingual re-ranking. |
-| **Access Control (RBAC)** | SQL Parameterized GIN filter: `WHERE allowed_roles ?| $user_roles` | **OData Collection Filter**: `allowed_roles/any(r: r eq '...')` | Zero memory leaks: unauthorized items pruned inside search engine. |
-| **Embedding Generation** | OpenAI API `text-embedding-3-large` (1536-d) | **Azure OpenAI** `text-embedding-3-large` (3072-d) | Private VPC connectivity, no customer data used for AI training. |
-| **Chat Generation (LLM)** | OpenAI API `gpt-4o` | **Azure OpenAI** `gpt-4o` (Deployments) | Private tenant hosting, enterprise compliance (SOC2/HIPAA). |
-| **Distributed Tracing** | Jaeger All-In-One (Persistent Badger LSM-tree) | **Azure Application Insights** (Azure Monitor OTel) | Serverless telemetry dashboard with zero storage management. |
+| Function | PostgreSQL (`pgvector`) | Microsoft Azure AI (`azure`) | Google Cloud (`gcp`) | Databricks (`databricks`) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Vector Engine** | PostgreSQL 16 + `pgvector` (HNSW) | **Azure AI Search** (HNSW 3072-d) | **Vertex AI Vector Search** (ScaNN 1536-d) | **Mosaic AI Vector Search** (Delta Sync) |
+| **Lexical Engine** | Full-Text Search (`tsvector`) | **Azure AI Search BM25** Engine | **BigQuery Text Search** / BM25 | **Databricks Full-Text Search** |
+| **Re-Ranking** | Reciprocal Rank Fusion (RRF $k=60$) | **Bing Semantic Ranker** | **Vertex AI Ranking API** | **Mosaic AI Cross-Encoder Ranker** |
+| **Access Control (RBAC)**| SQL GIN: `WHERE allowed_roles ?| $roles`| **OData Filter**: `allowed_roles/any(...)`| **Vertex Restricts**: `allowed_roles` | **filters_json**: `allowed_roles` (Unity Catalog) |
+| **Embedding Generation** | OpenAI `text-embedding-3-large` | **Azure OpenAI** `text-embedding-3-large` | **Vertex AI / Gemini** `text-embedding-004` | **Databricks Serving** `bge-large-en` |
+| **Chat Generation (LLM)** | OpenAI `gpt-4o` | **Azure OpenAI** `gpt-4o` Deployments | **Gemini 1.5 Pro / Flash** | **Databricks DBRX / Llama 3.1 70B** |
+| **Distributed Tracing** | Jaeger All-In-One (Badger LSM) | **Azure Application Insights** | **Google Cloud Trace & Logging** | **Databricks MLflow System Tables** |
 
 ---
 
-### 2. Zero-to-One Step-by-Step Setup Guide
+### 2. Multi-Cloud Environment Configuration (`.env`)
 
-#### Phase 1: Azure Portal Resource Provisioning
-1. **Resource Group**:
-   - Create Resource Group `rg-enterprise-rag-dev` in a region with high model availability (e.g. `East US 2` or `Sweden Central`).
-2. **Azure OpenAI Service**:
-   - Create resource `oai-enterprise-rag` (Pricing tier: **Standard S0**).
-   - Under **Keys and Endpoint**, copy **Endpoint** and **Key 1**.
-   - Open **Azure AI Foundry / OpenAI Studio** ➔ **Deployments**:
-     - Deploy base model **`text-embedding-3-large`** (Deployment name: `text-embedding-3-large`).
-     - Deploy base model **`gpt-4o`** (Deployment name: `gpt-4o`).
-3. **Azure AI Search**:
-   - Create resource `search-enterprise-rag` (Pricing tier: **Standard** for Semantic Ranker support).
-   - Under **Keys**, copy **URL** and **Primary admin key**.
-   - Under **Semantic ranker**, select the **Free** (or Standard) plan.
-4. **Application Insights**:
-   - Create resource `appi-enterprise-rag` and copy the **Connection String** (`InstrumentationKey=...`).
-
-#### Phase 2: Dual-Mode Environment Configuration (`.env`)
 ```ini
-# Switch between 'pgvector' (default) and 'azure'
-RETRIEVAL_BACKEND="azure"
+# ==============================================================================
+# Multi-Cloud Switcher: 'pgvector', 'azure', 'gcp', 'databricks'
+# ==============================================================================
+RETRIEVAL_BACKEND="azure"         # or "gcp", "databricks", "pgvector"
 
-# Azure OpenAI Service
+# --- [Azure AI Search & Azure OpenAI] ---
 AZURE_OPENAI_ENDPOINT="https://oai-enterprise-rag.openai.azure.com/"
-AZURE_OPENAI_API_KEY="<your-azure-openai-key-1>"
-AZURE_OPENAI_API_VERSION="2024-06-01"
+AZURE_OPENAI_API_KEY="<your-azure-openai-key>"
 AZURE_OPENAI_CHAT_DEPLOYMENT="gpt-4o"
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT="text-embedding-3-large"
-
-# Azure AI Search Service
 AZURE_SEARCH_ENDPOINT="https://search-enterprise-rag.search.windows.net"
-AZURE_SEARCH_API_KEY="<your-azure-search-primary-admin-key>"
+AZURE_SEARCH_API_KEY="<your-azure-search-key>"
 AZURE_SEARCH_INDEX_NAME="enterprise-documents-index"
 
-# Azure Application Insights Telemetry
-APPLICATIONINSIGHTS_CONNECTION_STRING="InstrumentationKey=...;IngestionEndpoint=..."
+# --- [Google Cloud Vertex AI Vector Search] ---
+GCP_PROJECT_ID="your-gcp-project-id"
+GCP_REGION="us-central1"
+GCP_INDEX_ENDPOINT_ID="1234567890123456789"
+GCP_DEPLOYED_INDEX_ID="enterprise_rag_index"
+GCP_VECTOR_STORE="vertex_ai"
+
+# --- [Databricks Mosaic AI Vector Search] ---
+DATABRICKS_HOST="dbc-xxxx.cloud.databricks.com"
+DATABRICKS_TOKEN="dapi_xxxxxxxxxxxxxxxx"
+DATABRICKS_VECTOR_SEARCH_ENDPOINT_NAME="enterprise_vs_endpoint"
+DATABRICKS_INDEX_NAME="main.enterprise_rag.document_chunks_index"
 ```
 
-#### Phase 3: Automated Migration & Ingestion Execution
+---
+
+### 3. Automated Migration & Unified Execution
+
 ```powershell
-# 1. Provision Azure AI Search index with HNSW vector profile and Semantic Ranker
-python scripts/setup_azure_search.py
+# 1. Provision target cloud indexes
+python scripts/setup_azure_search.py               # Azure AI Search index
+python scripts/setup_gcp_vector_search.py          # Google Cloud Vertex AI / BigQuery
+python scripts/setup_databricks_vector_search.py   # Databricks Unity Catalog index
 
-# 2. Extract and batch-migrate existing PostgreSQL documents & vectors to Azure Search
-python scripts/migrate_pg_to_azure.py
+# 2. Execute Batch Data Migration from PostgreSQL
+python scripts/migrate_pg_to_azure.py              # Extract & upload to Azure
+python scripts/migrate_pg_to_gcp.py                # Extract & upload to Google Cloud
+python scripts/migrate_pg_to_databricks.py         # Extract & upload to Databricks
 
-# 3. Run Azure AI Search verification test suite
+# 3. Or Run Unified Multi-Cloud Orchestrator
+python scripts/migrate_multicloud.py --target all  # Migrates to all clouds
+
+# 4. Run automated test suites
 python -m pytest tests/test_azure_search.py -v
+python -m pytest tests/test_multicloud_search.py -v
 ```
 
 ---
@@ -1043,7 +1173,7 @@ results = await client.search(
 
 ---
 
-## ⚠️ Disclaimer & Synthetic Data Security Notice
+## Disclaimer & Synthetic Data Security Notice
 
 > [!CAUTION]
 > **Data Security & Synthetic Assets**:

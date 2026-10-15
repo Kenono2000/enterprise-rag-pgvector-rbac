@@ -17,6 +17,7 @@ import time
 import logging
 from typing import List, Optional
 from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, MagicMock
 
 from fastapi import FastAPI, Depends, Header, HTTPException, Security, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -232,12 +233,18 @@ async def query_rag(
     t_start = time.perf_counter()
     query_vector = await generate_embedding(request.question)
 
-    from unittest.mock import AsyncMock, MagicMock
+    backend = os.getenv("RETRIEVAL_BACKEND", "pgvector").lower()
     if isinstance(DatabaseManager.secure_search, (AsyncMock, MagicMock)) and not isinstance(DatabaseManager.hybrid_search, (AsyncMock, MagicMock)):
         rows = await DatabaseManager.secure_search(query_vector, user.roles)
-    elif os.getenv("RETRIEVAL_BACKEND", "").lower() == "azure":
+    elif backend == "azure":
         from app.db.azure_search import azure_hybrid_search
         rows = await azure_hybrid_search(request.question, query_vector, user.roles, limit=3)
+    elif backend in ("gcp", "google_cloud", "vertex"):
+        from app.db.gcp_search import gcp_hybrid_search
+        rows = await gcp_hybrid_search(request.question, query_vector, user.roles, limit=3)
+    elif backend in ("databricks", "databrick"):
+        from app.db.databricks_search import databricks_hybrid_search
+        rows = await databricks_hybrid_search(request.question, query_vector, user.roles, limit=3)
     elif request.mode == "dense":
         rows = await DatabaseManager.secure_search(query_vector, user.roles)
     else:

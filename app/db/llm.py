@@ -21,6 +21,21 @@ def is_azure_backend() -> bool:
     return (backend == "azure" or bool(azure_openai_endpoint)) and bool(azure_openai_endpoint and azure_openai_api_key)
 
 
+def is_databricks_backend() -> bool:
+    """Return True if Databricks Model Serving should be used."""
+    backend = os.getenv("RETRIEVAL_BACKEND", "").lower()
+    host = os.getenv("DATABRICKS_HOST")
+    token = os.getenv("DATABRICKS_TOKEN")
+    return backend in ("databricks", "databrick") and bool(host and token)
+
+
+def is_gcp_backend() -> bool:
+    """Return True if GCP / Gemini endpoint should be used."""
+    backend = os.getenv("RETRIEVAL_BACKEND", "").lower()
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GCP_API_KEY")
+    return backend in ("gcp", "google_cloud", "vertex") and bool(api_key)
+
+
 def get_openai_client() -> AsyncOpenAI | AsyncAzureOpenAI | None:
     """Return an AsyncOpenAI or AsyncAzureOpenAI client scoped to the currently running event loop."""
     if is_azure_backend():
@@ -46,6 +61,19 @@ def get_openai_client() -> AsyncOpenAI | AsyncAzureOpenAI | None:
             api_version=azure_openai_api_version,
         )
 
+    if is_databricks_backend():
+        host = os.getenv("DATABRICKS_HOST", "").rstrip("/")
+        if not host.startswith("http"):
+            host = f"https://{host}"
+        base_url = f"{host}/serving-endpoints"
+        token = os.getenv("DATABRICKS_TOKEN", "")
+        return AsyncOpenAI(base_url=base_url, api_key=token)
+
+    if is_gcp_backend():
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GCP_API_KEY", "")
+        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        return AsyncOpenAI(base_url=base_url, api_key=api_key)
+
     if not openai_api_key:
         return None
 
@@ -67,12 +95,20 @@ def get_openai_client() -> AsyncOpenAI | AsyncAzureOpenAI | None:
 def _get_embedding_model_or_deployment() -> str:
     if is_azure_backend():
         return os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
+    if is_databricks_backend():
+        return os.getenv("DATABRICKS_EMBEDDING_ENDPOINT", "databricks-bge-large-en")
+    if is_gcp_backend():
+        return os.getenv("GCP_EMBEDDING_MODEL", "text-embedding-004")
     return "text-embedding-3-large"
 
 
 def _get_chat_model_or_deployment(default_model: str = "gpt-4o") -> str:
     if is_azure_backend():
         return os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT", default_model)
+    if is_databricks_backend():
+        return os.getenv("DATABRICKS_CHAT_ENDPOINT", "databricks-meta-llama-3-1-70b-instruct")
+    if is_gcp_backend():
+        return os.getenv("GCP_CHAT_MODEL", "gemini-1.5-pro")
     return default_model
 
 
