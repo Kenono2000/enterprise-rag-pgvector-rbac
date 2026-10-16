@@ -12,8 +12,8 @@ This consolidated playbook outlines the end-to-end plan, architectural mapping, 
 | **Lexical Engine** | PostgreSQL Full-Text (`tsvector`) | **Azure AI Search BM25** Engine | **BigQuery Text Search** / BM25 | **Databricks Full-Text Search** |
 | **Re-Ranking** | Reciprocal Rank Fusion (RRF) | **Bing Semantic Ranker** | **Vertex AI Search Ranking API** | **Mosaic AI Cross-Encoder Ranker** |
 | **Zero-Trust RBAC** | SQL `d.allowed_roles ?| $roles` | OData `allowed_roles/any(...)` | **Vertex Restricts** (`allowed_roles`) | **filters_json** (`allowed_roles`) + Unity Catalog |
-| **Embeddings** | Public OpenAI `text-embedding-3-large` | Azure OpenAI `text-embedding-3-large` | **Vertex AI / Gemini** `text-embedding-004` | **Databricks Serving** `bge-large-en` |
-| **Chat LLM** | Public OpenAI `gpt-4o` | Azure OpenAI `gpt-4o` | **Gemini 1.5 Pro / Flash** | **Databricks DBRX / Llama 3.1 70B** |
+| **Embeddings** | Public OpenAI `text-embedding-3-large` | Azure OpenAI `text-embedding-3-large` | **OpenAI / Azure** `text-embedding-3-large` (1536-d) | **Databricks Serving** `bge-large-en` |
+| **Chat LLM** | Public OpenAI `gpt-4o` | Azure OpenAI `gpt-4o` | **Gemini 2.5 Flash / Pro** or **GPT-4o** | **Databricks DBRX / Llama 3.1 70B** |
 | **Observability** | Jaeger All-In-One (Badger LSM) | Azure Application Insights | **Google Cloud Trace / Cloud Logging** | **Databricks MLflow System Tables** |
 
 ---
@@ -33,7 +33,7 @@ flowchart TD
     end
 
     subgraph S3 ["3. Routing & Cutover"]
-        ENV["Phase 4:<br/>Switch RETRIEVAL_BACKEND<br/>(gcp / databricks)"]
+        ENV["Phase 4:<br/>Switch Backend<br/>(gcp / databricks)"]
         TEST["Phase 5:<br/>Automated Testing<br/>(pytest & Invariants)"]
     end
 
@@ -53,15 +53,31 @@ flowchart TD
 
 1. **Create Index & Endpoint**:
    - In Google Cloud Console, navigate to **Vertex AI** → **Vector Search**.
-   - Create an index with **1536 dimensions**, metric **COSINE**, and algorithm **Tree-AH (ScaNN)**.
-   - Deploy the index to an **Index Endpoint** (enable public or private endpoint).
+   - Create an index with **1536 dimensions**, metric **COSINE**, and algorithm **Tree-AH (ScaNN)** with `STREAM_UPDATE`.
+   - Deploy the index to an **Index Endpoint** with public endpoint enabled.
    - Configure restricts namespace: `allowed_roles` for Zero-Trust filtering.
-2. **Declarative Provisioning**:
-   ```powershell
-   python scripts/setup_gcp_vector_search.py --mode vertex
-   # Or for BigQuery Vector Search:
-   python scripts/setup_gcp_vector_search.py --mode bigquery
+2. **Production Provisioning Details**:
+   - **GCP Project**: `gen-lang-client-0795078481` (Project Number `226714713434`, Region `us-central1`).
+   - **Vector Index ID**: `4259655380562345984` (`enterprise-rag-index`).
+   - **Index Endpoint ID**: `7285634525504208896` (`enterprise-rag-endpoint`).
+   - **Deployed Index ID**: `enterprise_rag_index`.
+   - **Public Data-Plane Domain**: `1876216656.us-central1-226714713434.vdb.vertexai.goog`.
+3. **Deploying Index to Endpoint CLI**:
+   ```bash
+   gcloud ai index-endpoints deploy-index 7285634525504208896 \
+       --deployed-index-id="enterprise_rag_index" \
+       --display-name="enterprise_rag_index" \
+       --index="4259655380562345984" \
+       --project="gen-lang-client-0795078481" \
+       --region="us-central1"
    ```
+   > [!NOTE]
+   > Index deployment on Vertex AI allocates dedicated serving nodes and typically takes **10–15 minutes** to propagate and bind public DNS.
+
+4. **Critical REST API Findings & Architectural Guardrails**:
+   - **Restricts Schema**: The REST API requires `"allowList"` (not `"allow"`) inside each restrict object under namespace `allowed_roles`.
+   - **IndexDatapoint Schema**: `IndexDatapoint` only accepts `datapointId`, `featureVector`, `restricts`, and `crowdingTag`. Arbitrary text or metadata fields are rejected with `HTTP 400 Bad Request`.
+   - **Data-Plane vs. Control-Plane**: The `:findNeighbors` query endpoint **must** be invoked against the public data-plane domain (`*.vdb.vertexai.goog`). Calling `:findNeighbors` on the regional control-plane (`*-aiplatform.googleapis.com`) results in `HTTP 501 UNIMPLEMENTED`.
 
 ### 1.2 Databricks (Mosaic AI Vector Search)
 
@@ -92,11 +108,14 @@ RETRIEVAL_BACKEND="gcp"         # or "databricks", "azure", "pgvector"
 # ==============================================================================
 # Google Cloud Vertex AI Vector Search
 # ==============================================================================
-GCP_PROJECT_ID="your-gcp-project-id"
+GCP_PROJECT_ID="gen-lang-client-0795078481"
 GCP_REGION="us-central1"
-GCP_INDEX_ENDPOINT_ID="1234567890123456789"
+GCP_INDEX_ENDPOINT_ID="7285634525504208896"
+GCP_INDEX_ID="4259655380562345984"
 GCP_DEPLOYED_INDEX_ID="enterprise_rag_index"
+GCP_INDEX_ENDPOINT_DOMAIN="1876216656.us-central1-226714713434.vdb.vertexai.goog"
 GCP_VECTOR_STORE="vertex_ai"
+GEMINI_API_KEY="AQ.Ab8RN6..."
 
 # ==============================================================================
 # Databricks Mosaic AI Vector Search
@@ -109,12 +128,12 @@ DATABRICKS_INDEX_NAME="main.enterprise_rag.document_chunks_index"
 
 ---
 
-## Phase 3: Data Migration Pipelines
+## Phase 3: Data Migration & Two-Tier Hydration
 
 Run the specialized migration scripts or the unified migration orchestrator:
 
 ```powershell
-# Option A: Migrate to Google Cloud Vertex AI
+# Option A: Migrate to Google Cloud Vertex AI (Upserts 69 vectors + builds local metadata cache)
 python scripts/migrate_pg_to_gcp.py
 
 # Option B: Migrate to Databricks Mosaic AI
@@ -123,6 +142,11 @@ python scripts/migrate_pg_to_databricks.py
 # Option C: Unified multi-cloud execution across all platforms
 python scripts/migrate_multicloud.py --target all
 ```
+
+### Two-Tier Chunk Hydration Architecture
+Because Vertex AI datapoints only store embeddings and namespace restricts:
+1. **Tier 1 (Instant Local Cache)**: [`scripts/migrate_pg_to_gcp.py`](file:///c:/src/enterprise-rag-pgvector-rbac/scripts/migrate_pg_to_gcp.py) exports [`app/db/gcp_chunks_cache.json`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/gcp_chunks_cache.json), indexing all chunk UUIDs to full content, titles, and indices. [`app/db/gcp_search.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/gcp_search.py) hydrates nearest neighbors from this cache in **< 1ms**.
+2. **Tier 2 (Database Fallback)**: For any new chunks not yet cached, [`app/db/gcp_search.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/gcp_search.py) queries PostgreSQL (`WHERE c.id::text = ANY($1::text[])`) using `DatabaseManager.get_pool()`.
 
 ---
 
@@ -168,5 +192,9 @@ python -m pytest tests/test_multicloud_search.py -v
 
 # 2. Run full platform regression test suite
 python -m pytest -q
-# Target: 100% green passing across all suites
+# Target: 100% green passing across all 110 tests (109 passed, 1 skipped)
+
+# 3. Test interactive query in Streamlit
+# Question: "what can ai do for me?" or "is AI useful to human being?"
+# Expected: Returns 3 chunks from "AI Agents 2026_Mindstream-1.pdf" with synthesis and citations
 ```

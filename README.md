@@ -1092,7 +1092,9 @@ AZURE_SEARCH_INDEX_NAME="enterprise-documents-index"
 GCP_PROJECT_ID="your-gcp-project-id"
 GCP_REGION="us-central1"
 GCP_INDEX_ENDPOINT_ID="1234567890123456789"
+GCP_INDEX_ID="4259655380562345984"
 GCP_DEPLOYED_INDEX_ID="enterprise_rag_index"
+GCP_INDEX_ENDPOINT_DOMAIN="<endpoint-hash>.us-central1-<project-num>.vdb.vertexai.goog"
 GCP_VECTOR_STORE="vertex_ai"
 
 # --- [Databricks Mosaic AI Vector Search] ---
