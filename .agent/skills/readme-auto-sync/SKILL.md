@@ -44,6 +44,7 @@ Whenever you modify code in this repository, perform this post-change synchroniz
 - **Quickstart & Setup**: Add any new environment variables or startup flags.
 
 ### 4. Quality & Formatting Rules
+- **Single-Source Documentation Policy**: All markdown documentation (architecture, playbooks, runbooks, threat models, and cloud migration guides) MUST live exclusively in [`README.md`](file:///C:/src/enterprise-rag-pgvector-rbac/README.md). Do not create standalone `.md` files in `docs/` or elsewhere.
 - Preserve existing markdown formatting, badge styles, and visual theme.
 - Keep the tone professional, structured, and consistent with the rest of the documentation.
 - Verify that all relative markdown links and anchors remain valid.

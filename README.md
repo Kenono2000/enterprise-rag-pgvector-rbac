@@ -13,15 +13,15 @@
 | **Interactive UI** | Shift-Left In-Database RBAC & Session Monitor | [enterprise-rag-pgvector-rbac.streamlit.app](https://enterprise-rag-pgvector-rbac.streamlit.app) |
 | **API Docs** | Live OpenAPI / Interactive Swagger UI | [enterprise-rag-api-ksez.onrender.com/docs](https://enterprise-rag-api-ksez.onrender.com/docs) |
 | **Source Code** | Auditable Source Repository & Offline Test Suite | [github.com/Kenono2000/enterprise-rag-pgvector-rbac](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac) |
-| **Master Playbook** | End-to-End Architecture, Operational Runbook & STRIDE Matrix | [`master-playbook.md`](file:///c:/src/enterprise-rag-pgvector-rbac/docs/enterprise-rag-pgvector-rbac-master-playbook.md) |
+| **Master Playbook** | Unified Architecture, STRIDE Matrix & Multi-Cloud Runbook | [Consolidated in `README.md`](#table-of-contents) |
 
 ---
 
 ## Table of Contents
 
 1. [The Core Value: Why In-Database RBAC?](#the-core-value-why-in-database-rbac)
-2. [System Architecture](#system-architecture)
-3. [Codebase Organization](#codebase-organization)
+2. [System Architecture & Master Pipeline](#system-architecture--master-pipeline)
+3. [Codebase Organization & Master File Cross-Reference](#codebase-organization--master-file-cross-reference)
 4. [Architectural Deep Dive: The 8 Engineering Layers](#architectural-deep-dive-the-8-engineering-layers)
    - [Layer 1: Database & pgvector RBAC (schema.sql & app/db/)](#layer-1-database--pgvector-rbac-schemasql--appdb)
    - [Layer 2: Identity, Tokens & Session Security (app/auth/)](#layer-2-identity-tokens--session-security-appauth)
@@ -31,29 +31,30 @@
    - [Layer 6: Observability, Distributed Tracing & Container Hardening](#layer-6-observability-distributed-tracing--container-hardening)
    - [Layer 7: FastMCP Agent Gateway (app/mcp/)](#layer-7-fastmcp-agent-gateway-appmcp)
    - [Layer 8: Autonomous Self-Healing SDLC Agent (agent/)](#layer-8-autonomous-self-healing-sdlc-agent-agent)
-5. [5-Minute Quickstart](#5-minute-quickstart)
-6. [Testing & Verification Guide (110 Tests: 109 Passed, 1 Skipped)](#testing--verification-guide-110-tests-109-passed-1-skipped)
-7. [Solved Engineering Pitfalls & Root Cause Analysis](#solved-engineering-pitfalls--root-cause-analysis)
-8. [Operational Runbook & Jaeger Persistence Verification](#operational-runbook--jaeger-persistence-verification)
-9. [Multi-Cloud Migration Playbook & Architecture (Azure, GCP, Databricks)](#multi-cloud-migration-playbook--architecture-azure-gcp-databricks)
-10. [Disclaimer & Synthetic Data Security Notice](#disclaimer--synthetic-data-security-notice)
+5. [Threat Model & Security Architecture (STRIDE)](#threat-model--security-architecture-stride)
+6. [5-Minute Quickstart](#5-minute-quickstart)
+7. [Testing & Verification Guide (110 Tests: 109 Passed, 1 Skipped)](#testing--verification-guide-110-tests-109-passed-1-skipped)
+8. [Solved Engineering Pitfalls & Root Cause Analysis](#solved-engineering-pitfalls--root-cause-analysis)
+9. [Incident Response, Operational Runbook & Jaeger Persistence Verification](#incident-response-operational-runbook--jaeger-persistence-verification)
+10. [Multi-Cloud Migration Playbook & Architecture (Azure, GCP, Databricks)](#multi-cloud-migration-playbook--architecture-azure-gcp-databricks)
+11. [Disclaimer & Synthetic Data Security Notice](#disclaimer--synthetic-data-security-notice)
 
 ---
 
 ## The Core Value: Why In-Database RBAC?
 
-Traditional enterprise RAG architectures filter permissions **after** vector retrieval in application memory. This creates two catastrophic flaws:
+Enterprise Generative AI deployments routinely suffer from critical vulnerabilities and degraded retrieval quality because authorization logic is implemented in the application layer *after* vector retrieval. Traditional enterprise RAG architectures filter permissions **after** vector retrieval in application memory, creating two catastrophic flaws:
 
 ```
-❌ Standard Post-Filtering:
+❌ Standard Post-Filtering (Memory Leaks & Recall Starvation):
 [Query] ──► [Vector DB: Top-K] ──► [Python App Filters by Role] ──► [LLM Context]
                                           │
                                           └─► Context Eviction & Memory Leaks
 
-✅ Zero-Trust In-Database RBAC:
+✅ Zero-Trust In-Database RBAC (Shift-Left Security):
 [Query] ──► [Verified JWT] ──► [PostgreSQL: GIN Filter + HNSW Scan] ──► [LLM Context]
                                           │
-                                          └─► Unauthorized data never leaves DB
+                                          └─► Unauthorized data never leaves DB disk
 ```
 
 1. **Eliminates Recall Starvation**: If top-$K$ documents belong to restricted tiers, post-filtering drops them all in Python memory—returning zero results even when authorized lower-ranked documents exist.
@@ -61,7 +62,59 @@ Traditional enterprise RAG architectures filter permissions **after** vector ret
 
 ---
 
-## System Architecture
+## System Architecture & Master Pipeline
+
+### High-Level 4-Stage Architectural Flow
+
+```mermaid
+flowchart LR
+    subgraph IdentityLayer ["1. Identity & Auth"]
+        direction TB
+        AuthCode["OAuth 2.0 PKCE<br/>(Google Cloud)"]
+        JWKSValidator["JWKS Validator<br/>(RS256 Signature)"]
+        RoleMapper["Role Extractor<br/>(Custom Claims)"]
+        AuthCode --> JWKSValidator
+        JWKSValidator --> RoleMapper
+    end
+
+    subgraph RetrievalLayer ["2. Data & Search"]
+        direction TB
+        PGVector["PostgreSQL 16<br/>(GIN + HNSW Index)"]
+        CloudSearch["Cloud Vector Search<br/>(Azure / GCP / DBX)"]
+        HybridRanker["Hybrid Ranker<br/>(RRF k=60 / BM25)"]
+        PGVector --> HybridRanker
+        CloudSearch --> HybridRanker
+    end
+
+    subgraph ServiceLayer ["3. Gateways & UI"]
+        direction TB
+        APIGateway["FastAPI Gateway<br/>(Async Stream SSE)"]
+        MCPGateway["FastMCP Server<br/>(Tool Sandbox)"]
+        StreamlitUI["Streamlit UI<br/>(Inspector Mode)"]
+        APIGateway --> StreamlitUI
+        MCPGateway --> StreamlitUI
+    end
+
+    subgraph SDLCLayer ["4. Self-Healing Agent"]
+        direction TB
+        AgentPropose["LangGraph Engine<br/>(State Machine)"]
+        ASTGuardrail["AST Auditor<br/>(Banned Syscalls)"]
+        PytestRunner["Pytest Harness<br/>(Automated TDD)"]
+        AgentPropose --> ASTGuardrail
+        ASTGuardrail --> PytestRunner
+    end
+
+    IdentityLayer --> RetrievalLayer
+    RetrievalLayer --> ServiceLayer
+    ServiceLayer --> SDLCLayer
+
+    style IdentityLayer fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style RetrievalLayer fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style ServiceLayer fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
+    style SDLCLayer fill:#dcfce7,stroke:#22c55e,stroke-width:1.5px
+```
+
+### Detailed Multi-Cloud & Local System Topology
 
 ```mermaid
 flowchart TB
@@ -163,7 +216,7 @@ flowchart TB
 
 ---
 
-## Codebase Organization
+## Codebase Organization & Master File Cross-Reference
 
 ```text
 enterprise-rag-pgvector-rbac/
@@ -218,6 +271,25 @@ enterprise-rag-pgvector-rbac/
 ├── Dockerfile                  # Multi-stage non-root hardened container definition
 └── requirements.txt            # Production dependencies
 ```
+
+### Master File & Symbol Cross-Reference
+
+| System Layer | File Location | Key Symbols & Responsibilities |
+| :--- | :--- | :--- |
+| **Database Schema** | [`schema.sql`](file:///c:/src/enterprise-rag-pgvector-rbac/schema.sql) | DDL tables `documents`, `document_chunks`, HNSW/GIN indexes. |
+| **PostgreSQL Client** | [`app/db/manager.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/manager.py) | `DatabaseManager`, `hybrid_search`, `secure_search`, `asyncpg` connection pool. |
+| **Azure Search** | [`app/db/azure_search.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/azure_search.py) | `azure_hybrid_search`, OData collection role filtering (`allowed_roles/any(...)`). |
+| **GCP Vertex AI Search** | [`app/db/gcp_search.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/gcp_search.py) | `gcp_hybrid_search`, Vertex AI Vector Search `restricts` pre-filtering & two-tier cache hydration. |
+| **Databricks Search** | [`app/db/databricks_search.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/databricks_search.py) | `databricks_hybrid_search`, Mosaic AI Vector Search Unity Catalog `filters_json` RBAC. |
+| **Multi-Model LLM** | [`app/db/llm.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/llm.py) | `get_openai_client`, `chat_completion_stream`, multi-cloud model abstraction & guardrails. |
+| **Identity & PKCE** | [`app/auth/pkce.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/auth/pkce.py) | `generate_pkce_pair`, `encode_pkce_state`, `decode_pkce_state`, encrypted session cookie helpers. |
+| **JWKS Security** | [`app/auth/jwks.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/auth/jwks.py) | `verify_jwt_token`, `get_allowed_issuers`, TTL public key cache manager (`leeway=60s`). |
+| **Role Extraction** | [`app/auth/role_mapper.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/auth/role_mapper.py) | `resolve_user_roles`, `KNOWN_ROLES` entitlement validator & multi-IdP claim normalization. |
+| **FastAPI Gateway** | [`app/main.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/main.py) | FastAPI lifecycle, dependency injection, `/api/v1/query`, `/healthz`, `/readyz`, `/webhooks/github`. |
+| **FastMCP Server** | [`app/mcp/gateway.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/mcp/gateway.py) | `search_sdlc_context`, `propose_patch` MCP tools & `policy://sdlc-budget` resource. |
+| **Observability** | [`app/observability.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/observability.py) | OpenTelemetry tracer provider, Jaeger Badger LSM-tree & Azure Monitor exporters. |
+| **SDLC State Machine**| [`agent/workflow.py`](file:///c:/src/enterprise-rag-pgvector-rbac/agent/workflow.py) | LangGraph autonomous SDLC graph (`propose` ➔ `apply` ➔ `audit` ➔ `test` ➔ `repair` ➔ `PR`). |
+| **AST Guardrails** | [`agent/guardrails.py`](file:///c:/src/enterprise-rag-pgvector-rbac/agent/guardrails.py) | `PolicyEngine`, `GroundingGuardrail`, AST static code inspection & secret scanner. |
 
 ---
 
@@ -829,6 +901,19 @@ flowchart LR
 
 ---
 
+## Threat Model & Security Architecture (STRIDE)
+
+| Threat Category | Potential Attack Vector | Platform Mitigation & Invariant |
+| :--- | :--- | :--- |
+| **Spoofing** | Forged JWT identity tokens | Cryptographic signature verification via cached JWKS public keys (`RS256`, `leeway=60s`). |
+| **Tampering** | In-flight payload manipulation | TLS 1.3 encryption, SHA-256 PKCE code challenges, and HMAC-SHA256 state/cookie signing. |
+| **Repudiation** | Unaudited data access | OpenTelemetry distributed tracing recording tenant ID, user ID, and roles for every query. |
+| **Information Disclosure** | Vector database memory snooping | **In-database Zero-Trust filtering**: unauthorized records are never loaded into RAM. |
+| **Denial of Service** | Expensive unbounded vector scans | Connection pooling, query timeouts (`5000ms`), and indexed HNSW graphs. |
+| **Elevation of Privilege**| LLM prompt injection manipulating roles | Hardened role boundaries extracted exclusively from signed JWT claims and `KNOWN_ROLES`. |
+
+---
+
 ## 5-Minute Quickstart
 
 ### 1. Environment Setup
@@ -843,7 +928,7 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-### 2. Run Automated Verification (102 Tests)
+### 2. Run Automated Verification (110 Tests)
 All tests run **100% offline** with zero external network or API dependencies:
 ```powershell
 python -m pytest -v
@@ -853,6 +938,9 @@ python -m pytest -v
 ```powershell
 # Start PostgreSQL 16 + pgvector and Persistent Jaeger Tracing
 docker compose up -d
+
+# Initialize PostgreSQL schema, extensions, and mock records (if running native psql)
+psql -U postgres -d enterprise_rag -f schema.sql
 
 # Start FastAPI Microservice (Port 8000)
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -866,7 +954,6 @@ python -m streamlit run streamlit_app.py --server.port 8501
 
 # Inspect Distributed Tracing & RAG Question/Response in Jaeger (Port 16686)
 # 🔍 Jaeger UI: http://localhost:16686 (Service: enterprise-rag-pgvector-rbac)
-
 
 # Start FastMCP Gateway
 python -m app.mcp
@@ -942,7 +1029,7 @@ tests/test_utilities.py                 .......                                 
 
 ### Root Cause Analysis & Deep Dives
 
-#### 7.1. Concurrency: `RuntimeError: Event loop is closed`
+#### 8.1. Concurrency: `RuntimeError: Event loop is closed`
 * **Symptom**: Repeated requests in Streamlit crashed with:
   `RuntimeError: Event loop is closed` at `openai/_base_client.py:1532`.
 * **Root Cause**: An `AsyncOpenAI` client was declared as a global singleton at module import time in `app/db/llm.py`. Streamlit runs user interactions across varying thread pools. When a thread terminates its asyncio event loop, the global client's internal HTTPX connection pool retains references to the destroyed loop, triggering an immediate crash on subsequent calls.
@@ -963,12 +1050,12 @@ def get_openai_client() -> AsyncOpenAI:
     return _openai_clients[loop]
 ```
 
-#### 7.2. Scope Bug: `NameError: name 'json' is not defined`
+#### 8.2. Scope Bug: `NameError: name 'json' is not defined`
 * **Symptom**: Chat query submission in Streamlit threw `NameError: name 'json' is not defined` inside `streamlit_app.py`.
 * **Root Cause**: `json.dumps()` was invoked during debug metadata extraction without an explicit top-level `import json` statement.
 * **Resolution**: Added `import json` to top-level imports in `streamlit_app.py`.
 
-#### 7.3. Grounding System Prompt Calibration
+#### 8.3. Grounding System Prompt Calibration
 * **Symptom**: Legitimate questions regarding general repository policies or broad document summaries resulted in abrupt generic refusals: *"I do not have sufficient information in the provided context to answer your question."*
 * **Root Cause**: Overly strict prompt penalties caused the model to reject queries when documents didn't match the query wording with 100% lexical precision.
 * **Resolution**: Calibrated system prompt to distinguish between *absence of data* and *semantic synthesis of retrieved excerpts*:
@@ -983,7 +1070,7 @@ state clearly: "I do not have sufficient information in the provided context to 
 Always cite your sources using the format [Document Name, Page/Section].
 ```
 
-#### 7.4. Dependency Incompatibility & Version Pinning
+#### 8.4. Dependency Incompatibility & Version Pinning
 * **Symptom**: `pip install` failures and runtime import errors between FastAPI and OpenTelemetry.
 * **Root Cause**: `fastapi==0.142.2` enforces `opentelemetry-api>=1.44.0`, whereas local environment was pinned to an older sub-1.40.0 build.
 * **Resolution**: Updated `requirements.txt`:
@@ -993,7 +1080,7 @@ Always cite your sources using the format [Document Name, Page/Section].
   opentelemetry-exporter-otlp>=1.45.1
   ```
 
-#### 7.5. Persistent Jaeger Storage & Docker Volume Permissions
+#### 8.5. Persistent Jaeger Storage & Docker Volume Permissions
 * **Symptom**: Jaeger failed to start when switching from in-memory to Badger storage:
   > `{"level":"fatal","caller":"all-in-one/main.go:105","msg":"Failed to init storage factory","error":"Error Creating Dir: \"/badger/key\" err: mkdir /badger/key: permission denied"}`
 * **Root Cause**: The Jaeger container defaults to non-root user `jaeger` (UID `10001`), which lacks write permissions to host-mounted named volumes.
@@ -1001,22 +1088,77 @@ Always cite your sources using the format [Document Name, Page/Section].
 
 ---
 
-## Operational Runbook & Jaeger Persistence Verification
+## Incident Response, Operational Runbook & Jaeger Persistence Verification
 
-### 8.1. Running the Automated Test Suite
-Run unit and integration tests covering RBAC, document chunking, embeddings, vector retrieval, and tracing hooks:
+```mermaid
+flowchart LR
+    subgraph Detection ["1. Detection"]
+        direction TB
+        Alert["Alert Triggered<br/>(OTel / AppInsights)"]
+        Trace["Trace Analysis<br/>(Inspect Traceparent)"]
+        Alert --> Trace
+    end
+
+    subgraph Triage ["2. Triage"]
+        direction TB
+        ErrorClass{"Error Type?"}
+        DBErr["Database / Latency"]
+        AuthErr["Authentication Fail"]
+        ErrorClass --> DBErr
+        ErrorClass --> AuthErr
+    end
+
+    subgraph Remediation ["3. Remediation"]
+        direction TB
+        Action1["Switch Backend<br/>(RETRIEVAL_BACKEND)"]
+        Action2["Rotate JWKS Cache<br/>(Flush Memory Lock)"]
+        DBErr --> Action1
+        AuthErr --> Action2
+    end
+
+    Detection --> Triage
+    Triage --> Remediation
+
+    style Detection fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style Triage fill:#fef3c7,stroke:#d97706,stroke-width:1.5px
+    style Remediation fill:#dcfce7,stroke:#22c55e,stroke-width:1.5px
+```
+
+### 9.1. Incident Response Playbooks
+
+#### Scenario A: Database Node Outage or Latency Spike
+1. Inspect active spans in Jaeger (`http://localhost:16686`) or Azure Application Insights.
+2. Toggle backend to Azure AI Search (or GCP / Databricks) in [`.env`](file:///c:/src/enterprise-rag-pgvector-rbac/.env):
+   ```ini
+   RETRIEVAL_BACKEND="azure"
+   ```
+3. Restart FastAPI worker:
+   ```powershell
+   uvicorn app.main:app --port 8000 --reload
+   ```
+
+#### Scenario B: JWKS Key Rotation Failure
+1. Check identity provider reachability (`https://www.googleapis.com/oauth2/v3/certs`).
+2. Force-refresh JWKS cache by restarting the auth worker or clearing `JWKSClient._cache`.
+3. Validate token verification with the test suite:
+   ```powershell
+   python -m pytest tests/test_auth.py -k "test_jwks" -v
+   ```
+
+### 9.2. Running the Automated Test Suite
+Run unit and integration tests covering RBAC, document chunking, embeddings, vector retrieval, multi-cloud routing, and tracing hooks:
 
 ```powershell
 python -m pytest -v
 ```
 
 **Verification Results**:
-* Total Tests: **99**
-* Passed: **98**
-* Skipped: **1** (Live network mock fallback)
-* Test Duration: ~28.9s
+* Total Tests: **110**
+* Passed: **109**
+* Skipped: **1** (Live container mock fallback)
+* Test Duration: ~41.8s
 
-### 8.2. Container Orchestration & Health Checks
+### 9.3. Container Orchestration & Health Checks
 
 ```powershell
 # 1. Stop existing containers
@@ -1036,7 +1178,7 @@ enterprise-rag-db    pgvector/pgvector:pg16        Up (healthy)   0.0.0.0:5432->
 jaeger               jaegertracing/all-in-one      Up             0.0.0.0:4317-4318->4317-4318/tcp, 0.0.0.0:16686->16686/tcp
 ```
 
-### 8.3. Verifying Trace Persistence in Jaeger
+### 9.4. Verifying Trace Persistence in Jaeger
 1. Open `http://localhost:16686` in a browser.
 2. Under **Service**, select `enterprise-rag-pgvector-rbac` or `rag-fastapi`.
 3. Submit a query via Streamlit (`http://localhost:8501`) or execute an API call via Swagger (`http://localhost:8000/docs`).
@@ -1051,11 +1193,42 @@ jaeger               jaegertracing/all-in-one      Up             0.0.0.0:4317-4
 
 ## Multi-Cloud Migration Playbook & Architecture (Azure, GCP, Databricks)
 
-For organizations deploying across hybrid and multi-cloud environments, the platform includes a **Quad-Mode Multi-Cloud Backend** allowing runtime switching between:
+For organizations deploying across hybrid and multi-cloud environments, the platform includes a **Quad-Mode Multi-Cloud Backend** allowing zero-downtime runtime switching between:
 - **PostgreSQL (`pgvector`)**: Local / On-prem / Cloud SQL / Aurora
-- **Microsoft Azure AI**: Azure AI Search + Azure OpenAI Service ([`docs/Azure-RAG-Migration.md`](file:///c:/src/enterprise-rag-pgvector-rbac/docs/Azure-RAG-Migration.md))
-- **Google Cloud Platform**: Vertex AI Vector Search (ScaNN) + Gemini API ([`docs/MultiCloud-GCP-Databricks-Migration.md`](file:///c:/src/enterprise-rag-pgvector-rbac/docs/MultiCloud-GCP-Databricks-Migration.md))
-- **Databricks Lakehouse**: Mosaic AI Vector Search + Unity Catalog Delta Lake ([`docs/MultiCloud-GCP-Databricks-Migration.md`](file:///c:/src/enterprise-rag-pgvector-rbac/docs/MultiCloud-GCP-Databricks-Migration.md))
+- **Microsoft Azure AI (`azure`)**: Azure AI Search (HNSW + Bing Semantic Ranker) + Azure OpenAI Service + Azure Application Insights
+- **Google Cloud Platform (`gcp`)**: Vertex AI Vector Search (ScaNN / Tree-AH) + Gemini API
+- **Databricks Lakehouse (`databricks`)**: Mosaic AI Vector Search + Unity Catalog Delta Lake
+
+```mermaid
+flowchart LR
+    subgraph Provisioning ["1. Cloud Provisioning"]
+        direction TB
+        Azure_P["Phase 1A:<br/>Azure AI Search<br/>(HNSW + Semantic)"]
+        GCP_P["Phase 1B:<br/>Google Vertex AI<br/>(ScaNN Restricts)"]
+        DBX_P["Phase 1C:<br/>Databricks Mosaic<br/>(Unity Catalog)"]
+    end
+
+    subgraph DataOps ["2. Data Pipeline"]
+        direction TB
+        MIG["Phase 2:<br/>Batch Migration<br/>(PostgreSQL Chunks)"]
+        VAL["Phase 3:<br/>Index Validation<br/>(RBAC Pre-Filters)"]
+        MIG --> VAL
+    end
+
+    subgraph Cutover ["3. Routing & Cutover"]
+        direction TB
+        ENV["Phase 4:<br/>Switch Backend<br/>(.env Toggle)"]
+        TEST["Phase 5:<br/>Automated Tests<br/>(pytest Suite)"]
+        ENV --> TEST
+    end
+
+    Provisioning --> DataOps
+    DataOps --> Cutover
+
+    style Provisioning fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style DataOps fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style Cutover fill:#dcfce7,stroke:#22c55e,stroke-width:1.5px
+```
 
 ### 1. Architectural Component Mapping Across Clouds
 
@@ -1071,7 +1244,39 @@ For organizations deploying across hybrid and multi-cloud environments, the plat
 
 ---
 
-### 2. Multi-Cloud Environment Configuration (`.env`)
+### 2. Cloud Resource Provisioning & Architectural Guardrails
+
+#### 2.1. Microsoft Azure AI Provisioning
+1. **Resource Group**: Create `rg-enterprise-rag-dev` (or `rg-enterprise-rag-prod`) in a region supporting model deployments (e.g., `East US 2` or `Sweden Central`).
+2. **Azure OpenAI Service**: Create resource `oai-enterprise-rag` (**Standard S0**) and deploy **`text-embedding-3-large`** and **`gpt-4o`** in Azure AI Foundry.
+3. **Azure AI Search**: Create service `search-enterprise-rag` on the **Standard** tier (required for **Bing Semantic Ranker** `semantic-config`) and enable the Semantic Ranker plan.
+4. **Azure Application Insights**: Create `appi-enterprise-rag` and copy the `APPLICATIONINSIGHTS_CONNECTION_STRING`.
+
+#### 2.2. Google Cloud (Vertex AI Vector Search) Provisioning
+1. **Create Index & Endpoint**:
+   - In Google Cloud Console (**Vertex AI → Vector Search**), create an index with **1536 dimensions**, metric **COSINE**, and algorithm **Tree-AH (ScaNN)** with `STREAM_UPDATE`.
+   - Deploy the index to a public **Index Endpoint** with restricts namespace `allowed_roles`:
+   ```bash
+   gcloud ai index-endpoints deploy-index 7285634525504208896 \
+       --deployed-index-id="enterprise_rag_index" \
+       --display-name="enterprise_rag_index" \
+       --index="4259655380562345984" \
+       --project="gen-lang-client-0795078481" \
+       --region="us-central1"
+   ```
+2. **Critical Vertex AI REST API Guardrails**:
+   - **Restricts Schema**: The REST API requires `"allowList"` (not `"allow"`) inside each restrict object under namespace `allowed_roles`.
+   - **IndexDatapoint Schema**: `IndexDatapoint` only accepts `datapointId`, `featureVector`, `restricts`, and `crowdingTag`. Arbitrary text fields are rejected with `HTTP 400 Bad Request`.
+   - **Data-Plane vs. Control-Plane**: `:findNeighbors` must be called against the public data-plane domain (`*.vdb.vertexai.goog`), not `*-aiplatform.googleapis.com`.
+   - **Two-Tier Chunk Hydration**: [`scripts/migrate_pg_to_gcp.py`](file:///c:/src/enterprise-rag-pgvector-rbac/scripts/migrate_pg_to_gcp.py) exports [`app/db/gcp_chunks_cache.json`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/gcp_chunks_cache.json) for sub-millisecond (<1ms) local chunk hydration, with automatic fallback to PostgreSQL (`WHERE c.id::text = ANY($1::text[])`) for uncached chunks.
+
+#### 2.3. Databricks (Mosaic AI Vector Search) Provisioning
+1. **Unity Catalog Delta Table**: Create `main.enterprise_rag.document_chunks` with Change Data Feed enabled (`TBLPROPERTIES (delta.enableChangeDataFeed = true)`).
+2. **Vector Search Endpoint & Index**: Create endpoint `enterprise_vs_endpoint` and index `main.enterprise_rag.document_chunks_index` (primary key `id`, dimension `1536`, filterable metadata column `allowed_roles`).
+
+---
+
+### 3. Multi-Cloud Environment Configuration (`.env`)
 
 ```ini
 # ==============================================================================
@@ -1082,19 +1287,21 @@ RETRIEVAL_BACKEND="azure"         # or "gcp", "databricks", "pgvector"
 # --- [Azure AI Search & Azure OpenAI] ---
 AZURE_OPENAI_ENDPOINT="https://oai-enterprise-rag.openai.azure.com/"
 AZURE_OPENAI_API_KEY="<your-azure-openai-key>"
+AZURE_OPENAI_API_VERSION="2024-06-01"
 AZURE_OPENAI_CHAT_DEPLOYMENT="gpt-4o"
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT="text-embedding-3-large"
 AZURE_SEARCH_ENDPOINT="https://search-enterprise-rag.search.windows.net"
 AZURE_SEARCH_API_KEY="<your-azure-search-key>"
 AZURE_SEARCH_INDEX_NAME="enterprise-documents-index"
+APPLICATIONINSIGHTS_CONNECTION_STRING="InstrumentationKey=...;IngestionEndpoint=..."
 
 # --- [Google Cloud Vertex AI Vector Search] ---
-GCP_PROJECT_ID="your-gcp-project-id"
+GCP_PROJECT_ID="gen-lang-client-0795078481"
 GCP_REGION="us-central1"
-GCP_INDEX_ENDPOINT_ID="1234567890123456789"
+GCP_INDEX_ENDPOINT_ID="7285634525504208896"
 GCP_INDEX_ID="4259655380562345984"
 GCP_DEPLOYED_INDEX_ID="enterprise_rag_index"
-GCP_INDEX_ENDPOINT_DOMAIN="<endpoint-hash>.us-central1-<project-num>.vdb.vertexai.goog"
+GCP_INDEX_ENDPOINT_DOMAIN="1876216656.us-central1-226714713434.vdb.vertexai.goog"
 GCP_VECTOR_STORE="vertex_ai"
 
 # --- [Databricks Mosaic AI Vector Search] ---
@@ -1106,7 +1313,7 @@ DATABRICKS_INDEX_NAME="main.enterprise_rag.document_chunks_index"
 
 ---
 
-### 3. Automated Migration & Unified Execution
+### 4. Automated Migration & Unified Execution
 
 ```powershell
 # 1. Provision target cloud indexes
@@ -1129,9 +1336,9 @@ python -m pytest tests/test_multicloud_search.py -v
 
 ---
 
-### 3. Zero-Trust RBAC: In-Database vs. In-Engine OData Filtering
+### 5. Zero-Trust RBAC Implementations Across All 4 Backends
 
-#### PostgreSQL In-Database RBAC
+#### PostgreSQL In-Database RBAC ([`app/db/manager.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/manager.py))
 ```sql
 SELECT d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles, 
        1 - (c.embedding <=> $1::vector) AS similarity
@@ -1142,7 +1349,7 @@ ORDER BY c.embedding <=> $1::vector
 LIMIT $3;
 ```
 
-#### Azure AI Search OData Collection RBAC
+#### Azure AI Search OData Collection RBAC ([`app/db/azure_search.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/azure_search.py))
 ```python
 role_clauses = " or ".join([f"r eq '{role}'" for role in sanitized_roles])
 role_filter = f"allowed_roles/any(r: {role_clauses})"
@@ -1157,18 +1364,38 @@ results = await client.search(
 )
 ```
 
-**Zero-Trust Guarantee**: In both implementations, if a caller presents no verified roles (`user_roles = []`), the query engine short-circuits immediately and returns `[]` without querying disk or network.
+#### Google Cloud Vertex AI Restricts RBAC ([`app/db/gcp_search.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/gcp_search.py))
+```python
+restricts = [{"namespace": "allowed_roles", "allowList": sanitized_roles}]
+results = await client.find_neighbors(
+    query_vector=query_vector,
+    restricts=restricts,
+    limit=limit,
+)
+```
+
+#### Databricks Mosaic AI Unity Catalog RBAC ([`app/db/databricks_search.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/databricks_search.py))
+```python
+filters_dict = {"OR": [{"allowed_roles": role} for role in sanitized_roles]}
+results = await client.query_index(
+    query_vector=query_vector,
+    filters_json=json.dumps(filters_dict),
+    limit=limit,
+)
+```
+
+**Zero-Trust Guarantee**: Across all four implementations, if a caller presents no verified roles (`user_roles = []`), the query engine short-circuits immediately and returns `[]` without querying disk or network.
 
 ---
 
-### 4. Solved Azure Engineering Pitfalls & Root Cause Analysis
+### 6. Solved Multi-Cloud Engineering Pitfalls & Root Cause Analysis
 
 1. **Azure OpenAI Streaming `IndexError: list index out of range`**:
    - **Root Cause**: Azure OpenAI emits trailing metadata/filter chunks with empty `chunk.choices = []`. Unconditional indexing `chunk.choices[0]` threw an uncaught exception.
-   - **Resolution**: Added `if not chunk.choices: continue` guards across all streaming generators in [`app/db/llm.py`](app/db/llm.py).
+   - **Resolution**: Added `if not chunk.choices: continue` guards across all streaming generators in [`app/db/llm.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/llm.py).
 2. **FastMCP Server `[WinError 1225]` Connection Refused**:
-   - **Root Cause**: FastMCP tool `search_sdlc_context` was hardcoded to local PostgreSQL (`127.0.0.1:5432`). When transitioning to Azure, local PostgreSQL was offline.
-   - **Resolution**: Integrated the Dual-Backend router in [`app/mcp/gateway.py`](app/mcp/gateway.py) so FastMCP tools route to `azure_hybrid_search` when `RETRIEVAL_BACKEND="azure"`.
+   - **Root Cause**: FastMCP tool `search_sdlc_context` was hardcoded to local PostgreSQL (`127.0.0.1:5432`). When transitioning to cloud backends, local PostgreSQL was offline.
+   - **Resolution**: Integrated the Multi-Cloud router in [`app/mcp/gateway.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/mcp/gateway.py) so FastMCP tools route dynamically to `azure`, `gcp`, `databricks`, or `pgvector` based on `RETRIEVAL_BACKEND`.
 3. **`python-dotenv` Syntax Parsing Warnings**:
    - **Root Cause**: Trailing comments without whitespace and unquoted multi-line private keys in `.env`.
    - **Resolution**: Standardized key-value pairs with clean quoting.

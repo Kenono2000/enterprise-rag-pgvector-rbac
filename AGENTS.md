@@ -18,6 +18,7 @@
 11. **`mermaid-diagram-optimizer`**: Compact multi-stage flowchart restructuring, 16:9/4:3 aspect ratio targeting, line wrapping (`<br/>` <= 22 chars), universal quoted syntax, and Dagre rank splay prevention.
 
 ### Behavioral Enforcement
+- **Single-File Documentation Policy (CRITICAL)**: All project, architectural, runbook, and migration markdown documentation MUST reside exclusively in [`README.md`](file:///c:/src/enterprise-rag-pgvector-rbac/README.md). Never create separate documentation `.md` files in `docs/` or root directories—always consolidate and maintain all documentation directly inside `README.md`.
 - Whenever planning or executing engineering tasks, check task scope against relevant skills.
 - When generating or auditing code in this repository, strictly adhere to `code-reviewer` standards and verify RAG retrieval/prompts using `rag-evaluator`.
 - When coordinating multi-step or multi-agent workflows, follow `fleet-planner` patterns.
