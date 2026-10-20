@@ -117,101 +117,54 @@ flowchart LR
 ### Detailed Multi-Cloud & Local System Topology
 
 ```mermaid
-flowchart TB
-    subgraph Clients ["Client & Consumer Layer"]
-        browser["Streamlit UI / Web Client<br/>(localhost:8501)"]
-        mcp_client["AI Agent / Cursor / Claude Desktop"]
-    end
-
-    subgraph Security ["Identity & Session Security (PKCE)"]
-        google["Google OAuth 2.0 PKCE<br/>(accounts.google.com)"]
-        jwks["Google JWKS (RS256)<br/>leeway=60s"]
-        cookie["Encrypted Session Cookie<br/>(15m idle / 12h ceiling)"]
-    end
-
-    subgraph PythonEnv ["🐍 Python Local / Container Environment (RETRIEVAL_BACKEND='pgvector')"]
-        api["FastAPI Gateway (:8000)<br/>POST /api/v1/query"]
-        mcp_gw["FastMCP Server<br/>Tool: search_sdlc_context"]
-        pool["Loop-Aware asyncpg Pool"]
-        local_db["PostgreSQL 16 + pgvector (:5432)<br/>• GIN: allowed_roles jsonb_path_ops<br/>• HNSW: embedding vector_cosine_ops"]
-        openai_api["OpenAI API (Public Endpoint)<br/>• text-embedding-3-large (1536-d)<br/>• gpt-4o Chat Completions"]
-        jaeger["Jaeger All-In-One (:16686)<br/>Persistent Badger LSM Storage"]
-    end
-
-    subgraph MultiCloudEnv ["☁️ Multi-Cloud Managed Enterprise Environments"]
+flowchart LR
+    subgraph Clients ["1. Clients & Auth"]
         direction TB
-        subgraph AzureEnv ["Microsoft Azure (RETRIEVAL_BACKEND='azure')"]
-            azure_search["Azure AI Search<br/>• allowed_roles/any(...)<br/>• Bing Semantic Ranker"]
-            azure_oai["Azure OpenAI Service<br/>• text-embedding-3-large<br/>• gpt-4o Deployments"]
-            app_insights["Azure Application Insights<br/>Managed OpenTelemetry Dashboard"]
-        end
-        subgraph GcpEnv ["Google Cloud (RETRIEVAL_BACKEND='gcp')"]
-            gcp_search["Vertex AI Vector Search<br/>• Restricts: allowed_roles<br/>• ScaNN 1536-d Index"]
-            gcp_gemini["Vertex AI / Gemini API<br/>• text-embedding-004<br/>• Gemini 1.5 Pro / Flash"]
-        end
-        subgraph DbxEnv ["Databricks (RETRIEVAL_BACKEND='databricks')"]
-            dbx_search["Mosaic AI Vector Search<br/>• Unity Catalog RBAC<br/>• Delta Lake Direct Index"]
-            dbx_serving["Databricks Model Serving<br/>• bge-large-en<br/>• DBRX / Llama 3.1 70B"]
-        end
+        browser["Streamlit UI<br/>(Port :8501)"]
+        mcp_client["AI Coding Agent<br/>(Claude / Cursor)"]
+        google["Google OAuth 2.0<br/>(PKCE + JWKS)"]
+        cookie["Session Cookie<br/>(15m Idle / 12h Max)"]
+        browser --> google
+        google --> cookie
     end
 
-    subgraph AgentEngine ["🤖 Autonomous SDLC Agent (agent/)"]
-        langgraph["LangGraph State Machine<br/>propose ➔ apply ➔ audit ➔ test ➔ repair"]
-        guardrails["PolicyEngine<br/>Deterministic AST + Secret Scanner"]
+    subgraph Gateways ["2. Core Gateways"]
+        direction TB
+        api["FastAPI Gateway<br/>(Port :8000)"]
+        mcp_gw["FastMCP Server<br/>(search_sdlc_context)"]
+        agent["SDLC Agent<br/>(LangGraph + AST)"]
+        pool["AsyncPG Pool<br/>(Loop-Aware)"]
+        api --> pool
+        mcp_gw --> pool
+        agent --> api
     end
 
-    %% Auth Flow
-    browser -->|1. PKCE Auth Code| google
-    google -->|2. RS256 ID Token| browser
-    browser -->|3. Encrypted Cookie / Bearer| cookie
-    browser -->|4. Authenticated Request| api
-    api -->|5. Verify Token & Leeway| jwks
+    subgraph LocalEnv ["3. Local Stack (pgvector)"]
+        direction TB
+        local_db["PostgreSQL 16<br/>• GIN Role Filter<br/>• HNSW 1536-d"]
+        openai_api["OpenAI API<br/>• embedding-3-large<br/>• gpt-4o Chat"]
+        jaeger["Jaeger Tracing<br/>• OTLP (:4317)<br/>• Badger LSM"]
+    end
 
-    %% In-process Gateways & Agent Coordination
-    mcp_client -->|Governed Tool Call| mcp_gw
-    AgentEngine -->|Context Hydration| api
+    subgraph CloudEnv ["4. Managed Cloud Backends"]
+        direction TB
+        azure_env["Microsoft Azure<br/>• AI Search (OData)<br/>• Azure OpenAI<br/>• App Insights"]
+        gcp_env["Google Cloud<br/>• Vertex Vector<br/>• Restricts Filter<br/>• Gemini 1.5 Pro"]
+        dbx_env["Databricks<br/>• Mosaic Vector<br/>• Unity Catalog<br/>• Llama 3.1 70B"]
+    end
 
-    %% Python Env Routing
-    api -.->|RETRIEVAL_BACKEND='pgvector'| pool
-    mcp_gw -.->|RETRIEVAL_BACKEND='pgvector'| pool
-    pool -->|GIN Filter + Cosine Distance| local_db
-    local_db -->|Authorized Top-K| api
-    api -.->|Generate Vectors / Chat| openai_api
-    api -.->|OTel Tracing| jaeger
+    Clients --> Gateways
+    Gateways -->|pgvector| LocalEnv
+    Gateways -->|azure / gcp / dbx| CloudEnv
 
-    %% Multi-Cloud Routing
-    api ==>|RETRIEVAL_BACKEND='azure'| azure_search
-    mcp_gw ==>|RETRIEVAL_BACKEND='azure'| azure_search
-    azure_search ==>|OData Filtered + Semantic Top-K| api
-    api ==>|Private VPC Inference| azure_oai
-    api ==>|Azure Monitor Telemetry| app_insights
-
-    api ==>|RETRIEVAL_BACKEND='gcp'| gcp_search
-    mcp_gw ==>|RETRIEVAL_BACKEND='gcp'| gcp_search
-    gcp_search ==>|Restricts Filtered Top-K| api
-    api ==>|Gemini Model APIs| gcp_gemini
-
-    api ==>|RETRIEVAL_BACKEND='databricks'| dbx_search
-    mcp_gw ==>|RETRIEVAL_BACKEND='databricks'| dbx_search
-    dbx_search ==>|UC Filtered Top-K| api
-    api ==>|Serving Endpoint LLM| dbx_serving
-
-    %% User Response
-    api -->|Grounded Answer + Citations| browser
-
-    %% Visual Styling
-    style PythonEnv fill:#f0f9ff,stroke:#0284c7,stroke-width:2px,stroke-dasharray: 4 4
-    style MultiCloudEnv fill:#fdf4ff,stroke:#c026d3,stroke-width:2px
-    style AzureEnv fill:#ffffff,stroke:#9333ea,stroke-width:1.5px
-    style GcpEnv fill:#ffffff,stroke:#ea4335,stroke-width:1.5px
-    style DbxEnv fill:#ffffff,stroke:#ff3621,stroke-width:1.5px
-    style Security fill:#f0fdf4,stroke:#16a34a,stroke-width:2px
-    style Clients fill:#fefce8,stroke:#ca8a04,stroke-width:2px
-    style AgentEngine fill:#fffbeb,stroke:#d97706,stroke-width:2px
-    style local_db fill:#e0f2fe,stroke:#0369a1,stroke-width:2px
-    style azure_search fill:#fae8ff,stroke:#a21caf,stroke-width:2px
-    style gcp_search fill:#fee2e2,stroke:#b91c1c,stroke-width:2px
-    style dbx_search fill:#ffedd5,stroke:#c2410c,stroke-width:2px
+    style Clients fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style Gateways fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
+    style LocalEnv fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style CloudEnv fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
+    style local_db fill:#e0f2fe,stroke:#0369a1,stroke-width:1.5px
+    style azure_env fill:#fae8ff,stroke:#a21caf,stroke-width:1.5px
+    style gcp_env fill:#fee2e2,stroke:#b91c1c,stroke-width:1.5px
+    style dbx_env fill:#ffedd5,stroke:#c2410c,stroke-width:1.5px
 ```
 
 ---
@@ -597,18 +550,19 @@ flowchart LR
     end
 
     subgraph Core ["2. Telemetry Engine"]
-        OTel["OpenTelemetry SDK<br/>(app/observability.py)<br/>• BatchSpanProcessor<br/>• Standard Semantic Tags"]
+        direction TB
+        OTel["OpenTelemetry SDK<br/>(observability.py)<br/>• BatchSpanProcessor<br/>• Semantic RAG Tags"]
     end
 
     subgraph Sinks ["3. Tracing Backends"]
         direction TB
-        Jaeger["Jaeger All-In-One<br/>• OTLP gRPC (:4317)<br/>• Persistent Badger LSM<br/>• Web UI (:16686)"]
-        AppInsights["Azure App Insights<br/>• Managed Azure Monitor<br/>• Cloud Dashboard"]
+        Jaeger["Jaeger All-In-One<br/>• OTLP gRPC (:4317)<br/>• Badger LSM Store<br/>• Web UI (:16686)"]
+        AppInsights["Azure App Insights<br/>• Azure Monitor<br/>• Cloud Dashboard"]
     end
 
-    Sources ==>|OTLP Spans| OTel
-    OTel -->|Local Jaeger| Jaeger
-    OTel -->|Azure Monitor| AppInsights
+    Sources -->|OTLP Spans| Core
+    Core -->|Local Jaeger| Jaeger
+    Core -->|Azure Monitor| AppInsights
 
     style Sources fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
     style Core fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
@@ -837,44 +791,44 @@ The autonomous agent listens to GitHub issue webhooks, writes code patches, audi
 flowchart LR
     subgraph Intake ["1. Webhook & Init"]
         direction TB
-        Hook["GitHub Issue Webhook<br/>(HMAC-SHA256 Verified)"]
-        Init["Initialize State<br/>& Checkout Branch"]
+        Hook["GitHub Webhook<br/>(HMAC Verified)"]
+        Init["Initialize State<br/>& Git Branch"]
         Hook --> Init
     end
 
     subgraph Gen ["2. Patch Synthesis"]
         direction TB
-        Propose["Propose Patch<br/>(Targeted LLM Prompt)"]
-        Apply["Apply to Sandbox<br/>(Path Traversal Guard)"]
+        Propose["Propose Patch<br/>(LLM Synthesis)"]
+        Apply["Apply Sandbox<br/>(Path Guard)"]
         Propose --> Apply
     end
 
     subgraph Audit ["3. Security Gate"]
         direction TB
-        Inspect["AST & Secret Audit<br/>(eval, exec & key checks)"]
-        Reject["Policy Violation<br/>(Execution Blocked)"]
+        Inspect["AST & Secret Audit<br/>(eval / key scan)"]
+        Reject["Policy Violation<br/>(Blocked)"]
         Inspect -->|Failed| Reject
     end
 
-    subgraph Verify ["4. Test & Self-Healing"]
+    subgraph Verify ["4. Self-Healing Loop"]
         direction TB
-        Test{"Run Pytest<br/>Offline Suite"}
-        Repair["Repair Patch<br/>(Traceback Injected)"]
-        Escalate["Max Retries (3)<br/>(Escalate to Human)"]
+        Test{"Run Pytest<br/>Offline?"}
+        Repair["Repair Patch<br/>(Up to 3x Loop)"]
+        Escalate["Max Retries (3)<br/>(Escalate)"]
 
-        Test -->|Failed: Retries < 3| Repair
-        Test -->|Failed: Retries >= 3| Escalate
+        Test -->|Retry < 3| Repair
+        Test -->|Retry >= 3| Escalate
     end
 
     subgraph Done ["5. PR Delivery"]
-        PR["Clean Git Commit<br/>& Open Pull Request"]
+        direction TB
+        PR["Clean Git Commit<br/>& Open PR"]
     end
 
-    Init --> Propose
-    Apply --> Inspect
-    Inspect -->|Passed| Test
-    Repair --> Apply
-    Test -->|Tests Passed| PR
+    Intake --> Gen
+    Gen --> Audit
+    Audit -->|Passed| Verify
+    Verify -->|Passed| Done
 
     style Intake fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
     style Gen fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
