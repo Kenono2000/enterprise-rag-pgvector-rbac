@@ -25,7 +25,7 @@
 7. [Threat Model (STRIDE) & Solved Engineering Pitfalls](#7-threat-model--solved-engineering-pitfalls)
 8. [Incident Response & Operational Runbook](#8-incident-response-operational-runbook--jaeger-persistence-verification)
 9. [Testing & Verification Guide (110 Tests)](#9-testing--verification-guide-110-tests-109-passed-1-skipped)
-10. [Codebase Organization & Master File Cross-Reference](#10-codebase-organization--master-file-cross-reference)
+10. [Codebase Organization, Configuration & Code Reference](#10-codebase-organization-configuration--code-reference)
 11. [Disclaimer & Synthetic Data Security Notice](#11-disclaimer--synthetic-data-security-notice)
 
 ---
@@ -65,8 +65,7 @@ Traditional enterprise RAG architectures filter permissions **after** vector ret
 | **8** | **Autonomous SDLC** | **LangGraph Self-Healing Loop** + pre-execution **AST `PolicyEngine`** | Up to 3x automated `pytest` repair cycles; blocks `eval`/`exec`, secrets & path traversal. |
 | **9** | **Multi-Cloud** | **Quad-Mode Strategy Pattern** (`pgvector`, `azure`, `gcp`, `databricks`) | Zero-downtime `.env` switching with native pre-filtering across all 4 cloud engines. |
 
-<details>
-<summary><b>📖 Expand Detailed Talking Points for All 9 Engineering Patterns</b></summary>
+### Key Architectural Talking Points
 
 1. **Shift-Left In-Database Zero-Trust Vector RBAC**: Normalized 2-table DDL (`documents` + `document_chunks` with `ON DELETE CASCADE`), parameterized `$2::text[]` SQL injection immunity, empty-role short-circuiting (`return []`), and deterministic offline mock vectors (`[0.01 * (i % 5) for i in range(1536)]`).
 2. **Stateless OAuth 2.0 PKCE & JWKS**: RFC 7636 `S256` code challenge, HMAC-SHA256 signed `state` (300s TTL), `zlib`-compressed HMAC session cookie (`enterprise_rag_session`) for silent OAuth token rotation on F5 refresh, and multi-IdP JWKS verification (`leeway=60s`) across Google, Azure AD, Okta, Cognito, and Keycloak.
@@ -77,8 +76,6 @@ Traditional enterprise RAG architectures filter permissions **after** vector ret
 7. **Sovereign FastMCP Gateway**: Exposes `search_sdlc_context` and `propose_patch` tools plus `policy://sdlc-budget` (`max_tokens=50,000`, `max_steps=10`), requiring a verified JWT on every tool invocation.
 8. **Self-Healing LangGraph SDLC Agent**: Verifies `X-Hub-Signature-256` GitHub webhooks, synthesizes patches, inspects AST nodes (`ast.walk()`) and regex secret patterns before running `pytest`, feeds trailing 2,500 chars of traceback into repair loops (up to 3x), and opens a verified Git PR.
 9. **Quad-Mode Multi-Cloud Vector Strategy**: Translates pre-filtered RBAC across PostgreSQL (`?|`), Azure AI Search (OData `allowed_roles/any(...)`), GCP Vertex AI (`restricts` `allowList` + <1ms local JSON cache hydration), and Databricks Mosaic AI (`filters_json`).
-
-</details>
 
 ---
 
@@ -237,49 +234,7 @@ LIMIT $3;
   2. **Zero-Trust Short-Circuit**: Returns `[]` immediately without hitting PostgreSQL if `user_roles` is empty or `None`.
   3. **Matryoshka 1536-d Truncation**: Truncates `text-embedding-3-large` (`3072` ➔ `1536` dims), cutting disk/RAM by **50%** while retaining **>98% recall**.
   4. **Loop-Aware Connection Pooling**: `DatabaseManager.get_pool()` binds `asyncpg` pools to the active event loop and recycles automatically when Streamlit resets worker loops.
-
-<details>
-<summary><b>📄 View Normalized 2-Table PostgreSQL DDL & Indexes (<code>schema.sql</code>)</b></summary>
-
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
--- 1. Master Documents Table
-CREATE TABLE IF NOT EXISTS documents (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    document_id VARCHAR(100) NOT NULL UNIQUE,
-    title VARCHAR(255) NOT NULL,
-    source_path TEXT,
-    file_hash CHAR(64) UNIQUE,
-    file_type VARCHAR(16) DEFAULT 'markdown',
-    allowed_roles JSONB NOT NULL DEFAULT '[]'::jsonb,
-    metadata JSONB DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- 2. Document Chunks Table with Foreign Key & Cascade Deletion
-CREATE TABLE IF NOT EXISTS document_chunks (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    chunk_id VARCHAR(128) NOT NULL UNIQUE,
-    chunk_index INT NOT NULL DEFAULT 0,
-    content TEXT NOT NULL,
-    token_count INT,
-    embedding vector(1536) NOT NULL,
-    embedding_model VARCHAR(100) DEFAULT 'text-embedding-3-large',
-    tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw ON document_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
-CREATE INDEX IF NOT EXISTS idx_documents_allowed_roles_gin ON documents USING gin (allowed_roles jsonb_path_ops);
-CREATE INDEX IF NOT EXISTS idx_documents_file_hash ON documents (file_hash);
-CREATE INDEX IF NOT EXISTS idx_chunks_content_tsv ON document_chunks USING gin (tsv);
-```
-
-</details>
+  5. **Normalized 2-Table DDL**: Separates `documents` from `document_chunks` (`ON DELETE CASCADE`); see [Section 10.3](#103-postgresql-16--pgvector-ddl-reference-schemasql) for full DDL.
 
 ---
 
@@ -451,88 +406,8 @@ flowchart LR
 ```
 
 * **End-to-End Span Attributes**: Tracks `user.id`, `user.role`, `rag.question`, `rag.source_count`, `rag.processing_time_ms`, and `mcp.tool_name` across OTLP gRPC (`:4317`), backed by a 1,000-event ring buffer (`GET /api/v1/metrics/observability`).
-* **Persistent Jaeger Badger LSM Storage**: Configured with `SPAN_STORAGE_TYPE=badger`, `user: "0:0"` volume permission hardening, and a 7-day TTL (`168h`) so traces survive container restarts.
+* **Persistent Jaeger Badger LSM Storage**: Configured with `SPAN_STORAGE_TYPE=badger`, `user: "0:0"` volume permission hardening, and a 7-day TTL (`168h`) so traces survive container restarts (see [Section 10.4](#104-container--observability-configuration-reference) for `docker-compose.yml` & `Dockerfile`).
 * **Hardened Multi-Stage `Dockerfile` & Fail-Fast Config**: `Pydantic BaseSettings` (`app/config.py`) validates environment variables at startup; production container strips `gcc`/`libpq-dev` and runs as non-root `appuser` (UID `10001`).
-
-<details>
-<summary><b>📄 View OpenTelemetry Middleware, <code>docker-compose.yml</code> & Hardened <code>Dockerfile</code></b></summary>
-
-#### Core Observability & FastAPI Middleware (`app/observability.py` & `app/main.py`)
-```python
-def setup_observability(service_name: str = "enterprise-rag") -> trace.Tracer:
-    resource = Resource.create({"service.name": service_name})
-    provider = TracerProvider(resource=resource)
-    try:
-        processor = BatchSpanProcessor(OTLPSpanExporter(endpoint="localhost:4317", insecure=True))
-        provider.add_span_processor(processor)
-    except Exception:
-        pass
-    trace.set_tracer_provider(provider)
-    return trace.get_tracer(service_name)
-
-@app.middleware("http")
-async def trace_requests(request: Request, call_next):
-    start_time = time.time()
-    with tracer.start_as_current_span(f"http_{request.method}_{request.url.path}") as span:
-        span.set_attribute("http.method", request.method)
-        span.set_attribute("http.url", str(request.url))
-        response = await call_next(request)
-        span.set_attribute("http.status_code", response.status_code)
-        span.set_attribute("http.duration_ms", (time.time() - start_time) * 1000)
-        return response
-```
-
-#### Persistent Jaeger & pgvector (`docker-compose.yml`)
-```yaml
-version: "3.8"
-services:
-  jaeger:
-    image: jaegertracing/all-in-one:latest
-    container_name: jaeger
-    user: "0:0"
-    environment:
-      - SPAN_STORAGE_TYPE=badger
-      - BADGER_EPHEMERAL=false
-      - BADGER_DIRECTORY_VALUE=/badger/data
-      - BADGER_DIRECTORY_KEY=/badger/key
-      - BADGER_SPAN_STORE_TTL=168h
-    ports:
-      - "16686:16686"
-      - "4317:4317"
-    volumes:
-      - jaeger_data:/badger
-    restart: unless-stopped
-
-  postgres:
-    image: pgvector/pgvector:pg16
-    container_name: enterprise-rag-db
-    environment:
-      POSTGRES_USER: rag_user
-      POSTGRES_PASSWORD: rag_password
-      POSTGRES_DB: enterprise_rag
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
-
-volumes:
-  jaeger_data:
-  pgdata:
-```
-
-#### Hardened Multi-Stage Container (`Dockerfile`)
-```dockerfile
-FROM python:3.11-slim AS builder
-RUN pip install --no-cache-dir --user -r requirements.txt
-
-FROM python:3.11-slim AS runner
-RUN groupadd -g 10001 appgroup && useradd -u 10001 -g appgroup -m -s /bin/bash appuser
-USER appuser
-HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8000/healthz || exit 1
-```
-
-</details>
 
 ---
 
@@ -672,44 +547,11 @@ filters_dict = {"OR": [{"allowed_roles": role} for role in sanitized_roles]}
 results = await client.query_index(query_vector=query_vector, filters_json=json.dumps(filters_dict), limit=limit)
 ```
 
-<details>
-<summary><b>⚙️ Expand Cloud Provisioning Guardrails, <code>.env</code> Settings & Migration Commands</b></summary>
-
-#### Cloud Resource Provisioning Notes
-* **Azure AI Search**: Provision Standard tier (`search-enterprise-rag`) with **Bing Semantic Ranker** (`semantic-config`) and Azure OpenAI (`gpt-4o`, `text-embedding-3-large`).
-* **Google Cloud Vertex AI**:
-  * Create a 1536-d `COSINE` Tree-AH (ScaNN) index and deploy to a public endpoint (`*.vdb.vertexai.goog` data-plane domain required for `:findNeighbors`).
-  * `IndexDatapoint` only accepts `datapointId`, `featureVector`, `restricts` (using `"allowList"`), and `crowdingTag`.
-  * **Two-Tier Chunk Hydration**: `scripts/migrate_pg_to_gcp.py` exports `app/db/gcp_chunks_cache.json` for **<1ms** local chunk hydration with automatic PostgreSQL fallback.
-* **Databricks Mosaic AI**: Enable Change Data Feed (`delta.enableChangeDataFeed = true`) on Unity Catalog table `main.enterprise_rag.document_chunks` and sync index `document_chunks_index`.
-
-#### Multi-Cloud `.env` Template & Migration CLI
-```ini
-RETRIEVAL_BACKEND="azure" # 'pgvector' | 'azure' | 'gcp' | 'databricks'
-
-# Azure AI
-AZURE_OPENAI_ENDPOINT="https://oai-enterprise-rag.openai.azure.com/"
-AZURE_SEARCH_ENDPOINT="https://search-enterprise-rag.search.windows.net"
-AZURE_SEARCH_INDEX_NAME="enterprise-documents-index"
-
-# Google Cloud Vertex AI
-GCP_PROJECT_ID="gen-lang-client-0795078481"
-GCP_INDEX_ENDPOINT_DOMAIN="1876216656.us-central1-226714713434.vdb.vertexai.goog"
-GCP_DEPLOYED_INDEX_ID="enterprise_rag_index"
-
-# Databricks Mosaic AI
-DATABRICKS_HOST="dbc-xxxx.cloud.databricks.com"
-DATABRICKS_VECTOR_SEARCH_ENDPOINT_NAME="enterprise_vs_endpoint"
-DATABRICKS_INDEX_NAME="main.enterprise_rag.document_chunks_index"
-```
-
-```powershell
-# Provision & migrate across all clouds
-python scripts/migrate_multicloud.py --target all
-python -m pytest tests/test_azure_search.py tests/test_multicloud_search.py -v
-```
-
-</details>
+* **Cloud Provisioning Guardrails**:
+  * **Azure AI Search**: Standard tier (`search-enterprise-rag`) with **Bing Semantic Ranker** (`semantic-config`) and Azure OpenAI (`gpt-4o`, `text-embedding-3-large`).
+  * **Google Cloud Vertex AI**: Uses 1536-d `COSINE` Tree-AH (ScaNN) on the public `*.vdb.vertexai.goog` data-plane domain, `"allowList"` inside `restricts`, and **Two-Tier Chunk Hydration** (`app/db/gcp_chunks_cache.json` for **<1ms** local lookups with PostgreSQL fallback).
+  * **Databricks Mosaic AI**: Unity Catalog table `main.enterprise_rag.document_chunks` with `delta.enableChangeDataFeed = true`.
+  * **Unified Migration CLI**: Run `python scripts/migrate_multicloud.py --target all` (see [Section 10.5](#105-multi-cloud-env--migration-reference) for `.env` template).
 
 ---
 
@@ -808,9 +650,9 @@ Run the complete test suite **100% offline** in ~41s via `python -m pytest -v`:
 
 ---
 
-## 10. Codebase Organization & Master File Cross-Reference
+## 10. Codebase Organization, Configuration & Code Reference
 
-### Directory Structure
+### 10.1. Directory Structure
 
 ```text
 enterprise-rag-pgvector-rbac/
@@ -843,7 +685,7 @@ enterprise-rag-pgvector-rbac/
 └── requirements.txt            # Production pinned dependencies
 ```
 
-### Master File & Symbol Cross-Reference
+### 10.2. Master File & Symbol Cross-Reference
 
 | System Layer | File Location | Key Symbols & Responsibilities |
 | :--- | :--- | :--- |
@@ -863,6 +705,112 @@ enterprise-rag-pgvector-rbac/
 | **AST Guardrails** | [`agent/guardrails.py`](file:///c:/src/enterprise-rag-pgvector-rbac/agent/guardrails.py) | `PolicyEngine`, `GroundingGuardrail`, AST static code inspection & secret scanner. |
 | **Shared Utilities** | [`libs/utilities.py`](file:///c:/src/enterprise-rag-pgvector-rbac/libs/utilities.py) | `compute_file_hash`, `reciprocal_rank_fusion`, `rerank_candidates`, Tiktoken splitters. |
 | **Ingestion & Migration**| [`scripts/ingest.py`](file:///c:/src/enterprise-rag-pgvector-rbac/scripts/ingest.py) | `ingest_documents`, [`scripts/migrate_multicloud.py`](file:///c:/src/enterprise-rag-pgvector-rbac/scripts/migrate_multicloud.py) unified cloud orchestrator. |
+
+### 10.3. PostgreSQL 16 & pgvector DDL Reference (`schema.sql`)
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE TABLE IF NOT EXISTS documents (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    document_id VARCHAR(100) NOT NULL UNIQUE,
+    title VARCHAR(255) NOT NULL,
+    source_path TEXT,
+    file_hash CHAR(64) UNIQUE,
+    file_type VARCHAR(16) DEFAULT 'markdown',
+    allowed_roles JSONB NOT NULL DEFAULT '[]'::jsonb,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    chunk_id VARCHAR(128) NOT NULL UNIQUE,
+    chunk_index INT NOT NULL DEFAULT 0,
+    content TEXT NOT NULL,
+    token_count INT,
+    embedding vector(1536) NOT NULL,
+    embedding_model VARCHAR(100) DEFAULT 'text-embedding-3-large',
+    tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw ON document_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS idx_documents_allowed_roles_gin ON documents USING gin (allowed_roles jsonb_path_ops);
+CREATE INDEX IF NOT EXISTS idx_documents_file_hash ON documents (file_hash);
+CREATE INDEX IF NOT EXISTS idx_chunks_content_tsv ON document_chunks USING gin (tsv);
+```
+
+### 10.4. Container & Observability Configuration Reference
+
+```yaml
+# docker-compose.yml — Persistent Jaeger Badger LSM + PostgreSQL 16 pgvector
+version: "3.8"
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    user: "0:0"
+    environment:
+      - SPAN_STORAGE_TYPE=badger
+      - BADGER_EPHEMERAL=false
+      - BADGER_DIRECTORY_VALUE=/badger/data
+      - BADGER_DIRECTORY_KEY=/badger/key
+      - BADGER_SPAN_STORE_TTL=168h
+    ports: ["16686:16686", "4317:4317"]
+    volumes: ["jaeger_data:/badger"]
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: enterprise-rag-db
+    environment:
+      POSTGRES_USER: rag_user
+      POSTGRES_PASSWORD: rag_password
+      POSTGRES_DB: enterprise_rag
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    restart: unless-stopped
+
+volumes:
+  jaeger_data:
+  pgdata:
+```
+
+```dockerfile
+# Dockerfile — Hardened Multi-Stage Non-Root Container
+FROM python:3.11-slim AS builder
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+FROM python:3.11-slim AS runner
+RUN groupadd -g 10001 appgroup && useradd -u 10001 -g appgroup -m -s /bin/bash appuser
+USER appuser
+HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8000/healthz || exit 1
+```
+
+### 10.5. Multi-Cloud `.env` & Migration Reference
+
+```ini
+RETRIEVAL_BACKEND="azure" # 'pgvector' | 'azure' | 'gcp' | 'databricks'
+
+# Azure AI Search & OpenAI
+AZURE_OPENAI_ENDPOINT="https://oai-enterprise-rag.openai.azure.com/"
+AZURE_SEARCH_ENDPOINT="https://search-enterprise-rag.search.windows.net"
+AZURE_SEARCH_INDEX_NAME="enterprise-documents-index"
+
+# Google Cloud Vertex AI Vector Search
+GCP_PROJECT_ID="gen-lang-client-0795078481"
+GCP_INDEX_ENDPOINT_DOMAIN="1876216656.us-central1-226714713434.vdb.vertexai.goog"
+GCP_DEPLOYED_INDEX_ID="enterprise_rag_index"
+
+# Databricks Mosaic AI Vector Search
+DATABRICKS_HOST="dbc-xxxx.cloud.databricks.com"
+DATABRICKS_VECTOR_SEARCH_ENDPOINT_NAME="enterprise_vs_endpoint"
+DATABRICKS_INDEX_NAME="main.enterprise_rag.document_chunks_index"
+```
 
 ---
 
