@@ -16,6 +16,7 @@
 9. **`content-brief-and-calendar-generator`**: Search intent analysis, developer persona profiling, and multi-week editorial scheduling.
 10. **`regex-and-cron-utility`**: Dialect validation, ReDoS prevention, regex test matrices, and 5/6-field cron schedule breakdowns.
 11. **`mermaid-diagram-optimizer`**: Compact multi-stage flowchart restructuring, 16:9/4:3 aspect ratio targeting, line wrapping (`<br/>` <= 22 chars), universal quoted syntax, and Dagre rank splay prevention.
+12. **`tiered-subagent-routing`**: Pairs frontier reasoning models (`model: inherit`) with Gemini Flash mechanical log-triage subagents (`model: flash`, `test-triager`) and Gemini Pro independent LLM-as-a-judge diff verifiers (`model: pro`, `cross-model-judge`).
 
 ### Behavioral Enforcement
 - **Single-File Documentation Policy (CRITICAL)**: All project, architectural, runbook, and migration markdown documentation MUST reside exclusively in [`README.md`](file:///c:/src/enterprise-rag-pgvector-rbac/README.md). Never create separate documentation `.md` files in `docs/` or root directories—always consolidate and maintain all documentation directly inside `README.md`.

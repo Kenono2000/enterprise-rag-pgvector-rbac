@@ -1,6 +1,6 @@
 ---
 name: code-reviewer
-description: Structured code review discipline: correctness, design, readability, and security checks with actionable feedback. Use when reviewing diffs, PRs, or code snippets before merge or after writing.
+description: "Structured code review discipline covering correctness, design, readability, and security checks with actionable feedback. Use when reviewing diffs, PRs, or code snippets before merge or after writing."
 category: development
 ---
 
