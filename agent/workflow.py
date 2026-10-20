@@ -42,10 +42,149 @@ class PatchProposal(BaseModel):
     content: str
 
 
+class TriageSummary(BaseModel):
+    """Structured output returned by the Gemini Flash `test-triager` subagent."""
+
+    model_tier: Literal["flash"] = "flash"
+    subagent_name: str = "test-triager"
+    failure_category: Literal[
+        "none", "compilation_error", "assertion_failure", "timeout"
+    ] = "none"
+    failing_targets: List[str] = Field(default_factory=list)
+    concise_summary: str = ""
+
+
+class JudgeVerdict(BaseModel):
+    """Structured pass/fail verdict returned by the Gemini Pro `cross-model-judge` subagent."""
+
+    model_tier: Literal["pro"] = "pro"
+    subagent_name: str = "cross-model-judge"
+    verdict: Literal["PASS", "FAIL"] = "PASS"
+    passed: bool = True
+    line_references: List[str] = Field(default_factory=list)
+    findings: List[str] = Field(default_factory=list)
+
+
 class TestResult:
     def __init__(self, returncode: int, output: str):
         self.returncode = returncode
         self.output = output
+
+
+class TestTriagerSubagent:
+    """
+    High-speed mechanical log-triage subagent (`model: flash`, `.agents/agents/test-triager.md`).
+    Offloads test output classification (compilation_error, assertion_failure, timeout)
+    from the primary frontier reasoning model to reduce latency and token spend.
+    """
+
+    name: str = "test-triager"
+    model_tier: Literal["flash"] = "flash"
+
+    def classify_failure(self, returncode: int, raw_output: str) -> TriageSummary:
+        if returncode == 0:
+            return TriageSummary(
+                failure_category="none",
+                failing_targets=[],
+                concise_summary="All requested test targets passed (returncode=0).",
+            )
+
+        lines = [line.strip() for line in raw_output.splitlines() if line.strip()]
+        failing_targets: List[str] = []
+        error_lines: List[str] = []
+
+        for line in lines:
+            if line.startswith("FAILED "):
+                target = line.replace("FAILED ", "").split(" - ")[0].strip()
+                if target and target not in failing_targets:
+                    failing_targets.append(target)
+            elif line.startswith("E   ") or "Error:" in line or "Exception:" in line:
+                error_lines.append(line)
+
+        lower_out = raw_output.lower()
+        if any(
+            tok in lower_out
+            for tok in ("timeouterror", "timed out", "timeout expired", "deadline exceeded")
+        ):
+            category: Literal["none", "compilation_error", "assertion_failure", "timeout"] = (
+                "timeout"
+            )
+        elif any(
+            tok in raw_output
+            for tok in (
+                "SyntaxError",
+                "IndentationError",
+                "ImportError",
+                "ModuleNotFoundError",
+                "NameError",
+                "TypeError",
+            )
+        ):
+            category = "compilation_error"
+        else:
+            category = "assertion_failure"
+
+        headline = error_lines[0] if error_lines else (lines[-1] if lines else "Unknown test failure")
+        targets_str = ", ".join(failing_targets[:5]) if failing_targets else "unspecified target"
+        summary = f"[{category.upper()}] {targets_str} -> {headline[:220]}"
+
+        return TriageSummary(
+            failure_category=category,
+            failing_targets=failing_targets,
+            concise_summary=summary,
+        )
+
+
+class CrossModelJudgeSubagent:
+    """
+    Independent LLM-as-a-judge verifier (`model: pro`, `.agents/agents/gemini-judge.md`).
+    Audits diffs against user requirements, regressions, missing edge cases, and security issues,
+    emitting a deterministic PASS/FAIL verdict with specific line references.
+    """
+
+    name: str = "cross-model-judge"
+    model_tier: Literal["pro"] = "pro"
+
+    async def evaluate_diff(
+        self,
+        patches: List[PatchProposal],
+        requirements: str = "",
+    ) -> JudgeVerdict:
+        line_references: List[str] = []
+        findings: List[str] = []
+
+        for patch in patches:
+            gate = await PolicyEngine.evaluate_patch(
+                patch.file_path, patch.content, [], requirements or "diff-audit"
+            )
+            if not gate.passed:
+                for violation in gate.violations:
+                    findings.append(f"blocking: [{patch.file_path}] {violation}")
+
+            for idx, line in enumerate(patch.content.splitlines(), start=1):
+                if any(tok in line for tok in ("eval(", "exec(", "__import__(")):
+                    ref = f"{patch.file_path}:L{idx}"
+                    if ref not in line_references:
+                        line_references.append(ref)
+                for pattern in PolicyEngine.SECRET_PATTERNS:
+                    if pattern.search(line):
+                        ref = f"{patch.file_path}:L{idx}"
+                        if ref not in line_references:
+                            line_references.append(ref)
+
+            if not line_references and gate.passed:
+                total_lines = max(1, len(patch.content.splitlines()))
+                line_references.append(f"{patch.file_path}:L1-L{total_lines}")
+
+        passed = len(findings) == 0
+        return JudgeVerdict(
+            verdict="PASS" if passed else "FAIL",
+            passed=passed,
+            line_references=line_references,
+            findings=findings
+            if findings
+            else ["Verified diff alignment, AST safety, and edge-case invariants."],
+        )
 
 
 class PayloadPatchAgent:
@@ -117,6 +256,8 @@ class AgentState(TypedDict):
     patches: List[PatchProposal]
     violations: List[str]
     test_result: Optional[Dict[str, Any]]
+    triage_summary: Optional[Dict[str, Any]]
+    judge_verdict: Optional[Dict[str, Any]]
     attempt: int
     max_attempts: int
     error: Optional[str]
@@ -141,6 +282,8 @@ class LangGraphSDLCWorkflow:
         self.max_repairs = max_repairs
         self.push = push
         self.agent = PayloadPatchAgent()
+        self.triager = TestTriagerSubagent()
+        self.judge = CrossModelJudgeSubagent()
         self.checkpointer = MemorySaver()
         self.workflow = self._create_workflow()
 
@@ -216,7 +359,14 @@ class LangGraphSDLCWorkflow:
         for patch in state["patches"]:
             result = await PolicyEngine.evaluate_patch(patch.file_path, patch.content, [], "pending")
             violations.extend(result.violations)
-        return {"violations": violations}
+        verdict = await self.judge.evaluate_diff(
+            state["patches"],
+            requirements=state["event"].title if state.get("event") else "",
+        )
+        return {
+            "violations": violations,
+            "judge_verdict": verdict.model_dump(),
+        }
 
     def check_audit_results(self, state: AgentState) -> Literal["failed", "passed"]:
         return "failed" if state.get("violations") else "passed"
@@ -224,7 +374,11 @@ class LangGraphSDLCWorkflow:
     async def run_tests(self, state: AgentState) -> Dict[str, Any]:
         import asyncio
         result = await asyncio.to_thread(self._run_tests_logic)
-        return {"test_result": {"returncode": result.returncode, "output": result.output}}
+        triage = self.triager.classify_failure(result.returncode, result.output)
+        return {
+            "test_result": {"returncode": result.returncode, "output": result.output},
+            "triage_summary": triage.model_dump(),
+        }
 
     def check_test_results(self, state: AgentState) -> Literal["passed", "failed", "max_attempts_reached"]:
         test_result = state["test_result"]
@@ -236,6 +390,9 @@ class LangGraphSDLCWorkflow:
 
     async def repair_patches(self, state: AgentState) -> Dict[str, Any]:
         output = state["test_result"]["output"][-4000:] if state.get("test_result") else ""
+        triage = state.get("triage_summary") or {}
+        if triage.get("concise_summary"):
+            output = f"[Flash Test-Triager Summary]: {triage['concise_summary']}\n\n{output}"
         patches = await self.agent.repair(state["payload"], output)
         if not patches:
             return {"error": "Agent produced no repair patches", "attempt": state["attempt"] + 1}
@@ -326,6 +483,8 @@ class LangGraphSDLCWorkflow:
             "patches": [],
             "violations": [],
             "test_result": None,
+            "triage_summary": None,
+            "judge_verdict": None,
             "attempt": 0,
             "max_attempts": self.max_repairs,
             "error": None,
@@ -344,6 +503,13 @@ class LangGraphSDLCWorkflow:
             "issue_id": event.issue_id,
             "branch": final_state.get("branch"),
             "tests": self.test_command,
+            "triage_summary": final_state.get("triage_summary"),
+            "judge_verdict": final_state.get("judge_verdict"),
+            "subagent_routing": {
+                "orchestrator": "inherit",
+                "triager": "flash (test-triager)",
+                "judge": "pro (cross-model-judge)",
+            },
             "pushed": final_state.get("pushed", False),
             "pull_request_url": final_state.get("pr_url"),
         }

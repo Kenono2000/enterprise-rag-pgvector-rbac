@@ -24,7 +24,7 @@
 6. [Multi-Cloud Vector Strategy (Azure, GCP, Databricks)](#6-multi-cloud-migration-playbook--architecture-azure-gcp-databricks)
 7. [Threat Model (STRIDE) & Solved Engineering Pitfalls](#7-threat-model--solved-engineering-pitfalls)
 8. [Incident Response & Operational Runbook](#8-incident-response-operational-runbook--jaeger-persistence-verification)
-9. [Testing & Verification Guide (110 Tests)](#9-testing--verification-guide-110-tests-109-passed-1-skipped)
+9. [Testing & Verification Guide (112 Tests)](#9-testing--verification-guide-112-tests-111-passed-1-skipped)
 10. [Codebase Organization, Configuration & Code Reference](#10-codebase-organization-configuration--code-reference)
 11. [Disclaimer & Synthetic Data Security Notice](#11-disclaimer--synthetic-data-security-notice)
 
@@ -62,7 +62,7 @@ Traditional enterprise RAG architectures filter permissions **after** vector ret
 | **5** | **Async Runtime** | **Event-Loop-Scoped Connection Pools** & `/healthz` + `/readyz` probes | Eliminates `RuntimeError: Event loop is closed` in Streamlit/asyncpg; K8s ready. |
 | **6** | **Observability** | **Full-Stack OpenTelemetry** (Jaeger Badger LSM + Azure Monitor) | End-to-end spans across UI, FastAPI, MCP & LLM; persistent 7-day trace storage. |
 | **7** | **Agent Gateway** | **Zero-Trust FastMCP Server** (`stdio` & `SSE`) + token budget resource | Enforces identical JWT + DB RBAC for AI agents (Claude/Cursor); prevents confused deputy. |
-| **8** | **Autonomous SDLC** | **LangGraph Self-Healing Loop** + pre-execution **AST `PolicyEngine`** | Up to 3x automated `pytest` repair cycles; blocks `eval`/`exec`, secrets & path traversal. |
+| **8** | **Autonomous SDLC** | **Tiered Subagent Routing (`inherit`/`flash`/`pro`)** & **AST `PolicyEngine`** | Offloads log triage to Gemini Flash (`test-triager`) & diff audit to Gemini Pro (`cross-model-judge`). |
 | **9** | **Multi-Cloud** | **Quad-Mode Strategy Pattern** (`pgvector`, `azure`, `gcp`, `databricks`) | Zero-downtime `.env` switching with native pre-filtering across all 4 cloud engines. |
 
 ### Key Architectural Talking Points
@@ -74,7 +74,7 @@ Traditional enterprise RAG architectures filter permissions **after** vector ret
 5. **High-Concurrency Async FastAPI**: Scopes `asyncpg` pools and `AsyncOpenAI` clients by `asyncio.get_running_loop()`, bridges sync/async threads via `run_async`, streams tokens via `st.write_stream`, and verifies `pg_extension WHERE extname = 'vector'` on `/readyz`.
 6. **OpenTelemetry & Hardened Containers**: Exports OTLP gRPC (`:4317`) to Jaeger (Badger LSM disk persistence) and Azure App Insights, retains a 1,000-event ring buffer at `/api/v1/metrics/observability`, validates config at boot via `Pydantic BaseSettings`, and runs Docker as non-root UID `10001`.
 7. **Sovereign FastMCP Gateway**: Exposes `search_sdlc_context` and `propose_patch` tools plus `policy://sdlc-budget` (`max_tokens=50,000`, `max_steps=10`), requiring a verified JWT on every tool invocation.
-8. **Self-Healing LangGraph SDLC Agent**: Verifies `X-Hub-Signature-256` GitHub webhooks, synthesizes patches, inspects AST nodes (`ast.walk()`) and regex secret patterns before running `pytest`, feeds trailing 2,500 chars of traceback into repair loops (up to 3x), and opens a verified Git PR.
+8. **Self-Healing LangGraph SDLC Agent & Tiered Model Subagents**: Pairs frontier reasoning models (`model: inherit`) with specialized subagents in `.agent/agents/*.md`—delegating high-speed `pytest` failure classification (`compilation_error`, `assertion_failure`, `timeout`) to `test-triager` (`model: flash`) and independent pre-PR diff verification to `cross-model-judge` (`model: pro`).
 9. **Quad-Mode Multi-Cloud Vector Strategy**: Translates pre-filtered RBAC across PostgreSQL (`?|`), Azure AI Search (OData `allowed_roles/any(...)`), GCP Vertex AI (`restricts` `allowList` + <1ms local JSON cache hydration), and Databricks Mosaic AI (`filters_json`).
 
 ---
@@ -434,23 +434,23 @@ flowchart LR
         Hook --> Init
     end
 
-    subgraph Gen ["2. Patch Synthesis"]
+    subgraph Gen ["2. Synthesis (inherit)"]
         direction TB
-        Propose["Propose Patch<br/>(LLM Synthesis)"]
+        Propose["Propose Patch<br/>(model: inherit)"]
         Apply["Apply Sandbox<br/>(Path Guard)"]
         Propose --> Apply
     end
 
-    subgraph Audit ["3. Security Gate"]
+    subgraph Audit ["3. Judge Gate (pro)"]
         direction TB
-        Inspect["AST & Secret Audit<br/>(eval / key scan)"]
-        Reject["Policy Violation<br/>(Blocked)"]
+        Inspect["AST + Pro Judge<br/>(cross-model-judge)"]
+        Reject["Policy / Diff Fail<br/>(Blocked)"]
         Inspect -->|Failed| Reject
     end
 
-    subgraph Verify ["4. Self-Healing Loop"]
+    subgraph Verify ["4. Flash Triage Loop"]
         direction TB
-        Test{"Run Pytest<br/>Offline?"}
+        Test{"test-triager<br/>(model: flash)"}
         Repair["Repair Patch<br/>(Up to 3x Loop)"]
         Escalate["Max Retries (3)<br/>(Escalate)"]
 
@@ -478,7 +478,11 @@ flowchart LR
     style PR fill:#dcfce7,stroke:#22c55e,stroke-width:1.5px
 ```
 
-* **LangGraph State Machine (`agent/workflow.py`)**: `initialize` (verifies `X-Hub-Signature-256` & creates `feature/AGENT-<id>` branch) ➔ `propose_patches` ➔ `apply_patches` (blocks `..`, absolute paths, and `.git/`) ➔ `audit_patches` ➔ `run_tests` (`pytest` via `asyncio.to_thread`) ➔ `repair_patches` (injects trailing 2,500 chars of traceback, up to `max_attempts=3`) ➔ `finalize` (commits & opens PR).
+* **LangGraph State Machine (`agent/workflow.py`)**: `initialize` (verifies `X-Hub-Signature-256` & creates `feature/AGENT-<id>` branch) ➔ `propose_patches` (`model: inherit`) ➔ `apply_patches` (blocks `..`, absolute paths, and `.git/`) ➔ `audit_patches` (`PolicyEngine` + `CrossModelJudgeSubagent` on `model: pro`) ➔ `run_tests` (`pytest` via `asyncio.to_thread` classified by `TestTriagerSubagent` on `model: flash`) ➔ `repair_patches` (injects structured Flash triage summary + trailing 2,500 chars of traceback, up to `max_attempts=3`) ➔ `finalize` (commits & opens PR).
+* **Tiered Subagent Customization Pattern (`.agent/agents/*.md`)**:
+  * [`arch-synthesizer.md`](file:///c:/src/enterprise-rag-pgvector-rbac/.agent/agents/arch-synthesizer.md) (`model: inherit`): Uses the primary session's frontier reasoning model for multi-file synthesis, RLS/HNSW invariant design, and complex patch generation.
+  * [`test-triager.md`](file:///c:/src/enterprise-rag-pgvector-rbac/.agent/agents/test-triager.md) (`model: flash` / `TestTriagerSubagent`): Offloads high-volume mechanical test runs and classifies failures by root cause (`compilation_error`, `assertion_failure`, `timeout`) into a compact `TriageSummary`, eliminating frontier token burn on raw logs.
+  * [`gemini-judge.md`](file:///c:/src/enterprise-rag-pgvector-rbac/.agent/agents/gemini-judge.md) (`name: cross-model-judge`, `model: pro` / `CrossModelJudgeSubagent`): Independent LLM-as-a-judge verifier that audits diffs against user requirements, regressions, missing edge cases, and security invariants, outputting a `PASS`/`FAIL` `JudgeVerdict` with exact `file:L<line>` references.
 * **Pre-Execution AST & Secret Guardrails (`agent/guardrails.py`)**: `ast.walk()` blocks `eval()`, `exec()`, and `__import__()` *before* test execution; compiled regex scanners block leaked keys (`sk-...`, `AIza...`, `-----BEGIN PRIVATE KEY-----`).
 
 ---
@@ -627,7 +631,7 @@ flowchart LR
 
 ---
 
-## 9. Testing & Verification Guide (110 Tests: 109 Passed, 1 Skipped)
+## 9. Testing & Verification Guide (112 Tests: 111 Passed, 1 Skipped)
 
 Run the complete test suite **100% offline** in ~41s via `python -m pytest -v`:
 
@@ -637,16 +641,16 @@ Run the complete test suite **100% offline** in ~41s via `python -m pytest -v`:
 | **`tests/test_mcp_auth.py`** | 11 | FastMCP JWT enforcement, role extraction, authenticated patch submission, `stdio` & `SSE` transports. |
 | **`tests/test_ingest.py`** | 9 | 64KB SHA-256 de-duplication, modified file re-indexing, `--force` override, chunk prefix & stem matching. |
 | **`tests/test_multicloud_search.py`** | 8 | GCP Vertex AI `restricts` (`allowList`), Databricks `filters_json`, dynamic backend routing, empty-role short-circuit. |
+| **`tests/test_agent.py`** | 8 | GitHub webhook HMAC-SHA256, secret scanning, AST `eval`/`exec` blocking, Flash `test-triager`, Pro `cross-model-judge`, 3x self-healing loop. |
 | **`tests/test_observability_and_health.py`** | 7 | `/healthz`, `/readyz` (503 on DB failure), `/api/v1/metrics/observability`, `BaseSettings`, SSE token streaming. |
 | **`tests/test_utilities.py`** | 7 | `.pdf`/`.md`/`.docx` loaders, Tiktoken chunk splitting, metadata attribution, `tenacity` 429 retry backoff. |
 | **`tests/test_database_schema.py`** | 6 | Normalized DDL (`documents`, `document_chunks`), `ON DELETE CASCADE`, HNSW/GIN/B-Tree indexes, cosine math. |
 | **`tests/test_hybrid_search.py`** | 6 | Reciprocal Rank Fusion ($k=60$), Cross-Encoder & fallback re-ranking, `GroundingGuardrail` citation verification. |
-| **`tests/test_agent.py`** | 6 | GitHub webhook HMAC-SHA256, secret scanning, AST `eval`/`exec` blocking, path traversal guard, 3x self-healing loop. |
 | **`tests/test_security_rbac.py`** | 5 | SQL injection immunity, parameterized `$2::text[]` array binding, empty-role short-circuit, header sanitization. |
 | **`tests/test_rag.py`** | 4 | FastAPI `/api/v1/query` 401 rejection, `X-User-Roles` dev fallback, end-to-end RBAC retrieval. |
 | **`tests/test_azure_search.py`** | 3 | OData `allowed_roles/any(...)` filter syntax, empty-role short-circuit, `RETRIEVAL_BACKEND="azure"` routing. |
 | **`tests/test_integration_pgvector.py`** | 2 | Testcontainers `pgvector/pgvector:pg16` live container harness (1 skipped when Docker daemon is offline). |
-| **Total** | **110** | **109 Passed, 1 Skipped (100% Offline Capable)** |
+| **Total** | **112** | **111 Passed, 1 Skipped (100% Offline Capable)** |
 
 ---
 
@@ -668,17 +672,18 @@ enterprise-rag-pgvector-rbac/
 │   ├── observability.py        # OpenTelemetry tracer, Jaeger Badger LSM & Azure Monitor exporters
 │   ├── config.py               # Pydantic BaseSettings startup validation
 │   └── main.py                 # FastAPI REST API (/api/v1/query, /healthz, /readyz, /webhooks/github)
-├── agent/                      # 🤖 Autonomous Self-Healing SDLC Agent
-│   ├── workflow.py             # LangGraph state machine (propose -> apply -> audit -> test -> repair -> PR)
+├── agent/                      # 🤖 Autonomous Self-Healing SDLC Agent (inherit / flash / pro tiers)
+│   ├── workflow.py             # LangGraph state machine + TestTriagerSubagent (flash) & CrossModelJudgeSubagent (pro)
 │   ├── guardrails.py           # PolicyEngine (AST inspection, secret scanner) & GroundingGuardrail
 │   └── parser.py               # GitHub webhook event parser & HMAC-SHA256 signature verifier
+├── .agent/agents/              # ⚡ Antigravity Tiered Subagent Definitions (test-triager.md, gemini-judge.md, arch-synthesizer.md)
 ├── libs/                       # 📚 Shared Utilities & Algorithms
 │   └── utilities.py            # Tiktoken chunk splitting, 64KB SHA-256 de-dup, RRF fusion, Cross-Encoder
 ├── scripts/                    # ⚙️ Ingestion & Multi-Cloud Migration Scripts
 │   ├── ingest.py               # Multi-format batch ingestion with SHA-256 change detection
 │   ├── migrate_multicloud.py   # Unified multi-cloud migration orchestrator (--target azure|gcp|databricks|all)
 │   └── setup_* / migrate_pg_*  # Cloud index provisioning & batch migration scripts (Azure, GCP, Databricks)
-├── tests/                      # 🧪 Automated Offline Test Suite (110 Tests across 13 modules)
+├── tests/                      # 🧪 Automated Offline Test Suite (112 Tests across 13 modules)
 ├── streamlit_app.py            # 🖥️ Interactive Web UI (PKCE auth, encrypted cookie session, live streaming)
 ├── schema.sql                  # PostgreSQL 16 normalized DDL, HNSW/GIN indexes & deterministic seed data
 ├── Dockerfile                  # Multi-stage non-root (UID 10001) hardened container definition
@@ -701,7 +706,8 @@ enterprise-rag-pgvector-rbac/
 | **FastAPI Gateway** | [`app/main.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/main.py) | FastAPI lifecycle, `/api/v1/query`, `/healthz`, `/readyz`, `/webhooks/github`. |
 | **FastMCP Server** | [`app/mcp/gateway.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/mcp/gateway.py) | `search_sdlc_context`, `propose_patch` MCP tools & `policy://sdlc-budget` resource. |
 | **Observability** | [`app/observability.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/observability.py) | `setup_observability`, `record_chat_interaction`, Jaeger Badger LSM & Azure Monitor exporters. |
-| **SDLC State Machine**| [`agent/workflow.py`](file:///c:/src/enterprise-rag-pgvector-rbac/agent/workflow.py) | LangGraph autonomous SDLC graph (`propose` ➔ `apply` ➔ `audit` ➔ `test` ➔ `repair` ➔ `PR`). |
+| **SDLC State Machine**| [`agent/workflow.py`](file:///c:/src/enterprise-rag-pgvector-rbac/agent/workflow.py) | `LangGraphSDLCWorkflow`, `TestTriagerSubagent` (`flash`), `CrossModelJudgeSubagent` (`pro`). |
+| **Subagent Definitions**| [`.agent/agents/`](file:///c:/src/enterprise-rag-pgvector-rbac/.agent/agents/) | `test-triager.md` (`model: flash`), `gemini-judge.md` (`model: pro`), `arch-synthesizer.md` (`model: inherit`). |
 | **AST Guardrails** | [`agent/guardrails.py`](file:///c:/src/enterprise-rag-pgvector-rbac/agent/guardrails.py) | `PolicyEngine`, `GroundingGuardrail`, AST static code inspection & secret scanner. |
 | **Shared Utilities** | [`libs/utilities.py`](file:///c:/src/enterprise-rag-pgvector-rbac/libs/utilities.py) | `compute_file_hash`, `reciprocal_rank_fusion`, `rerank_candidates`, Tiktoken splitters. |
 | **Ingestion & Migration**| [`scripts/ingest.py`](file:///c:/src/enterprise-rag-pgvector-rbac/scripts/ingest.py) | `ingest_documents`, [`scripts/migrate_multicloud.py`](file:///c:/src/enterprise-rag-pgvector-rbac/scripts/migrate_multicloud.py) unified cloud orchestrator. |

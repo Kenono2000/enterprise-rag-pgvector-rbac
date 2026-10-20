@@ -4,7 +4,15 @@ agent package - Autonomous SDLC Agent powered by LangGraph.
 
 from agent.parser import SDLCEvent, parse_github_webhook, verify_github_signature
 from agent.guardrails import PolicyEngine, SecurityGateResult
-from agent.workflow import LangGraphSDLCWorkflow, PatchProposal, PayloadPatchAgent
+from agent.workflow import (
+    LangGraphSDLCWorkflow,
+    PatchProposal,
+    PayloadPatchAgent,
+    TestTriagerSubagent,
+    CrossModelJudgeSubagent,
+    TriageSummary,
+    JudgeVerdict,
+)
 
 __all__ = [
     "SDLCEvent",
@@ -15,4 +23,8 @@ __all__ = [
     "LangGraphSDLCWorkflow",
     "PatchProposal",
     "PayloadPatchAgent",
+    "TestTriagerSubagent",
+    "CrossModelJudgeSubagent",
+    "TriageSummary",
+    "JudgeVerdict",
 ]

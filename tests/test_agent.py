@@ -13,6 +13,9 @@ from agent import (
     parse_github_webhook,
     verify_github_signature,
     LangGraphSDLCWorkflow,
+    PatchProposal,
+    TestTriagerSubagent,
+    CrossModelJudgeSubagent,
 )
 
 
@@ -128,4 +131,60 @@ async def test_langgraph_workflow_execution(tmp_path):
     assert result["status"] == "completed"
     assert "AGENT-123" in result["branch"]
     assert result["pushed"] is False
+    assert result["subagent_routing"]["triager"] == "flash (test-triager)"
+    assert result["subagent_routing"]["judge"] == "pro (cross-model-judge)"
+    assert result["judge_verdict"]["verdict"] == "PASS"
     assert "Fix value" in git(tmp_path, "log", "-1", "--format=%s").stdout
+
+
+def test_flash_test_triager_subagent():
+    triager = TestTriagerSubagent()
+    assert triager.model_tier == "flash"
+    assert triager.name == "test-triager"
+
+    passed_res = triager.classify_failure(0, "10 passed in 0.42s")
+    assert passed_res.failure_category == "none"
+
+    syntax_res = triager.classify_failure(
+        1,
+        "FAILED tests/test_auth.py::test_pkce - SyntaxError: invalid syntax",
+    )
+    assert syntax_res.failure_category == "compilation_error"
+    assert "tests/test_auth.py::test_pkce" in syntax_res.failing_targets
+
+    assert_res = triager.classify_failure(
+        1,
+        "FAILED tests/test_rag.py::test_rbac\nE   AssertionError: expected 200 got 403",
+    )
+    assert assert_res.failure_category == "assertion_failure"
+    assert "tests/test_rag.py::test_rbac" in assert_res.failing_targets
+
+    timeout_res = triager.classify_failure(
+        1,
+        "FAILED tests/test_db.py::test_pool - asyncio.TimeoutError: pool timed out",
+    )
+    assert timeout_res.failure_category == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_pro_cross_model_judge_subagent():
+    judge = CrossModelJudgeSubagent()
+    assert judge.model_tier == "pro"
+    assert judge.name == "cross-model-judge"
+
+    safe_verdict = await judge.evaluate_diff(
+        [PatchProposal(file_path="app/utils.py", content="def add(a: int, b: int) -> int:\n    return a + b\n")],
+        requirements="Add integer helper",
+    )
+    assert safe_verdict.verdict == "PASS"
+    assert safe_verdict.passed is True
+    assert "app/utils.py:L1-L2" in safe_verdict.line_references
+
+    unsafe_verdict = await judge.evaluate_diff(
+        [PatchProposal(file_path="app/bad.py", content="x = 1\neval('os.system(\"id\")')\n")],
+        requirements="Check security gate",
+    )
+    assert unsafe_verdict.verdict == "FAIL"
+    assert unsafe_verdict.passed is False
+    assert "app/bad.py:L2" in unsafe_verdict.line_references
+
