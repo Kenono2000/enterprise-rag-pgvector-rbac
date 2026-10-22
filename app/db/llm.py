@@ -18,7 +18,7 @@ _openai_clients: dict[asyncio.AbstractEventLoop, AsyncOpenAI | AsyncAzureOpenAI]
 def is_azure_backend() -> bool:
     """Return True if Azure OpenAI should be used."""
     backend = os.getenv("RETRIEVAL_BACKEND", "").lower()
-    return (backend == "azure" or bool(azure_openai_endpoint)) and bool(azure_openai_endpoint and azure_openai_api_key)
+    return backend == "azure" and bool(azure_openai_endpoint and azure_openai_api_key)
 
 
 def is_databricks_backend() -> bool:
@@ -46,7 +46,7 @@ def get_openai_client() -> AsyncOpenAI | AsyncAzureOpenAI | None:
 
         if loop is not None:
             client = _openai_clients.get(loop)
-            if client is None or client.is_closed():
+            if client is None or client.is_closed() or isinstance(client, AsyncAzureOpenAI):
                 client = AsyncAzureOpenAI(
                     azure_endpoint=azure_openai_endpoint,
                     api_key=azure_openai_api_key,
@@ -84,7 +84,7 @@ def get_openai_client() -> AsyncOpenAI | AsyncAzureOpenAI | None:
 
     if loop is not None:
         client = _openai_clients.get(loop)
-        if client is None or client.is_closed():
+        if client is None or client.is_closed() or isinstance(client, AsyncAzureOpenAI):
             client = AsyncOpenAI(api_key=openai_api_key)
             _openai_clients[loop] = client
         return client

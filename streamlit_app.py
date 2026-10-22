@@ -56,7 +56,11 @@ from app.auth import (
     extract_roles,
     ensure_google_application_credentials,
 )
-from app.db import DatabaseManager, generate_embedding, chat_completion, chat_completion_stream_sync
+import importlib
+import app.db.llm as _llm_module
+importlib.reload(_llm_module)
+from app.db.llm import generate_embedding, chat_completion, chat_completion_stream_sync
+from app.db import DatabaseManager
 from app.observability import tracer
 import time
 
