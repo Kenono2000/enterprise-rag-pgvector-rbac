@@ -6,7 +6,7 @@
 | **Interactive UI** | Shift-Left In-Database RBAC & Session Monitor | [enterprise-rag-pgvector-rbac.streamlit.app](https://enterprise-rag-pgvector-rbac.streamlit.app) |
 | **API Docs** | Live OpenAPI / Interactive Swagger UI | [enterprise-rag-api-ksez.onrender.com/docs](https://enterprise-rag-api-ksez.onrender.com/docs) |
 | **Source Code** | Auditable Source Repository & Offline Test Suite | [github.com/Kenono2000/enterprise-rag-pgvector-rbac](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac) |
-**Quick Navigation:** [1. Why In-DB RBAC?](#1-the-core-value-why-in-database-rbac) · [2. Executive Summary](#2-executive-summary-the-9-core-engineering-patterns) · [3. Architecture & Blueprints](#3-system-architecture--visual-blueprints) · [4. Quickstart](#4-5-minute-quickstart) · [5. 8 Engineering Layers](#5-architectural-deep-dive-the-8-engineering-layers) ([L1: DB](#layer-1-database--pgvector-rbac-schemasql--appdb) · [L2: Auth](#layer-2-identity-tokens--session-security-appauth) · [L3: Ingest](#layer-3-high-performance-ingestion-pipeline-scriptsingestpy--libsutilitiespy) · [L4: Hybrid RAG](#layer-4-rag-quality-hybrid-search--grounding-guardrails) · [L5: FastAPI/UI](#layer-5-fastapi-backend--streamlit-streaming-frontend) · [L6: OTel](#layer-6-observability-distributed-tracing--container-hardening) · [L7: FastMCP](#layer-7-fastmcp-agent-gateway-appmcp) · [L8: SDLC Agent](#layer-8-autonomous-self-healing-sdlc-agent-agent)) · [6. Multi-Cloud](#6-multi-cloud-migration-playbook--architecture-azure-gcp-databricks) · [7. Threat Model & Pitfalls](#7-threat-model--solved-engineering-pitfalls) · [8. Runbook](#8-incident-response-operational-runbook--jaeger-persistence-verification) · [9. Tests (112)](#9-testing--verification-guide-112-tests-111-passed-1-skipped) · [10. Code Reference](#10-codebase-organization-configuration--code-reference) · [11. Disclaimer](#11-disclaimer--synthetic-data-security-notice)
+**Quick Navigation:** [1. Why In-DB RBAC?](#1-the-core-value-why-in-database-rbac) · [2. Executive Summary](#2-executive-summary-the-9-core-engineering-patterns) · [3. Architecture & Blueprints](#3-system-architecture--visual-blueprints) · [4. Quickstart](#4-5-minute-quickstart) · [5. 8 Engineering Layers](#5-architectural-deep-dive-the-8-engineering-layers) ([L1: DB](#layer-1-database--pgvector-rbac-schemasql--appdb) · [L2: Auth](#layer-2-identity-tokens--session-security-appauth) · [L3: Ingest](#layer-3-high-performance-ingestion-pipeline-scriptsingestpy--libsutilitiespy) · [L4: Hybrid RAG](#layer-4-rag-quality-hybrid-search--grounding-guardrails) · [L5: FastAPI/UI](#layer-5-fastapi-backend--streamlit-streaming-frontend) · [L6: OTel](#layer-6-observability-distributed-tracing--container-hardening) · [L7: FastMCP](#layer-7-fastmcp-agent-gateway-appmcp) · [L8: SDLC Agent](#layer-8-autonomous-self-healing-sdlc-agent-agent)) · [6. Multi-Cloud](#6-multi-cloud-migration-playbook--architecture-azure-gcp-databricks) · [7. Threat Model & Pitfalls](#7-threat-model--solved-engineering-pitfalls) · [8. Runbook](#8-incident-response-operational-runbook--jaeger-persistence-verification) · [9. Tests (120)](#9-testing--verification-guide-120-tests-119-passed-1-skipped) · [10. Code Reference](#10-codebase-organization-configuration--code-reference) · [11. Disclaimer](#11-disclaimer--synthetic-data-security-notice)
 
 ## 1. The Core Value: Why In-Database RBAC?
 Traditional enterprise RAG architectures filter permissions **after** vector retrieval in Python memory (*Post-Filtering*), creating two critical production flaws:
@@ -26,9 +26,9 @@ Traditional enterprise RAG architectures filter permissions **after** vector ret
 | **2** | **Identity & Auth** | **Stateless OAuth 2.0 PKCE**, HMAC state & encrypted cookie rehydration | Survives F5 reloads & multi-worker scale-out with **zero Redis**; SOC-2 15m/12h bounds. |
 | **3** | **Ingestion Pipeline** | **64KB Streaming SHA-256 De-duplication** & token-aligned splitting | $O(1)$ skip for unchanged files; preserves Markdown tables; `tenacity` 429 backoff. |
 | **4** | **RAG Quality** | **Dense + Sparse Hybrid Search (RRF $k=60$)** & `GroundingGuardrail` | Captures semantic intent + exact SKUs/error codes; regex-verified citations. |
-| **5** | **Async Runtime** | **Event-Loop-Scoped Connection Pools** & `/healthz` + `/readyz` probes | Eliminates `RuntimeError: Event loop is closed` in Streamlit/asyncpg; K8s ready. |
+| **5** | **Async Runtime** | **Event-Loop-Scoped Pools**, `SKIP LOCKED` outbox & `/readyz` probes | Eliminates `RuntimeError: Event loop is closed`; durable worker queue; K8s ready. |
 | **6** | **Observability** | **Full-Stack OpenTelemetry** (Jaeger Badger LSM + Azure Monitor) | End-to-end spans across UI, FastAPI, MCP & LLM; persistent 7-day trace storage. |
-| **7** | **Agent Gateway** | **Zero-Trust FastMCP Server** (`stdio` & `SSE`) + token budget resource | Enforces identical JWT + DB RBAC for AI agents (Claude/Cursor); prevents confused deputy. |
+| **7** | **Agent Gateway** | **Zero-Trust FastMCP** (`extra='forbid'`, rate limiter & token breaker) | Enforces JWT + DB RBAC, 60 req/min sliding window & 8K/50K token circuit breakers. |
 | **8** | **Autonomous SDLC** | **Tiered Subagent Routing (`inherit`/`flash`/`pro`)** & **AST `PolicyEngine`** | Offloads log triage to Gemini Flash (`test-triager`) & diff audit to Gemini Pro (`cross-model-judge`). |
 | **9** | **Multi-Cloud** | **Quad-Mode Strategy Pattern** (`pgvector`, `azure`, `gcp`, `databricks`) | Zero-downtime `.env` switching with native pre-filtering across all 4 cloud engines. |
 ### Key Architectural Talking Points
@@ -36,10 +36,10 @@ Traditional enterprise RAG architectures filter permissions **after** vector ret
 2. **Stateless OAuth 2.0 PKCE & JWKS**: RFC 7636 `S256` code challenge, HMAC-SHA256 signed `state` (300s TTL), `zlib`-compressed HMAC session cookie (`enterprise_rag_session`) for silent OAuth token rotation on F5 refresh, and multi-IdP JWKS verification (`leeway=60s`) across Google, Azure AD, Okta, Cognito, and Keycloak.
 3. **Idempotent Ingestion**: B-Tree hash index (`idx_documents_file_hash`) detects file changes in 64KB blocks, purges stale chunks on update, splits on Markdown boundaries (`800` tokens, `100` overlap), and batches embeddings (`64` chunks/batch) with exponential backoff.
 4. **Hybrid Search, RRF & Anti-Hallucination**: Combines HNSW cosine similarity (`1 - <=>`) with GIN full-text search (`ts_rank`) via Reciprocal Rank Fusion, re-ranks via Cross-Encoder (or 50/35/15 weighted heuristic fallback), and enforces `[Doc: <Title>, Chunk <Index>]` citations or explicit refusal.
-5. **High-Concurrency Async FastAPI**: Scopes `asyncpg` pools and `AsyncOpenAI` clients by `asyncio.get_running_loop()`, bridges sync/async threads via `run_async`, streams tokens via `st.write_stream`, and verifies `pg_extension WHERE extname = 'vector'` on `/readyz`.
+5. **High-Concurrency Async FastAPI & Transactional Outbox**: Scopes `asyncpg` pools and `AsyncOpenAI` clients by `asyncio.get_running_loop()`, implements PostgreSQL transactional outbox queuing (`sdlc_outbox_events`) with `FOR UPDATE SKIP LOCKED` row-level worker locking, and verifies `pg_extension WHERE extname = 'vector'` on `/readyz`.
 6. **OpenTelemetry & Hardened Containers**: Exports OTLP gRPC (`:4317`) to Jaeger (Badger LSM disk persistence) and Azure App Insights, retains a 1,000-event ring buffer at `/api/v1/metrics/observability`, validates config at boot via `Pydantic BaseSettings`, and runs Docker as non-root UID `10001`.
-7. **Sovereign FastMCP Gateway**: Exposes `search_sdlc_context` and `propose_patch` tools plus `policy://sdlc-budget` (`max_tokens=50,000`, `max_steps=10`), requiring a verified JWT on every tool invocation.
-8. **Self-Healing LangGraph SDLC Agent & Tiered Model Subagents**: Pairs frontier reasoning models (`model: inherit`) with specialized subagents in `.agent/agents/*.md`—delegating high-speed `pytest` failure classification (`compilation_error`, `assertion_failure`, `timeout`) to `test-triager` (`model: flash`) and independent pre-PR diff verification to `cross-model-judge` (`model: pro`).
+7. **Sovereign FastMCP Gateway & Blast-Radius Controls**: Exposes `search_sdlc_context` and `propose_patch` tools with strict Pydantic `ConfigDict(extra="forbid")` schemas (`MCPSearchRequest`, `MCPPatchRequest`), per-caller `SlidingWindowRateLimiter` (60 req/60s), active `TokenCircuitBreaker` (`8,000` req / `50,000` issue tokens), and caller-attribution audit spans.
+8. **Self-Healing LangGraph SDLC Agent & Tiered Model Subagents**: Pairs frontier reasoning models (`model: inherit`) with specialized subagents in `.agent/agents/*.md`—delegating high-speed `pytest` failure classification (`compilation_error`, `assertion_failure`, `timeout`) and context compaction (`compact_agent_context`) to `test-triager` (`model: flash`) and independent pre-PR diff verification + rubric scoring to `cross-model-judge` (`model: pro`).
 9. **Quad-Mode Multi-Cloud Vector Strategy**: Translates pre-filtered RBAC across PostgreSQL (`?|`), Azure AI Search (OData `allowed_roles/any(...)`), GCP Vertex AI (`restricts` `allowList` + <1ms local JSON cache hydration), and Databricks Mosaic AI (`filters_json`).
 
 ## 3. System Architecture & Visual Blueprints
@@ -115,7 +115,7 @@ flowchart LR
 ```powershell
 git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
 python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run 100% offline test suite (112 tests)
+python -m pytest -v                                                     # 1. Run 100% offline test suite (120 tests)
 docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
@@ -249,12 +249,12 @@ flowchart LR
 * **Persistent Jaeger Badger LSM Storage**: Configured with `SPAN_STORAGE_TYPE=badger`, `user: "0:0"` volume permission hardening, and a 7-day TTL (`168h`) so traces survive container restarts (see [Section 10.4](#104-container--observability-configuration-reference)).
 * **Hardened Multi-Stage `Dockerfile` & Fail-Fast Config**: `Pydantic BaseSettings` (`app/config.py`) validates environment variables at startup; production container strips `gcc`/`libpq-dev` and runs as non-root `appuser` (UID `10001`).
 ### Layer 7: FastMCP Agent Gateway (`app/mcp/`)
-Standardizes Zero-Trust tool and resource access for external AI coding agents (Claude Desktop, Cursor, CLI agents) over `stdio` and `SSE`:
-| MCP Primitive | Signature | Zero-Trust Governance |
+Standardizes Zero-Trust tool and resource access for external AI coding agents (Claude Desktop, Cursor, CLI agents) over `stdio` and `SSE` with `ConfigDict(extra="forbid")` schemas (`MCPSearchRequest`, `MCPPatchRequest`), `SlidingWindowRateLimiter`, and `TokenCircuitBreaker`:
+| MCP Primitive | Signature | Zero-Trust & Blast-Radius Governance |
 | :--- | :--- | :--- |
-| **Tool** | `search_sdlc_context(question, auth_token, user_roles)` | Verifies caller JWT and executes in-database RBAC retrieval identical to human users. |
-| **Tool** | `propose_patch(branch_name, patch_content, auth_token)` | Authenticates submitter identity before writing unified diffs to an isolated branch. |
-| **Resource** | `policy://sdlc-budget` | Publishes token circuit breakers (`max_tokens=50,000`), step limits (`10`), and tool allowlists. |
+| **Tool** | `search_sdlc_context(question, auth_token, user_roles)` | Verifies caller JWT, enforces 60 req/min rate limit + 8K/50K token circuit breaker, and executes in-DB RBAC retrieval. |
+| **Tool** | `propose_patch(branch_name, patch_content, auth_token)` | Authenticates submitter identity, enforces rate & token circuit breakers, and emits caller-attributed OTel audit spans. |
+| **Resource** | `policy://sdlc-budget` | Publishes active token circuit breakers (`max_tokens_per_request=8,000`, `max_tokens_per_issue=50,000`), rate limits, and tool allowlists. |
 ### Layer 8: Autonomous Self-Healing SDLC Agent (`agent/`)
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
@@ -297,7 +297,7 @@ flowchart LR
   * [`arch-synthesizer.md`](file:///c:/src/enterprise-rag-pgvector-rbac/.agent/agents/arch-synthesizer.md) (`model: inherit`): Uses the primary session's frontier reasoning model for multi-file synthesis, RLS/HNSW invariant design, and complex patch generation.
   * [`test-triager.md`](file:///c:/src/enterprise-rag-pgvector-rbac/.agent/agents/test-triager.md) (`model: flash` / `TestTriagerSubagent`): Offloads high-volume mechanical test runs and classifies failures by root cause (`compilation_error`, `assertion_failure`, `timeout`) into a compact `TriageSummary`, eliminating frontier token burn on raw logs.
   * [`gemini-judge.md`](file:///c:/src/enterprise-rag-pgvector-rbac/.agent/agents/gemini-judge.md) (`name: cross-model-judge`, `model: pro` / `CrossModelJudgeSubagent`): Independent LLM-as-a-judge verifier that audits diffs against user requirements, regressions, missing edge cases, and security invariants, outputting a `PASS`/`FAIL` `JudgeVerdict` with exact `file:L<line>` references.
-* **Pre-Execution AST & Secret Guardrails (`agent/guardrails.py`)**: `ast.walk()` blocks `eval()`, `exec()`, and `__import__()` *before* test execution; compiled regex scanners block leaked keys (`sk-...`, `AIza...`, `-----BEGIN PRIVATE KEY-----`).
+* **Pre-Execution AST, Secret & Schema Drift Guardrails (`agent/guardrails.py`)**: `ast.walk()` blocks `eval()`, `exec()`, and `__import__()` *before* test execution; compiled regex scanners block leaked keys (`sk-...`, `AIza...`, `-----BEGIN PRIVATE KEY-----`); `PolicyEngine.verify_schema_drift()` enforces `extra='forbid'` (`additionalProperties=False`) and prevents breaking contract drift.
 
 ## 6. Multi-Cloud Migration Playbook & Architecture (Azure, GCP, Databricks)
 Switch runtime retrieval backends with zero downtime via `RETRIEVAL_BACKEND` (`pgvector` | `azure` | `gcp` | `databricks`):
@@ -398,24 +398,24 @@ flowchart LR
 * **Scenario B — JWKS Key Rotation Failure**: Verify `https://www.googleapis.com/oauth2/v3/certs`, restart the auth worker to flush `JWKSClient._cache`, and run `python -m pytest tests/test_auth.py -k "test_jwks" -v`.
 * **Verifying Persistent Jaeger Traces**: Submit a query on `:8501`, inspect `chat_interaction` tags (`rag.question`, `rag.response`) at `http://localhost:16686`, run `docker compose restart jaeger`, and refresh—all traces remain intact on disk via Badger LSM storage.
 
-## 9. Testing & Verification Guide (112 Tests: 111 Passed, 1 Skipped)
+## 9. Testing & Verification Guide (120 Tests: 119 Passed, 1 Skipped)
 Run the complete test suite **100% offline** in ~41s via `python -m pytest -v`:
 | Test Module | Tests | Key Invariants Verified |
 | :--- | :---: | :--- |
 | **`tests/test_auth.py`** | 34 | PKCE `S256`, stateless HMAC state (300s TTL), JWKS `leeway=60s`, multi-IdP claims, encrypted session cookies. |
-| **`tests/test_mcp_auth.py`** | 11 | FastMCP JWT enforcement, role extraction, authenticated patch submission, `stdio` & `SSE` transports. |
+| **`tests/test_mcp_auth.py`** | 14 | FastMCP JWT enforcement, `extra='forbid'` schemas, sliding-window rate limiter, token circuit breaker, `stdio` & `SSE`. |
+| **`tests/test_agent.py`** | 10 | Webhook HMAC-SHA256, AST `eval`/`exec` blocking, schema drift detection, prefix caching, Flash `test-triager`, Pro `cross-model-judge`. |
 | **`tests/test_ingest.py`** | 9 | 64KB SHA-256 de-duplication, modified file re-indexing, `--force` override, chunk prefix & stem matching. |
 | **`tests/test_multicloud_search.py`** | 8 | GCP Vertex AI `restricts` (`allowList`), Databricks `filters_json`, dynamic backend routing, empty-role short-circuit. |
-| **`tests/test_agent.py`** | 8 | GitHub webhook HMAC-SHA256, secret scanning, AST `eval`/`exec` blocking, Flash `test-triager`, Pro `cross-model-judge`, 3x self-healing loop. |
+| **`tests/test_database_schema.py`** | 7 | Normalized DDL (`documents`, `document_chunks`, `sdlc_outbox_events`), `FOR UPDATE SKIP LOCKED` outbox queue, HNSW/GIN indexes. |
 | **`tests/test_observability_and_health.py`** | 7 | `/healthz`, `/readyz` (503 on DB failure), `/api/v1/metrics/observability`, `BaseSettings`, SSE token streaming. |
 | **`tests/test_utilities.py`** | 7 | `.pdf`/`.md`/`.docx` loaders, Tiktoken chunk splitting, metadata attribution, `tenacity` 429 retry backoff. |
-| **`tests/test_database_schema.py`** | 6 | Normalized DDL (`documents`, `document_chunks`), `ON DELETE CASCADE`, HNSW/GIN/B-Tree indexes, cosine math. |
 | **`tests/test_hybrid_search.py`** | 6 | Reciprocal Rank Fusion ($k=60$), Cross-Encoder & fallback re-ranking, `GroundingGuardrail` citation verification. |
+| **`tests/test_rag.py`** | 6 | FastAPI `/api/v1/query` 401 rejection, `422` on extra fields (`extra='forbid'`), `429` token circuit breaker, RBAC retrieval. |
 | **`tests/test_security_rbac.py`** | 5 | SQL injection immunity, parameterized `$2::text[]` array binding, empty-role short-circuit, header sanitization. |
-| **`tests/test_rag.py`** | 4 | FastAPI `/api/v1/query` 401 rejection, `X-User-Roles` dev fallback, end-to-end RBAC retrieval. |
 | **`tests/test_azure_search.py`** | 3 | OData `allowed_roles/any(...)` filter syntax, empty-role short-circuit, `RETRIEVAL_BACKEND="azure"` routing. |
 | **`tests/test_integration_pgvector.py`** | 2 | Testcontainers `pgvector/pgvector:pg16` live container harness (1 skipped when Docker daemon is offline). |
-| **Total** | **112** | **111 Passed, 1 Skipped (100% Offline Capable)** |
+| **Total** | **120** | **119 Passed, 1 Skipped (100% Offline Capable)** |
 
 ## 10. Codebase Organization, Configuration & Code Reference
 ### 10.1. Directory Structure
@@ -432,15 +432,15 @@ enterprise-rag-pgvector-rbac/
 ├── .agent/agents/              # ⚡ Antigravity Tiered Subagents (test-triager.md, gemini-judge.md, arch-synthesizer.md)
 ├── libs/utilities.py           # 📚 Tiktoken chunk splitting, 64KB SHA-256 de-dup, RRF fusion, Cross-Encoder
 ├── scripts/                    # ⚙️ ingest.py, migrate_multicloud.py, setup_* & migrate_pg_* cloud scripts
-├── tests/                      # 🧪 Automated Offline Test Suite (112 Tests across 13 modules)
+├── tests/                      # 🧪 Automated Offline Test Suite (120 Tests across 13 modules)
 ├── streamlit_app.py            # 🖥️ Interactive Web UI (PKCE auth, encrypted cookie session, live streaming)
 └── schema.sql, Dockerfile, docker-compose.yml, requirements.txt
 ```
 ### 10.2. Master File & Symbol Cross-Reference
 | System Layer | File Location | Key Symbols & Responsibilities |
 | :--- | :--- | :--- |
-| **Database Schema** | [`schema.sql`](file:///c:/src/enterprise-rag-pgvector-rbac/schema.sql) | DDL tables `documents`, `document_chunks`, HNSW/GIN/B-Tree indexes. |
-| **PostgreSQL Client** | [`app/db/manager.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/manager.py) | `DatabaseManager`, `hybrid_search`, `secure_search`, loop-scoped `asyncpg` pool. |
+| **Database Schema** | [`schema.sql`](file:///c:/src/enterprise-rag-pgvector-rbac/schema.sql) | DDL tables `documents`, `document_chunks`, `sdlc_outbox_events`, HNSW/GIN/B-Tree indexes. |
+| **PostgreSQL Client** | [`app/db/manager.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/manager.py) | `DatabaseManager`, `hybrid_search`, `secure_search`, `claim_next_outbox_batch` (`SKIP LOCKED`), loop-scoped pool. |
 | **Azure Search** | [`app/db/azure_search.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/azure_search.py) | `azure_hybrid_search`, OData collection role filtering (`allowed_roles/any(...)`). |
 | **GCP Vertex AI Search** | [`app/db/gcp_search.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/gcp_search.py) | `gcp_hybrid_search`, Vertex AI `restricts` pre-filtering & two-tier JSON cache hydration. |
 | **Databricks Search** | [`app/db/databricks_search.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/databricks_search.py) | `databricks_hybrid_search`, Mosaic AI Vector Search Unity Catalog `filters_json` RBAC. |
@@ -449,11 +449,11 @@ enterprise-rag-pgvector-rbac/
 | **JWKS Security** | [`app/auth/jwks.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/auth/jwks.py) | `verify_jwt_token`, `get_allowed_issuers`, TTL public key cache manager (`leeway=60s`). |
 | **Role Extraction** | [`app/auth/role_mapper.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/auth/role_mapper.py) | `resolve_user_roles`, `KNOWN_ROLES` entitlement validator & multi-IdP claim normalization. |
 | **FastAPI Gateway** | [`app/main.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/main.py) | FastAPI lifecycle, `/api/v1/query`, `/healthz`, `/readyz`, `/webhooks/github`. |
-| **FastMCP Server** | [`app/mcp/gateway.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/mcp/gateway.py) | `search_sdlc_context`, `propose_patch` MCP tools & `policy://sdlc-budget` resource. |
+| **FastMCP Server** | [`app/mcp/gateway.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/mcp/gateway.py) | `search_sdlc_context`, `propose_patch`, `MCPSearchRequest` (`extra='forbid'`), & `policy://sdlc-budget` resource. |
 | **Observability** | [`app/observability.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/observability.py) | `setup_observability`, `record_chat_interaction`, Jaeger Badger LSM & Azure Monitor exporters. |
-| **SDLC State Machine**| [`agent/workflow.py`](file:///c:/src/enterprise-rag-pgvector-rbac/agent/workflow.py) | `LangGraphSDLCWorkflow`, `TestTriagerSubagent` (`flash`), `CrossModelJudgeSubagent` (`pro`). |
+| **SDLC State Machine**| [`agent/workflow.py`](file:///c:/src/enterprise-rag-pgvector-rbac/agent/workflow.py) | `LangGraphSDLCWorkflow`, `compact_agent_context`, `TestTriagerSubagent` (`flash`), `CrossModelJudgeSubagent` (`pro`). |
 | **Subagent Definitions**| [`.agent/agents/`](file:///c:/src/enterprise-rag-pgvector-rbac/.agent/agents/) | `test-triager.md` (`model: flash`), `gemini-judge.md` (`model: pro`), `arch-synthesizer.md` (`model: inherit`). |
-| **AST Guardrails** | [`agent/guardrails.py`](file:///c:/src/enterprise-rag-pgvector-rbac/agent/guardrails.py) | `PolicyEngine`, `GroundingGuardrail`, AST static code inspection & secret scanner. |
+| **AST & Rate Guardrails**| [`agent/guardrails.py`](file:///c:/src/enterprise-rag-pgvector-rbac/agent/guardrails.py) | `PolicyEngine`, `GroundingGuardrail`, `SlidingWindowRateLimiter`, `TokenCircuitBreaker`, AST & schema drift checks. |
 | **Shared Utilities** | [`libs/utilities.py`](file:///c:/src/enterprise-rag-pgvector-rbac/libs/utilities.py) | `compute_file_hash`, `reciprocal_rank_fusion`, `rerank_candidates`, Tiktoken splitters. |
 | **Ingestion & Migration**| [`scripts/ingest.py`](file:///c:/src/enterprise-rag-pgvector-rbac/scripts/ingest.py) | `ingest_documents`, [`scripts/migrate_multicloud.py`](file:///c:/src/enterprise-rag-pgvector-rbac/scripts/migrate_multicloud.py) unified cloud orchestrator. |
 ### 10.3. PostgreSQL 16 & pgvector DDL Reference (`schema.sql`)
@@ -476,6 +476,12 @@ CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw ON document_chunks USING hn
 CREATE INDEX IF NOT EXISTS idx_documents_allowed_roles_gin ON documents USING gin (allowed_roles jsonb_path_ops);
 CREATE INDEX IF NOT EXISTS idx_documents_file_hash ON documents (file_hash);
 CREATE INDEX IF NOT EXISTS idx_chunks_content_tsv ON document_chunks USING gin (tsv);
+CREATE TABLE IF NOT EXISTS sdlc_outbox_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), event_key VARCHAR(128) NOT NULL UNIQUE, aggregate_type VARCHAR(64) NOT NULL DEFAULT 'sdlc_webhook',
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb, status VARCHAR(32) NOT NULL DEFAULT 'PENDING', locked_by VARCHAR(128),
+    locked_at TIMESTAMP WITH TIME ZONE, attempts INT NOT NULL DEFAULT 0, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, processed_at TIMESTAMP WITH TIME ZONE
+);
+CREATE INDEX IF NOT EXISTS idx_sdlc_outbox_pending ON sdlc_outbox_events (created_at ASC) WHERE status = 'PENDING';
 ```
 ### 10.4. Container & Observability Configuration Reference
 ```yaml

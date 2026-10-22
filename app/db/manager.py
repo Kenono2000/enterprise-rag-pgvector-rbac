@@ -2,7 +2,7 @@ import os
 import asyncio
 import asyncpg
 import json
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv(), override=True)
@@ -331,3 +331,103 @@ class DatabaseManager:
             result = await conn.execute("DELETE FROM documents WHERE document_id = $1", document_id)
             return "DELETE 1" in result
 
+    # -----------------------------------------------------------------------
+    # Transactional Outbox & Distributed Worker Queue (FOR UPDATE SKIP LOCKED)
+    # -----------------------------------------------------------------------
+
+    @classmethod
+    async def enqueue_outbox_event(
+        cls,
+        event_key: str,
+        aggregate_type: str,
+        payload: Dict[str, Any],
+    ) -> Optional[str]:
+        """
+        Idempotently persist an event into sdlc_outbox_events within an atomic transaction.
+        Returns the event UUID string if newly inserted or existing.
+        """
+        pool = await cls.get_pool()
+        payload_json = json.dumps(payload)
+        sql = """
+            INSERT INTO sdlc_outbox_events (event_key, aggregate_type, payload, status)
+            VALUES ($1, $2, $3::jsonb, 'PENDING')
+            ON CONFLICT (event_key) DO UPDATE
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE FALSE
+            RETURNING id
+        """
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO sdlc_outbox_events (event_key, aggregate_type, payload, status)
+                    VALUES ($1, $2, $3::jsonb, 'PENDING')
+                    ON CONFLICT (event_key) DO NOTHING
+                    RETURNING id
+                    """,
+                    event_key,
+                    aggregate_type,
+                    payload_json,
+                )
+                return str(row["id"]) if row else None
+
+    @classmethod
+    async def claim_next_outbox_batch(
+        cls,
+        worker_id: str,
+        batch_size: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Claim a batch of PENDING outbox tasks using PostgreSQL row-level locking
+        (`FOR UPDATE SKIP LOCKED`) so concurrent agent workers never collide or block.
+        """
+        pool = await cls.get_pool()
+        sql = """
+            WITH claimed AS (
+                SELECT id
+                FROM sdlc_outbox_events
+                WHERE status = 'PENDING'
+                ORDER BY created_at ASC
+                LIMIT $2
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE sdlc_outbox_events e
+            SET status = 'PROCESSING',
+                locked_by = $1,
+                locked_at = CURRENT_TIMESTAMP,
+                attempts = e.attempts + 1
+            FROM claimed
+            WHERE e.id = claimed.id
+            RETURNING e.id, e.event_key, e.aggregate_type, e.payload, e.status, e.locked_by, e.attempts
+        """
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch(sql, worker_id, batch_size)
+                results: List[Dict[str, Any]] = []
+                for r in rows:
+                    item = dict(r)
+                    if isinstance(item.get("payload"), str):
+                        try:
+                            item["payload"] = json.loads(item["payload"])
+                        except Exception:
+                            pass
+                    results.append(item)
+                return results
+
+    @classmethod
+    async def complete_outbox_event(
+        cls,
+        event_id: str,
+        status: str = "COMPLETED",
+    ) -> bool:
+        """Mark a claimed outbox event as COMPLETED or FAILED."""
+        pool = await cls.get_pool()
+        sql = """
+            UPDATE sdlc_outbox_events
+            SET status = $2,
+                processed_at = CURRENT_TIMESTAMP
+            WHERE id = $1::uuid
+        """
+        async with pool.acquire() as conn:
+            res = await conn.execute(sql, event_id, status)
+            return "UPDATE 1" in res

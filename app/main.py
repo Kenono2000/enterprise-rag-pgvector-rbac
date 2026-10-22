@@ -4,7 +4,9 @@ app/main.py
 Primary FastAPI application entry point for Zero-Trust Enterprise RAG.
 
 Endpoints:
-- POST /api/v1/query       : Zero-trust vector retrieval with in-database RBAC.
+- POST /api/v1/query       : Zero-trust vector retrieval with in-database RBAC,
+                             strict extra='forbid' schemas, sliding-window rate
+                             limiting, and request-level token circuit breakers.
 - GET  /health             : Service health and database connectivity check.
 - POST /webhooks/github    : Optional webhook listener for the autonomous SDLC agent.
 """
@@ -21,13 +23,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 from fastapi import FastAPI, Depends, Header, HTTPException, Security, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import settings
 from app.db import DatabaseManager, generate_embedding, chat_completion
 from app.auth import verify_google_token, extract_roles, KNOWN_ROLES
 from app.observability import tracer
-from agent.guardrails import GroundingGuardrail
+from agent.guardrails import (
+    GroundingGuardrail,
+    SlidingWindowRateLimiter,
+    TokenCircuitBreaker,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,12 +43,24 @@ logger = logging.getLogger("enterprise_rag")
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
+# Gateway-level sliding-window rate limiter & token circuit breaker
+api_rate_limiter = SlidingWindowRateLimiter(
+    max_requests=int(os.getenv("API_RATE_LIMIT_MAX_REQUESTS", "60")),
+    window_seconds=float(os.getenv("API_RATE_LIMIT_WINDOW_SECONDS", "60")),
+)
+api_token_breaker = TokenCircuitBreaker(
+    max_tokens_per_request=int(os.getenv("API_MAX_TOKENS_PER_REQUEST", "8000")),
+    max_tokens_per_issue=int(os.getenv("API_MAX_TOKENS_PER_ISSUE", "50000")),
+)
+
 
 # ---------------------------------------------------------------------------
-# Models
+# Strict Deterministic Pydantic Models (extra='forbid')
 # ---------------------------------------------------------------------------
 
 class Citation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     document_id: str
     title: str
     similarity_score: float
@@ -50,11 +68,15 @@ class Citation(BaseModel):
 
 
 class RAGQueryRequest(BaseModel):
-    question: str = Field(..., json_schema_extra={"example": "What does the Mindstream report say about AI agents?"})
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(..., min_length=1, json_schema_extra={"example": "What does the Mindstream report say about AI agents?"})
     mode: str = Field(default="hybrid", description="Retrieval mode: 'hybrid' (vector + full-text RRF) or 'dense'")
 
 
 class RAGResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     answer: str
     citations: List[Citation]
     confidence_score: float
@@ -62,6 +84,8 @@ class RAGResponse(BaseModel):
 
 
 class UserIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     sub: str
     email: Optional[str] = None
     roles: List[str]
@@ -178,7 +202,6 @@ async def trace_http_requests(request: Request, call_next):
             raise
 
 
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -226,9 +249,27 @@ async def query_rag(
     Execute Zero-Trust Hybrid or Dense Vector Search:
     User roles are verified from Google ID token and enforced inside the
     PostgreSQL SQL query (`WHERE d.allowed_roles ?| $roles::text[]`).
-    Combines dense HNSW cosine similarity and sparse GIN full-text search with RRF.
+    Combines dense HNSW cosine similarity and sparse GIN full-text search with RRF,
+    guarded by per-caller sliding-window rate limiting and token circuit breakers.
     """
-    logger.info("RAG query: user=%s roles=%s mode=%s query=%r", user.email or user.sub, user.roles, request.mode, request.question[:60])
+    caller_key = user.email or user.sub or "anonymous"
+    allowed_rate, _rem_reqs, retry_after = api_rate_limiter.allow_request(caller_key)
+    if not allowed_rate:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded for caller '{caller_key}'. Retry after {retry_after}s.",
+            headers={"Retry-After": str(int(retry_after) or 1)},
+        )
+
+    req_tokens = TokenCircuitBreaker.estimate_tokens(request.question)
+    allowed_tokens, _rem_tokens, token_err = api_token_breaker.check_and_consume(caller_key, req_tokens)
+    if not allowed_tokens:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=token_err,
+        )
+
+    logger.info("RAG query: user=%s roles=%s mode=%s query=%r", caller_key, user.roles, request.mode, request.question[:60])
 
     t_start = time.perf_counter()
     query_vector = await generate_embedding(request.question)
@@ -279,9 +320,12 @@ async def query_rag(
 
     avg_confidence = round(sum(c.similarity_score for c in citations) / len(citations), 3)
 
-    system_prompt = GroundingGuardrail.build_system_prompt()
     context_chunks = "\n\n".join([f"[Doc: {r['title']}, Chunk {r.get('chunk_index', 0)}]:\n{r['content']}" for r in rows])
-    prompt = f"{system_prompt}\n\nAUTHORIZED CONTEXT:\n{context_chunks}\n\nUSER QUESTION: {request.question}\nANSWER:"
+    cached_prompt_bundle = GroundingGuardrail.build_prefix_cached_prompt(
+        context_chunks_text=context_chunks,
+        user_question=request.question,
+    )
+    prompt = cached_prompt_bundle["prompt"]
 
     gen_start = time.perf_counter()
     answer_text = await chat_completion(prompt)
@@ -306,8 +350,6 @@ async def query_rag(
         confidence_score=avg_confidence,
         authorized_roles_evaluated=user.roles,
     )
-
-
 
 
 # ---------------------------------------------------------------------------

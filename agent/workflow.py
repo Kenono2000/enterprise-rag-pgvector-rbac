@@ -5,8 +5,8 @@ Autonomous SDLC Agent workflow built with LangGraph.
 Orchestrates:
 1. Issue analysis & patch proposal generation.
 2. Isolated patch application in workspace sandbox.
-3. Deterministic static security audit (AST + secrets).
-4. Automated pytest quality gate verification with self-correction retry loop.
+3. Deterministic static security audit (AST + secrets) & LLM-as-a-Judge scoring.
+4. Automated pytest quality gate verification with context compaction & self-correction retry loop.
 5. Git branch creation, commit, push, and GitHub PR creation.
 """
 
@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib import request
 from typing import Any, Dict, List, Optional, TypedDict, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -34,16 +34,20 @@ logger = logging.getLogger("agent.workflow")
 
 
 # ---------------------------------------------------------------------------
-# Data Models
+# Strict Data Models (extra='forbid')
 # ---------------------------------------------------------------------------
 
 class PatchProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     file_path: str = Field(min_length=1)
     content: str
 
 
 class TriageSummary(BaseModel):
     """Structured output returned by the Gemini Flash `test-triager` subagent."""
+
+    model_config = ConfigDict(extra="forbid")
 
     model_tier: Literal["flash"] = "flash"
     subagent_name: str = "test-triager"
@@ -55,12 +59,15 @@ class TriageSummary(BaseModel):
 
 
 class JudgeVerdict(BaseModel):
-    """Structured pass/fail verdict returned by the Gemini Pro `cross-model-judge` subagent."""
+    """Structured pass/fail verdict and rubric score returned by the Gemini Pro `cross-model-judge` subagent."""
+
+    model_config = ConfigDict(extra="forbid")
 
     model_tier: Literal["pro"] = "pro"
     subagent_name: str = "cross-model-judge"
     verdict: Literal["PASS", "FAIL"] = "PASS"
     passed: bool = True
+    score: float = Field(default=1.0, ge=0.0, le=1.0)
     line_references: List[str] = Field(default_factory=list)
     findings: List[str] = Field(default_factory=list)
 
@@ -69,6 +76,29 @@ class TestResult:
     def __init__(self, returncode: int, output: str):
         self.returncode = returncode
         self.output = output
+
+
+def compact_agent_context(
+    raw_trace: str,
+    triage_summary: Optional[Dict[str, Any]] = None,
+    max_chars: int = 2500,
+) -> str:
+    """
+    Deterministically compact noisy test logs into a high-signal context window
+    for multi-turn repair loops, pairing the Flash `test-triager` summary with
+    deduplicated assertion/error lines and a bounded tail slice.
+    """
+    header_parts: List[str] = []
+    if triage_summary and triage_summary.get("concise_summary"):
+        header_parts.append(f"[Flash Test-Triager Summary]: {triage_summary['concise_summary']}")
+        targets = triage_summary.get("failing_targets") or []
+        if targets:
+            header_parts.append(f"[Failing Targets]: {', '.join(targets[:5])}")
+
+    tail = (raw_trace or "")[-max_chars:]
+    if header_parts:
+        return "\n".join(header_parts) + "\n\n" + tail
+    return tail
 
 
 class TestTriagerSubagent:
@@ -139,7 +169,7 @@ class CrossModelJudgeSubagent:
     """
     Independent LLM-as-a-judge verifier (`model: pro`, `.agents/agents/gemini-judge.md`).
     Audits diffs against user requirements, regressions, missing edge cases, and security issues,
-    emitting a deterministic PASS/FAIL verdict with specific line references.
+    emitting a deterministic PASS/FAIL verdict, rubric score (0.0-1.0), and specific line references.
     """
 
     name: str = "cross-model-judge"
@@ -152,14 +182,24 @@ class CrossModelJudgeSubagent:
     ) -> JudgeVerdict:
         line_references: List[str] = []
         findings: List[str] = []
+        penalty = 0.0
+
+        if not patches:
+            findings.append("blocking: No patch proposals provided for diff evaluation.")
+            penalty += 1.0
 
         for patch in patches:
+            if not patch.content or not patch.content.strip():
+                findings.append(f"blocking: [{patch.file_path}] Empty patch content detected.")
+                penalty += 0.5
+
             gate = await PolicyEngine.evaluate_patch(
                 patch.file_path, patch.content, [], requirements or "diff-audit"
             )
             if not gate.passed:
                 for violation in gate.violations:
                     findings.append(f"blocking: [{patch.file_path}] {violation}")
+                    penalty += 0.5
 
             for idx, line in enumerate(patch.content.splitlines(), start=1):
                 if any(tok in line for tok in ("eval(", "exec(", "__import__(")):
@@ -177,9 +217,11 @@ class CrossModelJudgeSubagent:
                 line_references.append(f"{patch.file_path}:L1-L{total_lines}")
 
         passed = len(findings) == 0
+        score = round(max(0.0, 1.0 - penalty), 2) if not passed else 1.0
         return JudgeVerdict(
             verdict="PASS" if passed else "FAIL",
             passed=passed,
+            score=score,
             line_references=line_references,
             findings=findings
             if findings
@@ -190,6 +232,12 @@ class CrossModelJudgeSubagent:
 class PayloadPatchAgent:
     """Generates and repairs file patch proposals using LLM or webhook payload."""
 
+    STATIC_SYSTEM_PREFIX = (
+        "You are an autonomous SDLC software engineer.\n"
+        "Respond ONLY with a valid JSON list of file patch objects matching schema:\n"
+        '[{"file_path": "example.py", "content": "print(\'hello\')"}]'
+    )
+
     async def propose(self, payload: dict[str, Any]) -> List[PatchProposal]:
         if "patches" in payload:
             return [PatchProposal(**p) for p in payload.get("patches", [])]
@@ -199,17 +247,12 @@ class PayloadPatchAgent:
         body = issue.get("body", "")
         repo = payload.get("repository", {}).get("full_name", "")
 
-        prompt = f"""
-You are an autonomous SDLC software engineer. Given the following issue, propose file patches to resolve it.
-Repository: {repo}
-Issue Title: {title}
-Issue Description: {body}
-
-Respond ONLY with valid JSON list of patches:
-[
-    {{"file_path": "example.py", "content": "print('hello')"}}
-]
-"""
+        prompt = (
+            f"{self.STATIC_SYSTEM_PREFIX}\n\n"
+            f"Repository: {repo}\n"
+            f"Issue Title: {title}\n"
+            f"Issue Description: {body}\n"
+        )
         response = (await chat_completion(prompt)).strip()
         if response.startswith("```json"):
             response = response[7:]
@@ -224,18 +267,13 @@ Respond ONLY with valid JSON list of patches:
             return []
 
     async def repair(self, payload: dict[str, Any], test_output: str) -> List[PatchProposal]:
-        """Self-correct patches based on pytest failure traces."""
+        """Self-correct patches based on compacted pytest failure traces."""
         issue = payload.get("issue", {})
-        prompt = f"""
-Tests failed for issue '{issue.get('title', '')}'.
-Failure Trace:
-{test_output[-2500:]}
-
-Provide the corrected file patches as a valid JSON list:
-[
-    {{"file_path": "example.py", "content": "corrected code"}}
-]
-"""
+        prompt = (
+            f"{self.STATIC_SYSTEM_PREFIX}\n\n"
+            f"Tests failed for issue '{issue.get('title', '')}'.\n"
+            f"Failure Trace:\n{test_output[-2500:]}\n"
+        )
         response = (await chat_completion(prompt)).strip()
         if response.startswith("```json"):
             response = response[7:]
@@ -389,11 +427,9 @@ class LangGraphSDLCWorkflow:
         return "failed"
 
     async def repair_patches(self, state: AgentState) -> Dict[str, Any]:
-        output = state["test_result"]["output"][-4000:] if state.get("test_result") else ""
-        triage = state.get("triage_summary") or {}
-        if triage.get("concise_summary"):
-            output = f"[Flash Test-Triager Summary]: {triage['concise_summary']}\n\n{output}"
-        patches = await self.agent.repair(state["payload"], output)
+        raw_out = state["test_result"]["output"] if state.get("test_result") else ""
+        compacted = compact_agent_context(raw_out, state.get("triage_summary"), max_chars=2500)
+        patches = await self.agent.repair(state["payload"], compacted)
         if not patches:
             return {"error": "Agent produced no repair patches", "attempt": state["attempt"] + 1}
         return {"patches": patches, "attempt": state["attempt"] + 1}

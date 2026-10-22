@@ -2,7 +2,8 @@
 tests/test_database_schema.py
 ------------------------------
 Unit and integration tests for normalized schema (documents + document_chunks),
-HNSW and GIN indexing configurations, cascading deletions, and backward-compatible views.
+HNSW and GIN indexing configurations, cascading deletions, transactional outbox
+(`FOR UPDATE SKIP LOCKED`), and backward-compatible views.
 """
 
 from pathlib import Path
@@ -13,7 +14,7 @@ from app.db.manager import DatabaseManager
 
 
 def test_schema_sql_contains_normalized_tables_and_indexes():
-    """Verify schema.sql specifies normalized tables, HNSW vector index, and GIN role index."""
+    """Verify schema.sql specifies normalized tables, HNSW vector index, GIN role index, and outbox queue."""
     schema_path = Path(__file__).resolve().parent.parent / "schema.sql"
     assert schema_path.exists(), "schema.sql must exist"
 
@@ -46,7 +47,11 @@ def test_schema_sql_contains_normalized_tables_and_indexes():
     assert "idx_chunks_content_tsv" in sql_text
     assert "USING gin (tsv)" in sql_text
 
-    # 7. Consolidated legacy migration and cleanup logic in schema.sql
+    # 7. Transactional Outbox & Distributed Worker Queue
+    assert "CREATE TABLE IF NOT EXISTS sdlc_outbox_events" in sql_text
+    assert "idx_sdlc_outbox_pending" in sql_text
+
+    # 8. Consolidated legacy migration and cleanup logic in schema.sql
     assert "DROP TABLE enterprise_documents CASCADE;" in sql_text
     assert "DROP VIEW IF EXISTS enterprise_documents CASCADE;" in sql_text
     assert "DROP FUNCTION IF EXISTS trg_enterprise_documents_upsert CASCADE;" in sql_text
@@ -167,6 +172,60 @@ async def test_database_manager_delete_document_cascades():
         deleted = await DatabaseManager.delete_document("DOC-TO-DELETE")
         assert deleted is True
         assert "DELETE FROM documents WHERE document_id = $1" in mock_conn.execute.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_transactional_outbox_skip_locked_lifecycle():
+    """Verify DatabaseManager enqueue, FOR UPDATE SKIP LOCKED claim, and completion."""
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow.return_value = {"id": "aaaa1111-bbbb-2222-cccc-333344445555"}
+    mock_conn.fetch.return_value = [
+        {
+            "id": "aaaa1111-bbbb-2222-cccc-333344445555",
+            "event_key": "gh-issue-123",
+            "aggregate_type": "sdlc_webhook",
+            "payload": '{"issue": {"number": 123}}',
+            "status": "PROCESSING",
+            "locked_by": "worker-1",
+            "attempts": 1,
+        }
+    ]
+    mock_conn.execute.return_value = "UPDATE 1"
+
+    class MockTransaction:
+        async def __aenter__(self):
+            return mock_conn
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    mock_conn.transaction = MagicMock(return_value=MockTransaction())
+
+    class MockPoolAcquire:
+        async def __aenter__(self):
+            return mock_conn
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value = MockPoolAcquire()
+
+    with patch.object(DatabaseManager, "get_pool", new_callable=AsyncMock, return_value=mock_pool):
+        event_id = await DatabaseManager.enqueue_outbox_event(
+            event_key="gh-issue-123",
+            aggregate_type="sdlc_webhook",
+            payload={"issue": {"number": 123}},
+        )
+        assert event_id == "aaaa1111-bbbb-2222-cccc-333344445555"
+
+        claimed = await DatabaseManager.claim_next_outbox_batch(worker_id="worker-1", batch_size=5)
+        assert len(claimed) == 1
+        assert claimed[0]["locked_by"] == "worker-1"
+        assert claimed[0]["payload"]["issue"]["number"] == 123
+        claim_sql = mock_conn.fetch.call_args[0][0]
+        assert "FOR UPDATE SKIP LOCKED" in claim_sql
+
+        completed = await DatabaseManager.complete_outbox_event(event_id, status="COMPLETED")
+        assert completed is True
 
 
 @pytest.mark.asyncio

@@ -1,25 +1,140 @@
 """
 agent/guardrails.py
 -------------------
-Deterministic static policy checks, secret scanning, and AST security inspection.
+Deterministic static policy checks, secret scanning, AST security inspection,
+schema drift validation, sliding-window rate limiting, and token circuit breakers.
 """
 
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
-from typing import List
-from pydantic import BaseModel
+import time
+from collections import deque
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Type
+from pydantic import BaseModel, ConfigDict
 
 
 class SecurityGateResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     passed: bool
     violations: List[str]
     audit_summary: str
 
 
+class SlidingWindowRateLimiter:
+    """
+    Deterministic per-caller sliding-window rate limiter to contain burst traffic
+    and blast radius across FastAPI and FastMCP tool surfaces.
+    """
+
+    def __init__(self, max_requests: int = 60, window_seconds: float = 60.0):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._windows: Dict[str, Deque[float]] = {}
+
+    def allow_request(
+        self,
+        caller_id: str,
+        now: Optional[float] = None,
+    ) -> Tuple[bool, int, float]:
+        """
+        Evaluate whether `caller_id` is within the sliding-window quota.
+
+        Returns:
+            (allowed, remaining_requests, retry_after_seconds)
+        """
+        ts = now if now is not None else time.monotonic()
+        key = (caller_id or "anonymous").strip() or "anonymous"
+        bucket = self._windows.setdefault(key, deque())
+        cutoff = ts - self.window_seconds
+
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+
+        if len(bucket) >= self.max_requests:
+            retry_after = max(0.0, round(self.window_seconds - (ts - bucket[0]), 2))
+            return False, 0, retry_after
+
+        bucket.append(ts)
+        remaining = max(0, self.max_requests - len(bucket))
+        return True, remaining, 0.0
+
+    def reset(self, caller_id: Optional[str] = None) -> None:
+        if caller_id is None:
+            self._windows.clear()
+        else:
+            self._windows.pop(caller_id, None)
+
+
+class TokenCircuitBreaker:
+    """
+    Request-level and cumulative caller/issue token circuit breaker enforcing
+    `policy://sdlc-budget` limits (`max_tokens_per_request`, `max_tokens_per_issue`).
+    """
+
+    def __init__(
+        self,
+        max_tokens_per_request: int = 8000,
+        max_tokens_per_issue: int = 50000,
+    ):
+        self.max_tokens_per_request = max_tokens_per_request
+        self.max_tokens_per_issue = max_tokens_per_issue
+        self._consumed: Dict[str, int] = {}
+
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        if not text:
+            return 0
+        # Deterministic ~4 chars/token heuristic bounded by word count
+        return max(len(text.split()), (len(text) + 3) // 4)
+
+    def check_and_consume(
+        self,
+        caller_key: str,
+        requested_tokens: int,
+    ) -> Tuple[bool, int, Optional[str]]:
+        """
+        Validate request-level and cumulative token consumption before/after LLM execution.
+
+        Returns:
+            (allowed, remaining_budget, error_reason)
+        """
+        key = (caller_key or "anonymous").strip() or "anonymous"
+        used = self._consumed.get(key, 0)
+
+        if requested_tokens > self.max_tokens_per_request:
+            return (
+                False,
+                max(0, self.max_tokens_per_issue - used),
+                f"Token circuit breaker tripped: request tokens ({requested_tokens}) exceed max_tokens_per_request ({self.max_tokens_per_request}).",
+            )
+
+        if used + requested_tokens > self.max_tokens_per_issue:
+            return (
+                False,
+                max(0, self.max_tokens_per_issue - used),
+                f"Token circuit breaker tripped: cumulative tokens ({used + requested_tokens}) exceed max_tokens_per_issue ({self.max_tokens_per_issue}).",
+            )
+
+        new_total = used + max(0, requested_tokens)
+        self._consumed[key] = new_total
+        return True, max(0, self.max_tokens_per_issue - new_total), None
+
+    def get_usage(self, caller_key: str) -> int:
+        return self._consumed.get((caller_key or "anonymous").strip() or "anonymous", 0)
+
+    def reset(self, caller_key: Optional[str] = None) -> None:
+        if caller_key is None:
+            self._consumed.clear()
+        else:
+            self._consumed.pop(caller_key, None)
+
+
 class PolicyEngine:
-    """Evaluates proposed code modifications for secrets and dangerous AST patterns."""
+    """Evaluates proposed code modifications for secrets, dangerous AST patterns, and schema drift."""
 
     SECRET_PATTERNS = [
         re.compile(r"(?:sk-|key-|token-|secret-)[a-zA-Z0-9]{20,}", re.IGNORECASE),
@@ -50,6 +165,34 @@ class PolicyEngine:
                             violations.append("Forbidden dunder import: __import__()")
         except SyntaxError as e:
             violations.append(f"Syntax error in code: {str(e)}")
+        return violations
+
+    @classmethod
+    def verify_schema_drift(
+        cls,
+        model_cls: Type[BaseModel],
+        expected_required_fields: Iterable[str],
+    ) -> List[str]:
+        """
+        Verify a Pydantic schema enforces `extra='forbid'` (`additionalProperties: False`)
+        and retains all expected required fields to prevent breaking tool/API drift.
+        """
+        violations: List[str] = []
+        schema = model_cls.model_json_schema()
+
+        if schema.get("additionalProperties") is not False:
+            violations.append(
+                f"Schema '{model_cls.__name__}' must enforce extra='forbid' (additionalProperties=False)."
+            )
+
+        actual_required: Set[str] = set(schema.get("required", []))
+        expected_set: Set[str] = set(expected_required_fields)
+        missing_req = expected_set - actual_required
+        if missing_req:
+            violations.append(
+                f"Breaking schema drift in '{model_cls.__name__}': missing required fields {sorted(missing_req)}."
+            )
+
         return violations
 
     @classmethod
@@ -90,6 +233,7 @@ class GroundingGuardrail:
     Validates LLM-generated responses against strict grounding guardrails:
     - Explicit source citation format: [Doc: <Title>, Chunk <Index>]
     - Mandatory admission of unknown information when context is absent
+    - Deterministic prefix-cached prompt assembly for KV cache reuse
     """
     CITATION_PATTERN = re.compile(r"\[Doc:\s*([^,\]]+),\s*Chunk\s*(\d+)\]")
     UNKNOWN_ADMISSION_PHRASES = [
@@ -110,6 +254,26 @@ class GroundingGuardrail:
             "you MUST explicitly admit: 'I do not have sufficient information in the authorized documents to answer this question.'\n"
             "3. Do NOT extrapolate, speculate, or introduce external information not contained in the authorized context.\n"
         )
+
+    @classmethod
+    def build_prefix_cached_prompt(
+        cls,
+        context_chunks_text: str,
+        user_question: str,
+    ) -> dict:
+        """
+        Assemble a deterministic prefix-first prompt structure (`[STATIC SYSTEM + RBAC CONTEXT]` -> `[DYNAMIC TURN]`)
+        with a SHA-256 `prefix_hash` so OpenAI/Gemini KV prefix caches hit across multi-turn queries.
+        """
+        system_prefix = cls.build_system_prompt()
+        static_prefix = f"{system_prefix}\n\nAUTHORIZED CONTEXT:\n{context_chunks_text}"
+        prefix_hash = hashlib.sha256(static_prefix.encode("utf-8")).hexdigest()[:16]
+        full_prompt = f"{static_prefix}\n\nUSER QUESTION: {user_question}\nANSWER:"
+        return {
+            "prompt": full_prompt,
+            "prefix_hash": prefix_hash,
+            "static_prefix_tokens": TokenCircuitBreaker.estimate_tokens(static_prefix),
+        }
 
     @classmethod
     def validate_response(cls, answer: str, context_chunks: List[dict]) -> dict:
@@ -136,4 +300,3 @@ class GroundingGuardrail:
             "citations_found": citations,
             "violations": violations,
         }
-

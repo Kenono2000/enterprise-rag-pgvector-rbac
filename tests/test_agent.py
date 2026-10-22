@@ -2,11 +2,13 @@
 tests/test_agent.py
 -------------------
 Consolidated unit and lifecycle tests for the autonomous SDLC agent,
-including guardrails, AST security, webhook parsing, and LangGraph workflow.
+including guardrails, AST security, schema drift detection, context compaction,
+webhook parsing, and LangGraph workflow.
 """
 
 import subprocess
 import pytest
+from pydantic import BaseModel
 
 from agent import (
     PolicyEngine,
@@ -16,7 +18,11 @@ from agent import (
     PatchProposal,
     TestTriagerSubagent,
     CrossModelJudgeSubagent,
+    GroundingGuardrail,
+    compact_agent_context,
 )
+from app.mcp.gateway import MCPSearchRequest, MCPPatchRequest
+from app.main import RAGQueryRequest
 
 
 def git(root, *args):
@@ -52,6 +58,42 @@ def test_ast_verification():
     safe_code = "x = 1 + 1\nprint(x)"
     violations = PolicyEngine.verify_ast(safe_code)
     assert len(violations) == 0
+
+
+def test_schema_drift_guardrail():
+    assert PolicyEngine.verify_schema_drift(RAGQueryRequest, {"question"}) == []
+    assert PolicyEngine.verify_schema_drift(MCPSearchRequest, {"question"}) == []
+    assert PolicyEngine.verify_schema_drift(MCPPatchRequest, {"branch_name", "patch_content"}) == []
+
+    class LaxModel(BaseModel):
+        query: str
+
+    drift_violations = PolicyEngine.verify_schema_drift(LaxModel, {"query", "missing_field"})
+    assert len(drift_violations) == 2
+    assert any("extra='forbid'" in v for v in drift_violations)
+    assert any("missing_field" in v for v in drift_violations)
+
+
+def test_prefix_caching_and_context_compaction():
+    bundle = GroundingGuardrail.build_prefix_cached_prompt(
+        context_chunks_text="[Doc: Policy, Chunk 0]: Strict RBAC.",
+        user_question="What is the policy?",
+    )
+    assert len(bundle["prefix_hash"]) == 16
+    assert bundle["static_prefix_tokens"] > 10
+    assert bundle["prompt"].startswith("You are a Zero-Trust Enterprise Knowledge Assistant.")
+
+    compacted = compact_agent_context(
+        raw_trace="line1\n" * 1000 + "E   AssertionError: expected 200",
+        triage_summary={
+            "concise_summary": "[ASSERTION_FAILURE] tests/test_rag.py -> AssertionError",
+            "failing_targets": ["tests/test_rag.py::test_query"],
+        },
+        max_chars=200,
+    )
+    assert "[Flash Test-Triager Summary]:" in compacted
+    assert "[Failing Targets]: tests/test_rag.py::test_query" in compacted
+    assert "AssertionError: expected 200" in compacted
 
 
 @pytest.mark.asyncio
@@ -134,6 +176,7 @@ async def test_langgraph_workflow_execution(tmp_path):
     assert result["subagent_routing"]["triager"] == "flash (test-triager)"
     assert result["subagent_routing"]["judge"] == "pro (cross-model-judge)"
     assert result["judge_verdict"]["verdict"] == "PASS"
+    assert result["judge_verdict"]["score"] == 1.0
     assert "Fix value" in git(tmp_path, "log", "-1", "--format=%s").stdout
 
 
@@ -178,6 +221,7 @@ async def test_pro_cross_model_judge_subagent():
     )
     assert safe_verdict.verdict == "PASS"
     assert safe_verdict.passed is True
+    assert safe_verdict.score == 1.0
     assert "app/utils.py:L1-L2" in safe_verdict.line_references
 
     unsafe_verdict = await judge.evaluate_diff(
@@ -186,5 +230,5 @@ async def test_pro_cross_model_judge_subagent():
     )
     assert unsafe_verdict.verdict == "FAIL"
     assert unsafe_verdict.passed is False
+    assert unsafe_verdict.score < 1.0
     assert "app/bad.py:L2" in unsafe_verdict.line_references
-

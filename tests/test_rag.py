@@ -1,16 +1,26 @@
 """
 tests/test_rag.py
 -----------------
-Automated tests for FastAPI endpoints in app/main.py.
+Automated tests for FastAPI endpoints in app/main.py, including strict
+extra='forbid' validation, sliding-window rate limiting, and token circuit breakers.
 """
 
 from unittest.mock import patch, AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import app, api_rate_limiter, api_token_breaker
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _reset_api_guardrails():
+    api_rate_limiter.reset()
+    api_token_breaker.reset()
+    yield
+    api_rate_limiter.reset()
+    api_token_breaker.reset()
 
 
 def test_health_check():
@@ -24,6 +34,31 @@ def test_query_unauthorized_when_require_google_true(monkeypatch):
     response = client.post("/api/v1/query", json={"question": "What are Q3 results?"})
     assert response.status_code == 401
     assert "Authorization header with a Google ID token is required" in response.json()["detail"]
+
+
+def test_query_rejects_extra_fields_with_422(monkeypatch):
+    monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "false")
+    response = client.post(
+        "/api/v1/query",
+        json={"question": "What are the standards?", "unexpected_param": "injected"},
+    )
+    assert response.status_code == 422
+
+
+def test_query_rate_limiter_and_token_circuit_breaker(monkeypatch):
+    monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "false")
+    orig_req_max = api_token_breaker.max_tokens_per_request
+    try:
+        api_token_breaker.max_tokens_per_request = 3
+        response = client.post(
+            "/api/v1/query",
+            json={"question": "This question has many more than three tokens in it"},
+            headers={"X-User-Roles": '["engineer"]'},
+        )
+        assert response.status_code == 429
+        assert "Token circuit breaker tripped" in response.json()["detail"]
+    finally:
+        api_token_breaker.max_tokens_per_request = orig_req_max
 
 
 def test_query_with_legacy_header_when_require_google_false(monkeypatch):

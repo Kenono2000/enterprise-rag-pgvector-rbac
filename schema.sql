@@ -112,6 +112,24 @@ CREATE INDEX IF NOT EXISTS idx_chunks_content_tsv
 ON document_chunks 
 USING gin (tsv);
 
+-- 5.7 Transactional Outbox & Distributed Worker Queue (FOR UPDATE SKIP LOCKED)
+CREATE TABLE IF NOT EXISTS sdlc_outbox_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    event_key VARCHAR(128) NOT NULL UNIQUE,
+    aggregate_type VARCHAR(64) NOT NULL DEFAULT 'sdlc_webhook',
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+    locked_by VARCHAR(128),
+    locked_at TIMESTAMP WITH TIME ZONE,
+    attempts INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    processed_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX IF NOT EXISTS idx_sdlc_outbox_pending
+ON sdlc_outbox_events (created_at ASC)
+WHERE status = 'PENDING';
+
 -- ============================================================================
 -- 6. Deterministic Mock Seed Data (100% Offline Testing & Initial Boot)
 -- ============================================================================

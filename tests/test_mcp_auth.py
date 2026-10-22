@@ -1,14 +1,33 @@
 """
 tests/test_mcp_auth.py
 ----------------------
-Unit tests for Google OAuth token verification and RBAC resolution
-in the FastMCP gateway (app/mcp/gateway.py).
+Unit tests for Google OAuth token verification, RBAC resolution,
+strict extra='forbid' schemas, sliding-window rate limiting, and
+token circuit breakers in the FastMCP gateway (app/mcp/gateway.py).
 """
 
 from unittest.mock import patch
 import pytest
+from pydantic import ValidationError
 
-from app.mcp.gateway import _resolve_tool_roles, search_sdlc_context, propose_patch
+from app.mcp.gateway import (
+    _resolve_tool_roles,
+    search_sdlc_context,
+    propose_patch,
+    MCPSearchRequest,
+    MCPPatchRequest,
+    mcp_rate_limiter,
+    mcp_token_breaker,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_mcp_guardrails():
+    mcp_rate_limiter.reset()
+    mcp_token_breaker.reset()
+    yield
+    mcp_rate_limiter.reset()
+    mcp_token_breaker.reset()
 
 
 class TestMcpRoleResolution:
@@ -67,6 +86,55 @@ class TestMcpToolsAuth:
         assert "dev@acme.com" in result
 
 
+class TestMcpStrictSchemasAndBlastRadius:
+    def test_mcp_schemas_enforce_extra_forbid(self):
+        with pytest.raises(ValidationError):
+            MCPSearchRequest(
+                question="What is the policy?",
+                unexpected_field="hallucinated_param",
+            )
+        with pytest.raises(ValidationError):
+            MCPPatchRequest(
+                branch_name="feature/x",
+                patch_content="diff",
+                injected_flag=True,
+            )
+
+    @pytest.mark.asyncio
+    @patch("app.mcp.gateway.verify_google_token")
+    async def test_mcp_sliding_window_rate_limiter_trips(self, mock_verify, monkeypatch):
+        monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "true")
+        mock_verify.return_value = {"email": "rate-user@acme.com", "sub": "rate-user"}
+        orig_max = mcp_rate_limiter.max_requests
+        try:
+            mcp_rate_limiter.max_requests = 2
+            r1 = await propose_patch("feature/1", "print(1)", auth_token="tok")
+            r2 = await propose_patch("feature/2", "print(2)", auth_token="tok")
+            r3 = await propose_patch("feature/3", "print(3)", auth_token="tok")
+            assert "Patch submitted" in r1
+            assert "Patch submitted" in r2
+            assert "⛔ Rate limit exceeded" in r3
+        finally:
+            mcp_rate_limiter.max_requests = orig_max
+
+    @pytest.mark.asyncio
+    @patch("app.mcp.gateway.verify_google_token")
+    async def test_mcp_token_circuit_breaker_trips(self, mock_verify, monkeypatch):
+        monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "true")
+        mock_verify.return_value = {"email": "budget-user@acme.com", "sub": "budget-user"}
+        orig_req_max = mcp_token_breaker.max_tokens_per_request
+        try:
+            mcp_token_breaker.max_tokens_per_request = 5
+            result = await propose_patch(
+                branch_name="feature/huge",
+                patch_content="word " * 30,
+                auth_token="tok",
+            )
+            assert "⛔ Token circuit breaker tripped" in result
+        finally:
+            mcp_token_breaker.max_tokens_per_request = orig_req_max
+
+
 class TestMcpRunServer:
     @patch("app.mcp.gateway.mcp.run")
     def test_run_server_default_stdio(self, mock_run, monkeypatch):
@@ -115,5 +183,3 @@ async def test_mcp_observability_tracking(monkeypatch):
     assert len(mcp_events) >= 1
     assert mcp_events[-1]["tool_name"] == "search_sdlc_context"
     assert mcp_events[-1]["status"] == "error"
-
-
