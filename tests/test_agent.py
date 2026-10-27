@@ -268,6 +268,46 @@ def test_crewai_orchestrator_and_hermes_synthesizer(tmp_path):
     assert trajectory.conversations[0]["from"] == "system"
     assert trajectory.conversations[2]["from"] == "gpt"
 
+    # Verify optional crewai SDK adapter fallback and mocked crewai runtime bridge
+    native_crew = SDLCCrewOrchestrator.build_crewai_crew(event.title, event.description)
+    assert native_crew["runtime"] in ("native_pydantic", "crewai_sdk")
+    kickoff_res = SDLCCrewOrchestrator.kickoff_crew(event.title, event.description)
+    assert len(kickoff_res["tasks"]) == 3
+
+    import os
+    import sys
+    import types
+    fake_crewai = types.ModuleType("crewai")
+    fake_crewai.Agent = lambda **kw: kw
+    fake_crewai.Task = lambda **kw: kw
+
+    class _FakeProcess:
+        sequential = "sequential"
+
+    class _FakeCrew:
+        def __init__(self, **kw):
+            self.kw = kw
+
+        def kickoff(self):
+            return "CrewAI executed for Harden PKCE cookie"
+
+    fake_crewai.Process = _FakeProcess
+    fake_crewai.Crew = _FakeCrew
+    sys.modules["crewai"] = fake_crewai
+    os.environ["USE_CREWAI_SDK"] = "true"
+    try:
+        sdk_crew = SDLCCrewOrchestrator.build_crewai_crew(event.title, event.description)
+        assert sdk_crew["runtime"] == "crewai_sdk"
+        assert len(sdk_crew["agents"]) == 3
+        assert len(sdk_crew["tasks"]) == 3
+        sdk_kickoff = SDLCCrewOrchestrator.kickoff_crew(event.title, event.description)
+        assert sdk_kickoff["runtime"] == "crewai_sdk"
+        assert sdk_kickoff["status"] == "completed"
+        assert "Harden PKCE cookie" in sdk_kickoff["output"]
+    finally:
+        sys.modules.pop("crewai", None)
+        os.environ.pop("USE_CREWAI_SDK", None)
+
 
 def test_flash_test_triager_subagent():
     triager = TestTriagerSubagent()

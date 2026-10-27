@@ -442,6 +442,118 @@ class SDLCCrewOrchestrator:
             summary=summary,
         )
 
+    @classmethod
+    def build_crewai_crew(
+        cls,
+        issue_title: str,
+        issue_description: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Build a CrewAI sequential pipeline (`Architect -> Auditor -> Triager`).
+        Uses upstream `crewai` SDK objects (`Agent`, `Task`, `Crew`, `Process.sequential`)
+        when the `crewai` package is installed, with automatic fallback to the deterministic
+        Pydantic v2 specification for 100% offline execution.
+        """
+        task_defs = [
+            {
+                "name": "propose_patches",
+                "agent": cls.ARCHITECT.name,
+                "description": f"Synthesize minimal zero-trust patches for: {issue_title}. {issue_description}".strip(),
+                "expected_output": "JSON array of PatchProposal objects.",
+            },
+            {
+                "name": "audit_patches",
+                "agent": cls.AUDITOR.name,
+                "description": f"Audit proposed diffs for AST safety, secrets, and alignment with '{issue_title}'.",
+                "expected_output": "JudgeVerdict JSON with PASS/FAIL and rubric score.",
+            },
+            {
+                "name": "run_tests",
+                "agent": cls.TRIAGER.name,
+                "description": "Execute pytest suite and classify any failure into TriageSummary.",
+                "expected_output": "TriageSummary JSON with failure_category and failing_targets.",
+            },
+        ]
+
+        try:
+            from crewai import Agent, Crew, Process, Task  # type: ignore
+
+            sdk_agents = {
+                spec.name: Agent(
+                    role=spec.role,
+                    goal=spec.goal,
+                    backstory=spec.backstory,
+                    verbose=False,
+                    allow_delegation=False,
+                )
+                for spec in (cls.ARCHITECT, cls.AUDITOR, cls.TRIAGER)
+            }
+            sdk_tasks = [
+                Task(
+                    description=t["description"],
+                    expected_output=t["expected_output"],
+                    agent=sdk_agents[t["agent"]],
+                )
+                for t in task_defs
+            ]
+            crew_obj = Crew(
+                agents=list(sdk_agents.values()),
+                tasks=sdk_tasks,
+                process=Process.sequential,
+                verbose=False,
+            )
+            return {
+                "runtime": "crewai_sdk",
+                "crew": crew_obj,
+                "agents": [
+                    cls.ARCHITECT.model_dump(),
+                    cls.AUDITOR.model_dump(),
+                    cls.TRIAGER.model_dump(),
+                ],
+                "tasks": task_defs,
+            }
+        except Exception:
+            return {
+                "runtime": "native_pydantic",
+                "crew": None,
+                "agents": [
+                    cls.ARCHITECT.model_dump(),
+                    cls.AUDITOR.model_dump(),
+                    cls.TRIAGER.model_dump(),
+                ],
+                "tasks": task_defs,
+            }
+
+    @classmethod
+    def kickoff_crew(
+        cls,
+        issue_title: str,
+        issue_description: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Execute `crew.kickoff()` when upstream `crewai` SDK is active and `USE_CREWAI_SDK=true`,
+        or return the deterministic sequential crew execution plan.
+        """
+        bundle = cls.build_crewai_crew(issue_title, issue_description)
+        if (
+            bundle["runtime"] == "crewai_sdk"
+            and bundle["crew"] is not None
+            and os.getenv("USE_CREWAI_SDK", "false").lower() == "true"
+        ):
+            raw_output = bundle["crew"].kickoff()
+            return {
+                "runtime": "crewai_sdk",
+                "status": "completed",
+                "output": str(raw_output),
+                "tasks": bundle["tasks"],
+            }
+        return {
+            "runtime": bundle["runtime"],
+            "status": "planned",
+            "agents": bundle["agents"],
+            "tasks": bundle["tasks"],
+        }
+
 
 class HermesSkillSynthesizer:
     """

@@ -57,6 +57,22 @@ class MCPPatchRequest(BaseModel):
     auth_token: Optional[str] = Field(default=None, description="Google OAuth ID token.")
 
 
+class MCPSDLCCrewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    issue_title: str = Field(..., min_length=1, description="GitHub issue title for the CrewAI SDLC crew.")
+    issue_description: str = Field(default="", description="Detailed issue body or reproduction steps.")
+    auth_token: Optional[str] = Field(default=None, description="Google OAuth ID token.")
+
+
+class MCPHermesSkillRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(..., min_length=1, description="Search query to recall matching Hermes SKILL.md playbooks.")
+    max_skills: int = Field(default=2, ge=1, le=10, description="Maximum number of skills to recall.")
+    auth_token: Optional[str] = Field(default=None, description="Google OAuth ID token.")
+
+
 def _resolve_tool_roles(
     auth_token: Optional[str] = None,
     user_roles: Optional[List[str]] = None,
@@ -327,6 +343,195 @@ async def propose_patch(
     return res
 
 
+@mcp.tool()
+async def run_sdlc_crew(
+    issue_title: str,
+    issue_description: str = "",
+    auth_token: Optional[str] = None,
+) -> str:
+    """
+    Assemble and kick off the CrewAI SDLC multi-agent crew (`Architect -> Auditor -> Triager`)
+    with automatic Hermes skill recall over FastMCP.
+    """
+    from agent.workflow import SDLCCrewOrchestrator, HermesSkillSynthesizer
+
+    t_start = time.perf_counter()
+    validated = MCPSDLCCrewRequest(
+        issue_title=issue_title,
+        issue_description=issue_description,
+        auth_token=auth_token,
+    )
+    roles, error = _resolve_tool_roles(validated.auth_token)
+    attribution = _resolve_caller_attribution(validated.auth_token)
+    caller_key = attribution["caller_sub"]
+
+    if error:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {error}"
+        tracer.record_mcp_tool_execution(
+            tool_name="run_sdlc_crew",
+            parameters={"issue_title": validated.issue_title, **attribution},
+            result=res,
+            roles=roles,
+            duration_ms=duration_ms,
+            error=error,
+        )
+        return res
+
+    allowed_rate, remaining_reqs, retry_after = mcp_rate_limiter.allow_request(caller_key)
+    if not allowed_rate:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        err = f"Rate limit exceeded for caller '{caller_key}'. Retry after {retry_after}s."
+        res = f"⛔ {err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="run_sdlc_crew",
+            parameters={"issue_title": validated.issue_title, **attribution},
+            result=res,
+            roles=roles,
+            duration_ms=duration_ms,
+            error=err,
+        )
+        return res
+
+    est_tokens = TokenCircuitBreaker.estimate_tokens(
+        f"{validated.issue_title} {validated.issue_description}"
+    )
+    allowed_tokens, remaining_tokens, token_err = mcp_token_breaker.check_and_consume(
+        caller_key, est_tokens
+    )
+    if not allowed_tokens:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {token_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="run_sdlc_crew",
+            parameters={"issue_title": validated.issue_title, **attribution},
+            result=res,
+            roles=roles,
+            duration_ms=duration_ms,
+            error=token_err,
+        )
+        return res
+
+    sandbox_root = Path(os.getenv("SDLC_SANDBOX_ROOT", os.getcwd())).resolve()
+    recalled = HermesSkillSynthesizer.recall_relevant_skills(
+        sandbox_root, f"{validated.issue_title} {validated.issue_description}"
+    )
+    crew_result = SDLCCrewOrchestrator.kickoff_crew(
+        validated.issue_title, validated.issue_description
+    )
+    payload_out = json.dumps({
+        "crew_execution": crew_result,
+        "recalled_hermes_skills_count": len(recalled),
+        "authorized_roles": roles,
+    })
+    duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+    tracer.record_mcp_tool_execution(
+        tool_name="run_sdlc_crew",
+        parameters={
+            "issue_title": validated.issue_title,
+            "rate_limit_remaining": remaining_reqs,
+            "token_budget_remaining": remaining_tokens,
+            **attribution,
+        },
+        result=payload_out,
+        roles=roles,
+        duration_ms=duration_ms,
+    )
+    return payload_out
+
+
+@mcp.tool()
+async def recall_hermes_skills(
+    query: str,
+    max_skills: int = 2,
+    auth_token: Optional[str] = None,
+) -> str:
+    """
+    Recall portable Hermes Agent SKILL.md playbooks (`.agent/skills/hermes-*/SKILL.md`)
+    matching `query` so external Hermes or MCP clients can reuse verified fixes.
+    """
+    from agent.workflow import HermesSkillSynthesizer
+
+    t_start = time.perf_counter()
+    validated = MCPHermesSkillRequest(
+        query=query,
+        max_skills=max_skills,
+        auth_token=auth_token,
+    )
+    roles, error = _resolve_tool_roles(validated.auth_token)
+    attribution = _resolve_caller_attribution(validated.auth_token)
+    caller_key = attribution["caller_sub"]
+
+    if error:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {error}"
+        tracer.record_mcp_tool_execution(
+            tool_name="recall_hermes_skills",
+            parameters={"query": validated.query, **attribution},
+            result=res,
+            roles=roles,
+            duration_ms=duration_ms,
+            error=error,
+        )
+        return res
+
+    allowed_rate, remaining_reqs, retry_after = mcp_rate_limiter.allow_request(caller_key)
+    if not allowed_rate:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        err = f"Rate limit exceeded for caller '{caller_key}'. Retry after {retry_after}s."
+        res = f"⛔ {err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="recall_hermes_skills",
+            parameters={"query": validated.query, **attribution},
+            result=res,
+            roles=roles,
+            duration_ms=duration_ms,
+            error=err,
+        )
+        return res
+
+    est_tokens = TokenCircuitBreaker.estimate_tokens(validated.query)
+    allowed_tokens, remaining_tokens, token_err = mcp_token_breaker.check_and_consume(
+        caller_key, est_tokens
+    )
+    if not allowed_tokens:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {token_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="recall_hermes_skills",
+            parameters={"query": validated.query, **attribution},
+            result=res,
+            roles=roles,
+            duration_ms=duration_ms,
+            error=token_err,
+        )
+        return res
+
+    sandbox_root = Path(os.getenv("SDLC_SANDBOX_ROOT", os.getcwd())).resolve()
+    skills = HermesSkillSynthesizer.recall_relevant_skills(
+        sandbox_root, validated.query, max_skills=validated.max_skills
+    )
+    payload_out = json.dumps({
+        "query": validated.query,
+        "matched_count": len(skills),
+        "skills": skills,
+    })
+    duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+    tracer.record_mcp_tool_execution(
+        tool_name="recall_hermes_skills",
+        parameters={
+            "query": validated.query,
+            "rate_limit_remaining": remaining_reqs,
+            "token_budget_remaining": remaining_tokens,
+            **attribution,
+        },
+        result=payload_out,
+        roles=roles,
+        duration_ms=duration_ms,
+    )
+    return payload_out
+
+
 @mcp.resource("policy://sdlc-budget")
 def get_budget_policy() -> str:
     return json.dumps({
@@ -335,7 +540,12 @@ def get_budget_policy() -> str:
         "rate_limit_max_requests": mcp_rate_limiter.max_requests,
         "rate_limit_window_seconds": mcp_rate_limiter.window_seconds,
         "max_steps": 10,
-        "allowed_tools": ["search_sdlc_context", "propose_patch"],
+        "allowed_tools": [
+            "search_sdlc_context",
+            "propose_patch",
+            "run_sdlc_crew",
+            "recall_hermes_skills",
+        ],
     })
 
 

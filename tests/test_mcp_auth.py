@@ -14,8 +14,12 @@ from app.mcp.gateway import (
     _resolve_tool_roles,
     search_sdlc_context,
     propose_patch,
+    run_sdlc_crew,
+    recall_hermes_skills,
     MCPSearchRequest,
     MCPPatchRequest,
+    MCPSDLCCrewRequest,
+    MCPHermesSkillRequest,
     mcp_rate_limiter,
     mcp_token_breaker,
 )
@@ -85,6 +89,29 @@ class TestMcpToolsAuth:
         )
         assert "dev@acme.com" in result
 
+    @patch("app.mcp.gateway.verify_google_token")
+    async def test_run_sdlc_crew_and_recall_hermes_skills(self, mock_verify, monkeypatch):
+        monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "true")
+        blocked_crew = await run_sdlc_crew(issue_title="Test Crew")
+        assert "⛔ Authorization required" in blocked_crew
+        blocked_hermes = await recall_hermes_skills(query="PKCE auth")
+        assert "⛔ Authorization required" in blocked_hermes
+
+        mock_verify.return_value = {"email": "architect@acme.com", "sub": "arch-1"}
+        crew_out = await run_sdlc_crew(
+            issue_title="Harden RBAC filter",
+            issue_description="Ensure SQL parameter binding",
+            auth_token="valid.token",
+        )
+        assert "Principal SDLC Architect" in crew_out
+        assert "Lead Security & AST Auditor" in crew_out
+
+        hermes_out = await recall_hermes_skills(
+            query="RBAC filter",
+            auth_token="valid.token",
+        )
+        assert "matched_count" in hermes_out
+
 
 class TestMcpStrictSchemasAndBlastRadius:
     def test_mcp_schemas_enforce_extra_forbid(self):
@@ -98,6 +125,16 @@ class TestMcpStrictSchemasAndBlastRadius:
                 branch_name="feature/x",
                 patch_content="diff",
                 injected_flag=True,
+            )
+        with pytest.raises(ValidationError):
+            MCPSDLCCrewRequest(
+                issue_title="Test",
+                rogue_param="blocked",
+            )
+        with pytest.raises(ValidationError):
+            MCPHermesSkillRequest(
+                query="RBAC",
+                rogue_param="blocked",
             )
 
     @pytest.mark.asyncio

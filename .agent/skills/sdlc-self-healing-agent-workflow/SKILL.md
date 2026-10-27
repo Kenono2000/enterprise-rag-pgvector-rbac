@@ -19,8 +19,8 @@ description: Productivity skill for developing and extending the LangGraph auton
 1. **LangChain / LangGraph State Machine (`LangGraphSDLCWorkflow`)**:
    - Maintain deterministic cyclic state transitions with `MemorySaver` checkpointing, per-node OpenTelemetry spans (`tracer.trace_span("sdlc.<node>")`), and atomic file rollback (`rollback_patches`) on failure.
 2. **CrewAI Role-Playing Crew (`SDLCCrewOrchestrator`)**:
-   - Bind every subagent to an explicit `CrewAgentSpec` (`role`, `goal`, `backstory`, `model_tier` across `inherit`/`pro`/`flash`) and append structured `CrewTaskOutput` records to `crew_trace`.
+   - Bind every subagent to an explicit `CrewAgentSpec` (`role`, `goal`, `backstory`, `model_tier` across `inherit`/`pro`/`flash`), append structured `CrewTaskOutput` records to `crew_trace`, and support upstream `crewai` SDK execution via `build_crewai_crew` / `kickoff_crew` (`USE_CREWAI_SDK=true`) with automatic offline Pydantic fallback.
 3. **Hermes Agent Self-Improving Runtime (`HermesSkillSynthesizer`)**:
    - Recall matching `.agent/skills/hermes-*/SKILL.md` playbooks during `initialize` (`recall_relevant_skills`), distill verified resolutions into portable `SKILL.md` files (`HermesSkillArtifact`), and export ShareGPT trajectories (`HermesTrajectoryRecord`).
 4. **Deterministic Guardrails, Autonomy Ladder & FastMCP Tools**:
-   - Enforce deep AST checks (`eval`, `exec`, `os.system`, `subprocess(shell=True)`, `pickle.loads`), protected-path blocks (`.env`, `agent/guardrails.py`), `TokenCircuitBreaker` per issue, 30s subprocess timeouts, and `ApprovalCard` HITL risk gating (`low_risk` vs `high_risk`).
+   - Enforce deep AST checks (`eval`, `exec`, `os.system`, `subprocess(shell=True)`, `pickle.loads`), protected-path blocks (`.env`, `agent/guardrails.py`), `TokenCircuitBreaker` per issue, 30s subprocess timeouts, `ApprovalCard` HITL risk gating (`low_risk` vs `high_risk`), and FastMCP tools (`run_sdlc_crew`, `recall_hermes_skills`).
