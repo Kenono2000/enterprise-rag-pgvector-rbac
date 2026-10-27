@@ -96,6 +96,7 @@ docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. St
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
 python -m app.mcp                                                        # 5. Launch FastMCP Gateway (stdio/SSE)
+python -m agent status                                                   # 6. Run Hermes + CrewAI + LangGraph SDLC CLI
 ```
 * **Local Endpoints**: Streamlit UI (`http://localhost:8501`) · Swagger Docs (`http://localhost:8000/docs`) · Health Probes (`/healthz`, `/readyz`) · Telemetry (`/api/v1/metrics/observability`) · Jaeger UI (`http://localhost:16686`).
 * **Loop-Scoped Async Concurrency**: `DatabaseManager` and `get_openai_client()` scope connection pools to `asyncio.get_running_loop()`, preventing `RuntimeError: Event loop is closed` across Streamlit threads.

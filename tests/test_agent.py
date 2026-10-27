@@ -308,6 +308,12 @@ def test_crewai_orchestrator_and_hermes_synthesizer(tmp_path):
         sys.modules.pop("crewai", None)
         os.environ.pop("USE_CREWAI_SDK", None)
 
+    from agent.__main__ import run_cli
+    assert run_cli(["status"]) == 0
+    assert run_cli(["crew", "Harden PKCE cookie", "15m idle TTL"]) == 0
+    assert run_cli(["recall", "PKCE"]) == 0
+    assert run_cli(["synthesize", "Harden PKCE cookie"]) == 0
+
 
 def test_flash_test_triager_subagent():
     triager = TestTriagerSubagent()
