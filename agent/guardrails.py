@@ -134,13 +134,39 @@ class TokenCircuitBreaker:
 
 
 class PolicyEngine:
-    """Evaluates proposed code modifications for secrets, dangerous AST patterns, and schema drift."""
+    """Evaluates proposed code modifications for secrets, dangerous AST patterns, protected paths, and schema drift."""
 
     SECRET_PATTERNS = [
         re.compile(r"(?:sk-|key-|token-|secret-)[a-zA-Z0-9]{20,}", re.IGNORECASE),
         re.compile(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----"),
         re.compile(r"AIza[0-9A-Za-z-_]{35}"),  # Google API Key
     ]
+
+    PROTECTED_PATHS = (
+        ".env",
+        ".git/",
+        "agent/guardrails.py",
+        ".github/workflows/",
+    )
+
+    HIGH_RISK_PREFIXES = (
+        "schema.sql",
+        "app/auth/",
+        "app/db/",
+        "Dockerfile",
+        "docker-compose.yml",
+    )
+
+    FORBIDDEN_ATTR_CALLS = {
+        ("os", "system"),
+        ("os", "popen"),
+        ("pickle", "loads"),
+        ("pickle", "load"),
+        ("marshal", "loads"),
+        ("marshal", "load"),
+    }
+
+    SUBPROCESS_FUNCS = {"run", "Popen", "call", "check_call", "check_output"}
 
     @classmethod
     def scan_for_secrets(cls, content: str) -> List[str]:
@@ -151,6 +177,29 @@ class PolicyEngine:
         return violations
 
     @classmethod
+    def verify_protected_path(cls, file_path: str) -> List[str]:
+        norm = re.sub(r"^(?:\./)+", "", (file_path or "").replace("\\", "/"))
+        violations: List[str] = []
+        for protected in cls.PROTECTED_PATHS:
+            if norm == protected.rstrip("/") or norm.startswith(protected):
+                violations.append(f"Protected path modification blocked: '{file_path}'")
+        return violations
+
+    @classmethod
+    def classify_autonomy_risk(cls, file_paths: Iterable[str]) -> Tuple[str, List[str]]:
+        """
+        OpenCrew-style Autonomy Ladder: classify patch targets into 'low_risk' (autonomous)
+        or 'high_risk' (requires human-in-the-loop sign-off for auth, DB, or container infra).
+        """
+        high_risk_files: List[str] = []
+        for path in file_paths:
+            norm = re.sub(r"^(?:\./)+", "", (path or "").replace("\\", "/"))
+            if any(norm == prefix.rstrip("/") or norm.startswith(prefix) for prefix in cls.HIGH_RISK_PREFIXES):
+                high_risk_files.append(path)
+        tier = "high_risk" if high_risk_files else "low_risk"
+        return tier, high_risk_files
+
+    @classmethod
     def verify_ast(cls, content: str) -> List[str]:
         violations = []
         try:
@@ -158,11 +207,25 @@ class PolicyEngine:
             for node in ast.walk(tree):
                 if isinstance(node, ast.Call):
                     if isinstance(node.func, ast.Name):
-                        if node.func.id in ("exec", "eval", "__import__"):
+                        if node.func.id in ("exec", "eval", "__import__", "compile"):
                             violations.append(f"Forbidden dynamic execution: {node.func.id}()")
                     elif isinstance(node.func, ast.Attribute):
                         if node.func.attr == "__import__":
                             violations.append("Forbidden dunder import: __import__()")
+                        elif isinstance(node.func.value, ast.Name):
+                            pair = (node.func.value.id, node.func.attr)
+                            if pair in cls.FORBIDDEN_ATTR_CALLS:
+                                violations.append(f"Forbidden unsafe call: {pair[0]}.{pair[1]}()")
+                            elif pair[0] == "subprocess" and pair[1] in cls.SUBPROCESS_FUNCS:
+                                for kw in node.keywords:
+                                    if (
+                                        kw.arg == "shell"
+                                        and isinstance(kw.value, ast.Constant)
+                                        and kw.value.value is True
+                                    ):
+                                        violations.append(
+                                            f"Forbidden shell=True execution: subprocess.{pair[1]}(shell=True)"
+                                        )
         except SyntaxError as e:
             violations.append(f"Syntax error in code: {str(e)}")
         return violations
@@ -205,6 +268,7 @@ class PolicyEngine:
     ) -> SecurityGateResult:
         """Runs deterministic static policy checks before PR creation."""
         violations = []
+        violations.extend(cls.verify_protected_path(file_path))
         violations.extend(cls.scan_for_secrets(content))
         violations.extend(cls.verify_ast(content))
 

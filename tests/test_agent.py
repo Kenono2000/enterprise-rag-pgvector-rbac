@@ -16,8 +16,15 @@ from agent import (
     verify_github_signature,
     LangGraphSDLCWorkflow,
     PatchProposal,
+    ApprovalCard,
     TestTriagerSubagent,
     CrossModelJudgeSubagent,
+    CrewAgentSpec,
+    CrewTaskOutput,
+    SDLCCrewOrchestrator,
+    HermesSkillArtifact,
+    HermesTrajectoryRecord,
+    HermesSkillSynthesizer,
     GroundingGuardrail,
     compact_agent_context,
 )
@@ -54,6 +61,22 @@ def test_ast_verification():
     dunder_import = "x = __import__('os')"
     violations = PolicyEngine.verify_ast(dunder_import)
     assert any("__import__" in v for v in violations)
+
+    os_system_code = "import os\nos.system('whoami')"
+    violations = PolicyEngine.verify_ast(os_system_code)
+    assert any("os.system" in v for v in violations)
+
+    shell_true_code = "import subprocess\nsubprocess.run('ls', shell=True)"
+    violations = PolicyEngine.verify_ast(shell_true_code)
+    assert any("shell=True" in v for v in violations)
+
+    pickle_code = "import pickle\npickle.loads(b'data')"
+    violations = PolicyEngine.verify_ast(pickle_code)
+    assert any("pickle.loads" in v for v in violations)
+
+    assert PolicyEngine.verify_protected_path("agent/guardrails.py") != []
+    assert PolicyEngine.verify_protected_path(".env") != []
+    assert PolicyEngine.verify_protected_path("app/main.py") == []
 
     safe_code = "x = 1 + 1\nprint(x)"
     violations = PolicyEngine.verify_ast(safe_code)
@@ -177,7 +200,73 @@ async def test_langgraph_workflow_execution(tmp_path):
     assert result["subagent_routing"]["judge"] == "pro (cross-model-judge)"
     assert result["judge_verdict"]["verdict"] == "PASS"
     assert result["judge_verdict"]["score"] == 1.0
+    assert len(result["crew_trace"]) == 3
+    assert [step["agent_name"] for step in result["crew_trace"]] == [
+        "arch-synthesizer",
+        "cross-model-judge",
+        "test-triager",
+    ]
+    assert result["hermes_skill"]["skill_name"] == "hermes-issue-123-fix-value"
+    assert "---\nname: hermes-issue-123-fix-value" in result["hermes_skill"]["markdown_content"]
+    assert result["hermes_trajectory"]["format"] == "sharegpt"
+    assert len(result["hermes_trajectory"]["conversations"]) == 4
     assert "Fix value" in git(tmp_path, "log", "-1", "--format=%s").stdout
+
+
+def test_crewai_orchestrator_and_hermes_synthesizer(tmp_path):
+    assert PolicyEngine.verify_schema_drift(
+        CrewAgentSpec, {"name", "role", "goal", "backstory", "model_tier"}
+    ) == []
+    assert PolicyEngine.verify_schema_drift(
+        CrewTaskOutput, {"agent_name", "role", "task_name", "model_tier", "summary"}
+    ) == []
+    assert PolicyEngine.verify_schema_drift(
+        HermesSkillArtifact, {"skill_name", "skill_path", "markdown_content"}
+    ) == []
+    assert PolicyEngine.verify_schema_drift(
+        HermesTrajectoryRecord, {"issue_id", "branch"}
+    ) == []
+
+    crew_specs = SDLCCrewOrchestrator.get_crew_specs()
+    assert set(crew_specs.keys()) == {"arch-synthesizer", "cross-model-judge", "test-triager"}
+    role_prompt = SDLCCrewOrchestrator.format_role_prompt(
+        SDLCCrewOrchestrator.ARCHITECT, "Fix OAuth PKCE state TTL"
+    )
+    assert "[CrewAI Role]: Principal SDLC Architect" in role_prompt
+    assert "Fix OAuth PKCE state TTL" in role_prompt
+
+    event = parse_github_webhook(
+        {
+            "issue": {"number": 42, "title": "Harden PKCE cookie", "body": "Ensure 15m idle TTL."},
+            "repository": {"full_name": "org/repo"},
+        }
+    )
+    patches = [PatchProposal(file_path="app/auth/pkce.py", content="IDLE_TTL = 900\n")]
+    skill = HermesSkillSynthesizer.synthesize_skill(
+        event=event,
+        patches=patches,
+        judge_verdict={"score": 1.0},
+        triage_summary={"concise_summary": "All tests passed."},
+        sandbox_root=tmp_path,
+        persist=True,
+    )
+    assert skill.persisted is True
+    skill_file = tmp_path / skill.skill_path
+    assert skill_file.exists()
+    assert "IDLE_TTL = 900" in skill_file.read_text(encoding="utf-8")
+
+    trajectory = HermesSkillSynthesizer.export_rl_trajectory(
+        event=event,
+        branch="feature/AGENT-42-harden-pkce-cookie",
+        patches=patches,
+        judge_verdict={"score": 1.0},
+        triage_summary={"concise_summary": "All tests passed."},
+        repairs_used=1,
+    )
+    assert trajectory.format == "sharegpt"
+    assert trajectory.repairs_used == 1
+    assert trajectory.conversations[0]["from"] == "system"
+    assert trajectory.conversations[2]["from"] == "gpt"
 
 
 def test_flash_test_triager_subagent():
@@ -232,3 +321,78 @@ async def test_pro_cross_model_judge_subagent():
     assert unsafe_verdict.passed is False
     assert unsafe_verdict.score < 1.0
     assert "app/bad.py:L2" in unsafe_verdict.line_references
+
+
+@pytest.mark.asyncio
+async def test_production_rollback_judge_healing_and_hitl(tmp_path):
+    assert PolicyEngine.verify_schema_drift(ApprovalCard, {"reason"}) == []
+
+    git(tmp_path, "init")
+    git(tmp_path, "config", "user.email", "test@example.com")
+    git(tmp_path, "config", "user.name", "Test")
+    (tmp_path / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "test_value.py").write_text(
+        "from value import VALUE\n\ndef test_value():\n    assert VALUE == 2\n",
+        encoding="utf-8",
+    )
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-m", "initial")
+
+    # 1. Secret leak triggers immediate atomic rollback restoring value.py to VALUE = 1
+    bad_secret_payload = {
+        "issue": {"number": 201, "title": "Leak secret", "body": "Bad patch"},
+        "repository": {"full_name": "org/repo"},
+        "patches": [
+            {
+                "file_path": "value.py",
+                "content": "VALUE = 'sk-abcdef1234567890abcdef1234567890'\n",
+            }
+        ],
+    }
+    wf_rollback = LangGraphSDLCWorkflow(
+        sandbox_root=str(tmp_path),
+        test_command="python -c \"import value; assert value.VALUE == 2\"",
+        push=False,
+    )
+    with pytest.raises(ValueError, match="Security gate failed"):
+        await wf_rollback.run(bad_secret_payload)
+    assert (tmp_path / "value.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+    # 2. Judge-driven self-healing repairs an AST violation and persists a Hermes skill
+    heal_payload = {
+        "issue": {"number": 202, "title": "Heal AST violation", "body": "Fix value safely"},
+        "repository": {"full_name": "org/repo"},
+        "patches": [{"file_path": "value.py", "content": "import os\nos.system('id')\n"}],
+        "repair_patches": [{"file_path": "value.py", "content": "VALUE = 2\n"}],
+    }
+    wf_heal = LangGraphSDLCWorkflow(
+        sandbox_root=str(tmp_path),
+        test_command="python -c \"import value; assert value.VALUE == 2\"",
+        push=False,
+        persist_hermes_skill=True,
+    )
+    heal_result = await wf_heal.run(heal_payload)
+    assert heal_result["status"] == "completed"
+    assert (tmp_path / "value.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert heal_result["hermes_skill"]["persisted"] is True
+
+    # 3. Closed-loop Hermes skill recall + OpenCrew HITL high-risk approval gate
+    recalled = HermesSkillSynthesizer.recall_relevant_skills(tmp_path, "Heal AST violation")
+    assert len(recalled) == 1
+
+    hitl_payload = {
+        "issue": {"number": 203, "title": "Update auth PKCE", "body": "Heal AST violation in auth"},
+        "repository": {"full_name": "org/repo"},
+        "patches": [{"file_path": "app/auth/config.py", "content": "AUTH_TIMEOUT = 900\n"}],
+    }
+    wf_hitl = LangGraphSDLCWorkflow(
+        sandbox_root=str(tmp_path),
+        test_command="python -c \"assert True\"",
+        push=False,
+        require_hitl_for_high_risk=True,
+    )
+    hitl_result = await wf_hitl.run(hitl_payload)
+    assert hitl_result["status"] == "pending_approval"
+    assert hitl_result["approval_card"]["risk_tier"] == "high_risk"
+    assert hitl_result["approval_card"]["requires_human_approval"] is True
+    assert len(hitl_result["recalled_skills"]) == 1

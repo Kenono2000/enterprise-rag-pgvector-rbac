@@ -5,7 +5,7 @@
 | **API Docs** | Live OpenAPI / Interactive Swagger UI | [enterprise-rag-api-ksez.onrender.com/docs](https://enterprise-rag-api-ksez.onrender.com/docs) |
 | **Source Code** | Auditable Source Repository & Offline Test Suite | [github.com/Kenono2000/enterprise-rag-pgvector-rbac](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac) |
 
-**Architect:** **[Ken Wong](https://www.linkedin.com/in/kenwong-architect/)** — Shift-left **In-Database Zero-Trust Vector RBAC** & **Autonomous Self-Healing SDLC Agent** (`PostgreSQL 16 + pgvector`, `FastAPI`, `Streamlit`, `OAuth 2.0 PKCE`, `JWKS`, `FastMCP`, `LangGraph`).<br/>
+**Architect:** **[Ken Wong](https://www.linkedin.com/in/kenwong-architect/)** — Shift-left **In-Database Zero-Trust Vector RBAC** & **Autonomous Self-Healing SDLC Agent** (`PostgreSQL 16 + pgvector`, `FastAPI`, `Streamlit`, `OAuth 2.0 PKCE`, `JWKS`, `FastMCP`, `LangGraph`, `CrewAI`, `Hermes Agent`).<br/>
 **Quick Navigation:** [1. In-Database RBAC & Storage](#1-in-database-rbac--vector-storage-schemasql--appdb) · [2. Quickstart & Runtime Stack](#2-5-minute-quickstart--runtime-stack) · [3. Identity & Session Security](#3-identity-oauth-20-pkce--session-security-appauth) · [4. Ingestion & Hybrid RAG](#4-ingestion-pipeline--hybrid-rag-quality-scriptsingestpy--libs) · [5. Gateways, OTel & SDLC Agent](#5-gateways-observability--autonomous-sdlc-agent-app--agent) · [6. Multi-Cloud & Runbook](#6-multi-cloud-strategy--runbook)
 ## Complete System Architecture
 ```mermaid
@@ -25,7 +25,7 @@ flowchart LR
     end
     subgraph CloudAndSDLC ["5 & 6. SDLC & Clouds"]
         direction TB
-        SDLC["LangGraph SDLC Agent<br/>(inherit / pro / flash)"]
+        SDLC["LangGraph + CrewAI<br/>+ Hermes SDLC Agent"]
         Clouds["Multi-Cloud Vector<br/>(Azure / GCP / DBX)"]
     end
     Identity --> Gateways --> RAGCore --> CloudAndSDLC
@@ -40,7 +40,7 @@ flowchart LR
 | **2** | **Quickstart & Runtime** | Event-loop-scoped `asyncpg` pools, `SKIP LOCKED` outbox & `/readyz` | Prevents closed-loop crashes; durable worker queue; Kubernetes probe ready. |
 | **3** | **Identity & Sessions** | Stateless OAuth 2.0 PKCE, HMAC state & encrypted cookies | Survives F5 reloads & multi-worker scale-out with **zero Redis**; SOC-2 15m/12h bounds. |
 | **4** | **Ingestion & Hybrid RAG** | 64KB SHA-256 de-dup, Dense + Sparse RRF (`k=60`) & `GroundingGuardrail` | `O(1)` skip for unchanged files; captures exact SKUs/error codes; verified citations. |
-| **5** | **Gateways, OTel & SDLC** | Zero-Trust FastMCP, Jaeger Badger LSM & Tiered Subagents (`inherit`/`flash`/`pro`) | 60 req/min + 8K/50K token circuit breakers; persistent traces; AST-audited self-healing PRs. |
+| **5** | **Gateways, OTel & SDLC** | Zero-Trust FastMCP, Jaeger Badger LSM & Tri-Paradigm SDLC (`LangGraph`/`CrewAI`/`Hermes`) | 60 req/min + 8K/50K token circuit breakers; AST-audited PRs; `SKILL.md` + ShareGPT RL export. |
 | **6** | **Multi-Cloud & Runbook** | Quad-mode strategy (`pgvector`, `azure`, `gcp`, `databricks`) | Zero-downtime `.env` switching with native pre-filtering across all 4 engines. |
 ## 1. In-Database RBAC & Vector Storage (`schema.sql` & `app/db/`)
 ```mermaid
@@ -73,7 +73,7 @@ ORDER BY c.embedding <=> $1::vector LIMIT $3;
 flowchart LR
     subgraph DevBootstrap ["1. Bootstrap & Verify"]
         direction TB
-        Venv["Install .venv & Deps"] --> Pytest["Run 120 Offline Tests"]
+        Venv["Install .venv & Deps"] --> Pytest["Run 122 Offline Tests"]
     end
     subgraph Containers ["2. Docker Infrastructure"]
         direction TB
@@ -91,7 +91,7 @@ flowchart LR
 ```powershell
 git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
 python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run 100% offline test suite (120 tests)
+python -m pytest -v                                                     # 1. Run 100% offline test suite (122 tests)
 docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
@@ -155,18 +155,18 @@ flowchart LR
         direction TB
         Hook["HMAC Webhook"] --> Init["Init Branch &<br/>FastMCP Context"]
     end
-    subgraph Gen ["2. Synthesis (inherit)"]
+    subgraph Gen ["2. CrewAI Architect"]
         direction TB
         Propose["Propose Patch<br/>(model: inherit)"] --> Apply["Sandbox Apply<br/>(Path Guard)"]
     end
-    subgraph Audit ["3. Judge Gate (pro)"]
+    subgraph Audit ["3. CrewAI Pro Judge"]
         direction TB
         Inspect["AST + Pro Judge<br/>(cross-model-judge)"] -->|Fail| Reject["Blocked"]
     end
-    subgraph Verify ["4. Flash Triage & PR"]
+    subgraph Verify ["4. Flash Triage & Hermes"]
         direction TB
         Test{"test-triager<br/>(model: flash)"} -->|Retry < 3| Repair["Repair (<=3x)"]
-        Test -->|Passed| PR["Open PR & OTel"]
+        Test -->|Passed| Hermes["Hermes SKILL.md<br/>+ ShareGPT & PR"]
     end
     Intake --> Gen --> Audit -->|Pass| Verify
     style Intake fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
@@ -174,11 +174,11 @@ flowchart LR
     style Audit fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
     style Verify fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
     style Reject fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
-    style PR fill:#dcfce7,stroke:#22c55e,stroke-width:1.5px
+    style Hermes fill:#dcfce7,stroke:#22c55e,stroke-width:1.5px
 ```
 * **Zero-Trust FastMCP Gateway (`app/mcp/gateway.py`)**: Exposes `search_sdlc_context`, `propose_patch`, and `policy://sdlc-budget` over `stdio`/`SSE` with `ConfigDict(extra="forbid")` schemas, 60 req/min `SlidingWindowRateLimiter`, and 8K/50K `TokenCircuitBreaker`.
 * **Full-Stack OpenTelemetry (`app/observability.py`)**: Streams OTLP gRPC spans (`:4317`) to **Jaeger** (persistent Badger LSM disk store, 7-day TTL) and **Azure Application Insights**, backed by a 1,000-event ring buffer (`GET /api/v1/metrics/observability`) and non-root `Dockerfile` (`UID 10001`).
-* **Tiered Subagents & AST Guardrails (`agent/`)**: [`arch-synthesizer.md`](file:///c:/src/enterprise-rag-pgvector-rbac/.agent/agents/arch-synthesizer.md) (`model: inherit`) synthesizes patches; [`test-triager.md`](file:///c:/src/enterprise-rag-pgvector-rbac/.agent/agents/test-triager.md) (`model: flash`) compresses `pytest` failures into `TriageSummary`; [`gemini-judge.md`](file:///c:/src/enterprise-rag-pgvector-rbac/.agent/agents/gemini-judge.md) (`model: pro`) audits diffs alongside `PolicyEngine` (`ast.walk()` blocking `eval`/`exec` and regex secret scanners).
+* **Tri-Paradigm SDLC Workflow (`agent/workflow.py`)**: Unites **LangChain/LangGraph** (`LangGraphSDLCWorkflow` cyclic state machine + `MemorySaver` + atomic `rollback_patches` + per-node OTel spans), **CrewAI** (`SDLCCrewOrchestrator` role-based crew: `Principal SDLC Architect` [`inherit`], `Lead Security & AST Auditor` [`pro`], and `Site Reliability & Pytest Triager` [`flash`]), and **Hermes Agent** (`HermesSkillSynthesizer` closed-loop `recall_relevant_skills`, portable `SKILL.md` distillation, and ShareGPT RL export) guarded by `PolicyEngine` (deep AST blocking `eval`/`exec`/`os.system`/`subprocess(shell=True)`/`pickle.loads`, protected-path guards, 30s subprocess timeouts, and `ApprovalCard` HITL risk gating).
 ## 6. Multi-Cloud Strategy & Runbook
 * **Zero-Downtime Cutover & Failover**: Switch `RETRIEVAL_BACKEND` in `.env` (`pgvector` | `azure` | `gcp` | `databricks`) or run `python scripts/migrate_multicloud.py --target all`.
 * **Incident Runbook**: On DB latency alerts in Jaeger (`http://localhost:16686`), fail over `RETRIEVAL_BACKEND` in `.env`; on JWKS key rotation, restart the auth worker to flush `JWKSClient`; verify Badger LSM persistence via `docker compose restart jaeger`.

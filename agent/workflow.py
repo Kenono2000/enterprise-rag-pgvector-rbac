@@ -1,13 +1,10 @@
 """
 agent/workflow.py
 -----------------
-Autonomous SDLC Agent workflow built with LangGraph.
-Orchestrates:
-1. Issue analysis & patch proposal generation.
-2. Isolated patch application in workspace sandbox.
-3. Deterministic static security audit (AST + secrets) & LLM-as-a-Judge scoring.
-4. Automated pytest quality gate verification with context compaction & self-correction retry loop.
-5. Git branch creation, commit, push, and GitHub PR creation.
+Autonomous SDLC Agent workflow uniting three agentic paradigms:
+1. LangChain / LangGraph: Deterministic cyclic state-machine orchestration, checkpointing, and bounded self-healing repair loops.
+2. CrewAI: Role-based multi-agent crew (`Role + Goal + Backstory + Tasks`) across Architect (`inherit`), Judge (`pro`), and Triager (`flash`).
+3. Hermes Agent (Nous Research): Autonomous portable `SKILL.md` synthesis (`agentskills.io`) and ShareGPT RL trajectory export for lifelong learning.
 """
 
 from __future__ import annotations
@@ -27,7 +24,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from app.db import chat_completion
-from agent.guardrails import PolicyEngine
+from app.observability import tracer
+from agent.guardrails import PolicyEngine, TokenCircuitBreaker
 from agent.parser import SDLCEvent, parse_github_webhook
 
 logger = logging.getLogger("agent.workflow")
@@ -42,6 +40,68 @@ class PatchProposal(BaseModel):
 
     file_path: str = Field(min_length=1)
     content: str
+
+
+class ApprovalCard(BaseModel):
+    """OpenCrew-style Autonomy Ladder approval card for risk-tiered SDLC governance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    risk_tier: Literal["low_risk", "high_risk"] = "low_risk"
+    requires_human_approval: bool = False
+    status: Literal["auto_approved", "pending_human_approval", "rejected"] = "auto_approved"
+    affected_files: List[str] = Field(default_factory=list)
+    high_risk_files: List[str] = Field(default_factory=list)
+    reason: str = Field(min_length=1)
+
+
+class CrewAgentSpec(BaseModel):
+    """CrewAI mental model: Role + Goal + Backstory + Tiered Model assignment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    goal: str = Field(min_length=1)
+    backstory: str = Field(min_length=1)
+    model_tier: Literal["inherit", "pro", "flash"]
+
+
+class CrewTaskOutput(BaseModel):
+    """Structured task execution record emitted by a CrewAI role agent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_name: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    task_name: str = Field(min_length=1)
+    model_tier: Literal["inherit", "pro", "flash"]
+    status: Literal["completed", "failed"] = "completed"
+    summary: str = Field(min_length=1)
+
+
+class HermesSkillArtifact(BaseModel):
+    """Hermes Agent portable SKILL.md artifact synthesized after verified issue resolution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_name: str = Field(min_length=1)
+    skill_path: str = Field(min_length=1)
+    markdown_content: str = Field(min_length=1)
+    persisted: bool = False
+
+
+class HermesTrajectoryRecord(BaseModel):
+    """Hermes Agent ShareGPT-formatted RL trajectory for lifelong memory and Atropos/vLLM training."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    format: Literal["sharegpt"] = "sharegpt"
+    issue_id: str = Field(min_length=1)
+    branch: str = Field(min_length=1)
+    judge_score: float = Field(default=1.0, ge=0.0, le=1.0)
+    repairs_used: int = Field(default=0, ge=0)
+    conversations: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class TriageSummary(BaseModel):
@@ -230,7 +290,7 @@ class CrossModelJudgeSubagent:
 
 
 class PayloadPatchAgent:
-    """Generates and repairs file patch proposals using LLM or webhook payload."""
+    """Generates and repairs file patch proposals using LLM or webhook payload, enriched with CrewAI roles and Hermes skills."""
 
     STATIC_SYSTEM_PREFIX = (
         "You are an autonomous SDLC software engineer.\n"
@@ -238,7 +298,11 @@ class PayloadPatchAgent:
         '[{"file_path": "example.py", "content": "print(\'hello\')"}]'
     )
 
-    async def propose(self, payload: dict[str, Any]) -> List[PatchProposal]:
+    async def propose(
+        self,
+        payload: dict[str, Any],
+        recalled_skills: Optional[List[str]] = None,
+    ) -> List[PatchProposal]:
         if "patches" in payload:
             return [PatchProposal(**p) for p in payload.get("patches", [])]
 
@@ -246,9 +310,19 @@ class PayloadPatchAgent:
         title = issue.get("title", "")
         body = issue.get("body", "")
         repo = payload.get("repository", {}).get("full_name", "")
+        role_header = SDLCCrewOrchestrator.format_role_prompt(
+            SDLCCrewOrchestrator.ARCHITECT,
+            f"Synthesize patch for '{title}' in {repo}",
+        )
+        skills_block = (
+            "\n\nRECALLED HERMES SKILLS:\n" + "\n---\n".join(recalled_skills)
+            if recalled_skills
+            else ""
+        )
 
         prompt = (
             f"{self.STATIC_SYSTEM_PREFIX}\n\n"
+            f"{role_header}{skills_block}\n\n"
             f"Repository: {repo}\n"
             f"Issue Title: {title}\n"
             f"Issue Description: {body}\n"
@@ -266,12 +340,30 @@ class PayloadPatchAgent:
             logger.warning("LLM patch generation failed (%s), returning empty proposals", exc)
             return []
 
-    async def repair(self, payload: dict[str, Any], test_output: str) -> List[PatchProposal]:
-        """Self-correct patches based on compacted pytest failure traces."""
+    async def repair(
+        self,
+        payload: dict[str, Any],
+        test_output: str,
+        recalled_skills: Optional[List[str]] = None,
+    ) -> List[PatchProposal]:
+        """Self-correct patches based on compacted pytest or AST/Judge failure traces."""
+        if "repair_patches" in payload:
+            return [PatchProposal(**p) for p in payload.get("repair_patches", [])]
+
         issue = payload.get("issue", {})
+        role_header = SDLCCrewOrchestrator.format_role_prompt(
+            SDLCCrewOrchestrator.ARCHITECT,
+            f"Repair failing patch for '{issue.get('title', '')}'",
+        )
+        skills_block = (
+            "\n\nRECALLED HERMES SKILLS:\n" + "\n---\n".join(recalled_skills)
+            if recalled_skills
+            else ""
+        )
         prompt = (
             f"{self.STATIC_SYSTEM_PREFIX}\n\n"
-            f"Tests failed for issue '{issue.get('title', '')}'.\n"
+            f"{role_header}{skills_block}\n\n"
+            f"Verification failed for issue '{issue.get('title', '')}'.\n"
             f"Failure Trace:\n{test_output[-2500:]}\n"
         )
         response = (await chat_completion(prompt)).strip()
@@ -287,15 +379,231 @@ class PayloadPatchAgent:
             return []
 
 
+class SDLCCrewOrchestrator:
+    """
+    CrewAI-style role-based multi-agent crew orchestrator (`Role + Goal + Backstory + Tasks`).
+    Assigns specialized organizational personas to the tiered subagents executing inside the
+    LangGraph state machine.
+    """
+
+    ARCHITECT = CrewAgentSpec(
+        name="arch-synthesizer",
+        role="Principal SDLC Architect",
+        goal="Synthesize minimal, zero-trust code patches that resolve the issue without breaking contracts.",
+        backstory="Staff distributed-systems engineer specializing in FastAPI, pgvector RBAC, and deterministic diffs.",
+        model_tier="inherit",
+    )
+    AUDITOR = CrewAgentSpec(
+        name="cross-model-judge",
+        role="Lead Security & AST Auditor",
+        goal="Enforce zero-trust AST safety, secret hygiene, and strict requirement alignment on every diff.",
+        backstory="Principal application security reviewer who blocks eval/exec, credential leaks, and schema drift.",
+        model_tier="pro",
+    )
+    TRIAGER = CrewAgentSpec(
+        name="test-triager",
+        role="Site Reliability & Pytest Triager",
+        goal="Compress noisy pytest traces into high-signal failure categories and failing target lists.",
+        backstory="High-speed mechanical CI/CD diagnostician optimized for low-latency failure classification.",
+        model_tier="flash",
+    )
+
+    @classmethod
+    def get_crew_specs(cls) -> Dict[str, CrewAgentSpec]:
+        return {
+            cls.ARCHITECT.name: cls.ARCHITECT,
+            cls.AUDITOR.name: cls.AUDITOR,
+            cls.TRIAGER.name: cls.TRIAGER,
+        }
+
+    @classmethod
+    def format_role_prompt(cls, spec: CrewAgentSpec, task_description: str) -> str:
+        return (
+            f"[CrewAI Role]: {spec.role}\n"
+            f"[CrewAI Goal]: {spec.goal}\n"
+            f"[CrewAI Backstory]: {spec.backstory}\n"
+            f"[Task]: {task_description}"
+        )
+
+    @classmethod
+    def record_task(
+        cls,
+        spec: CrewAgentSpec,
+        task_name: str,
+        summary: str,
+        status: Literal["completed", "failed"] = "completed",
+    ) -> CrewTaskOutput:
+        return CrewTaskOutput(
+            agent_name=spec.name,
+            role=spec.role,
+            task_name=task_name,
+            model_tier=spec.model_tier,
+            status=status,
+            summary=summary,
+        )
+
+
+class HermesSkillSynthesizer:
+    """
+    Hermes Agent (Nous Research) self-improving runtime layer:
+    1. Autonomous Skill Synthesis (`SKILL.md` following `agentskills.io` & minimal-whitespace rules).
+    2. ShareGPT-formatted RL trajectory export (`conversations`) for lifelong memory and Atropos/vLLM training.
+    """
+
+    @staticmethod
+    def _slugify(text: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", (text or "sdlc-task").lower()).strip("-")
+        return slug[:36] or "sdlc-task"
+
+    @classmethod
+    def recall_relevant_skills(
+        cls,
+        sandbox_root: Path,
+        query_text: str,
+        max_skills: int = 2,
+    ) -> List[str]:
+        """
+        Closed-loop Hermes skill recall: scan `.agent/skills/hermes-*/SKILL.md` in `sandbox_root`
+        and return matching distilled playbooks to prime the Architect's context window.
+        """
+        skills_dir = (sandbox_root / ".agent" / "skills").resolve()
+        if not skills_dir.exists():
+            return []
+
+        tokens = {
+            tok
+            for tok in re.findall(r"[a-z0-9]{3,}", (query_text or "").lower())
+            if tok not in {"the", "and", "for", "fix", "issue", "with", "from"}
+        }
+        scored: List[tuple[int, str]] = []
+        for skill_md in sorted(skills_dir.glob("hermes-*/SKILL.md")):
+            try:
+                text = skill_md.read_text(encoding="utf-8")
+                lower = text.lower()
+                overlap = sum(1 for tok in tokens if tok in lower) if tokens else 1
+                if overlap > 0:
+                    scored.append((overlap, text.strip()))
+            except Exception:
+                continue
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [content for _score, content in scored[:max_skills]]
+
+    @classmethod
+    def synthesize_skill(
+        cls,
+        event: SDLCEvent,
+        patches: List[PatchProposal],
+        judge_verdict: Optional[Dict[str, Any]] = None,
+        triage_summary: Optional[Dict[str, Any]] = None,
+        sandbox_root: Optional[Path] = None,
+        persist: bool = False,
+    ) -> HermesSkillArtifact:
+        slug = cls._slugify(event.title)
+        skill_name = f"hermes-issue-{event.issue_id}-{slug}"
+        rel_path = f".agent/skills/{skill_name}/SKILL.md"
+        files_touched = ", ".join(f"`{p.file_path}`" for p in patches) if patches else "`none`"
+        score = judge_verdict.get("score", 1.0) if judge_verdict else 1.0
+        triage_msg = (
+            triage_summary.get("concise_summary", "All tests passed.")
+            if triage_summary
+            else "All tests passed."
+        )
+        sample_patch = patches[0].content.strip() if patches else "# No patch content"
+
+        markdown_content = (
+            f"---\n"
+            f"name: {skill_name}\n"
+            f"description: Autonomous Hermes skill distilled from Issue #{event.issue_id} ({event.title}).\n"
+            f"---\n"
+            f"# Hermes Distilled Skill: {event.title}\n"
+            f"## Trigger & Context\n"
+            f"* **Repository**: `{event.repository}` (Issue `#{event.issue_id}`)\n"
+            f"* **Modified Targets**: {files_touched}\n"
+            f"* **Judge Verdict**: `PASS` (score `{score}`) · **Test Triage**: {triage_msg}\n"
+            f"## Verified Remediation Pattern\n"
+            f"```python\n"
+            f"{sample_patch}\n"
+            f"```\n"
+        )
+
+        persisted = False
+        if persist and sandbox_root is not None:
+            target = (sandbox_root / rel_path).resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(markdown_content, encoding="utf-8")
+            persisted = True
+
+        return HermesSkillArtifact(
+            skill_name=skill_name,
+            skill_path=rel_path,
+            markdown_content=markdown_content,
+            persisted=persisted,
+        )
+
+    @classmethod
+    def export_rl_trajectory(
+        cls,
+        event: SDLCEvent,
+        branch: str,
+        patches: List[PatchProposal],
+        judge_verdict: Optional[Dict[str, Any]] = None,
+        triage_summary: Optional[Dict[str, Any]] = None,
+        repairs_used: int = 0,
+    ) -> HermesTrajectoryRecord:
+        score = float(judge_verdict.get("score", 1.0)) if judge_verdict else 1.0
+        patch_json = json.dumps([p.model_dump() for p in patches])
+        triage_note = (
+            triage_summary.get("concise_summary", "All tests passed.")
+            if triage_summary
+            else "All tests passed."
+        )
+        conversations = [
+            {
+                "from": "system",
+                "value": SDLCCrewOrchestrator.format_role_prompt(
+                    SDLCCrewOrchestrator.ARCHITECT,
+                    f"Resolve GitHub issue #{event.issue_id} in {event.repository}.",
+                ),
+            },
+            {
+                "from": "human",
+                "value": f"Issue #{event.issue_id}: {event.title}\n\n{event.description}",
+            },
+            {
+                "from": "gpt",
+                "value": patch_json,
+            },
+            {
+                "from": "human",
+                "value": f"[Judge Score: {score}] [Pytest Triage: {triage_note}]",
+            },
+        ]
+        return HermesTrajectoryRecord(
+            issue_id=str(event.issue_id),
+            branch=branch,
+            judge_score=score,
+            repairs_used=repairs_used,
+            conversations=conversations,
+        )
+
+
 class AgentState(TypedDict):
     event: SDLCEvent
     payload: Dict[str, Any]
     branch: str
     patches: List[PatchProposal]
+    file_snapshots: Dict[str, Optional[str]]
+    rolled_back: bool
+    recalled_skills: List[str]
+    approval_card: Optional[Dict[str, Any]]
     violations: List[str]
     test_result: Optional[Dict[str, Any]]
     triage_summary: Optional[Dict[str, Any]]
     judge_verdict: Optional[Dict[str, Any]]
+    crew_trace: List[Dict[str, Any]]
+    hermes_skill: Optional[Dict[str, Any]]
+    hermes_trajectory: Optional[Dict[str, Any]]
     attempt: int
     max_attempts: int
     error: Optional[str]
@@ -314,14 +622,35 @@ class LangGraphSDLCWorkflow:
         test_command: Optional[str] = None,
         max_repairs: int = 2,
         push: Optional[bool] = None,
+        persist_hermes_skill: bool = False,
+        test_timeout_seconds: float = 30.0,
+        require_hitl_for_high_risk: bool = False,
+        token_breaker: Optional[TokenCircuitBreaker] = None,
     ):
         self.root = Path(sandbox_root or os.getenv("SDLC_SANDBOX_ROOT", os.getcwd())).resolve()
         self.test_command = test_command or os.getenv("SDLC_TEST_COMMAND", "python -m pytest -q")
         self.max_repairs = max_repairs
         self.push = push
+        self.persist_hermes_skill = (
+            persist_hermes_skill
+            or os.getenv("SDLC_PERSIST_HERMES_SKILL", "false").lower() == "true"
+        )
+        self.test_timeout_seconds = float(
+            os.getenv("SDLC_TEST_TIMEOUT_SECONDS", str(test_timeout_seconds))
+        )
+        self.require_hitl_for_high_risk = (
+            require_hitl_for_high_risk
+            or os.getenv("SDLC_REQUIRE_HITL_HIGH_RISK", "false").lower() == "true"
+        )
+        self.token_breaker = token_breaker or TokenCircuitBreaker(
+            max_tokens_per_request=int(os.getenv("SDLC_MAX_TOKENS_PER_REQUEST", "8000")),
+            max_tokens_per_issue=int(os.getenv("SDLC_MAX_TOKENS_PER_ISSUE", "50000")),
+        )
         self.agent = PayloadPatchAgent()
         self.triager = TestTriagerSubagent()
         self.judge = CrossModelJudgeSubagent()
+        self.crew = SDLCCrewOrchestrator()
+        self.hermes = HermesSkillSynthesizer()
         self.checkpointer = MemorySaver()
         self.workflow = self._create_workflow()
 
@@ -334,6 +663,8 @@ class LangGraphSDLCWorkflow:
         workflow.add_node("audit_patches", self.audit_patches)
         workflow.add_node("run_tests", self.run_tests)
         workflow.add_node("repair_patches", self.repair_patches)
+        workflow.add_node("rollback_patches", self.rollback_patches)
+        workflow.add_node("synthesize_hermes_skill", self.synthesize_hermes_skill)
         workflow.add_node("finalize", self.finalize)
 
         workflow.set_entry_point("initialize")
@@ -344,14 +675,24 @@ class LangGraphSDLCWorkflow:
         workflow.add_conditional_edges(
             "audit_patches",
             self.check_audit_results,
-            {"failed": END, "passed": "run_tests"},
+            {
+                "passed": "run_tests",
+                "repair": "repair_patches",
+                "rollback": "rollback_patches",
+            },
         )
         workflow.add_conditional_edges(
             "run_tests",
             self.check_test_results,
-            {"passed": "finalize", "failed": "repair_patches", "max_attempts_reached": END},
+            {
+                "passed": "synthesize_hermes_skill",
+                "failed": "repair_patches",
+                "max_attempts_reached": "rollback_patches",
+            },
         )
         workflow.add_edge("repair_patches", "apply_patches")
+        workflow.add_edge("rollback_patches", END)
+        workflow.add_edge("synthesize_hermes_skill", "finalize")
         workflow.add_edge("finalize", END)
 
         return workflow.compile(checkpointer=self.checkpointer)
@@ -361,21 +702,33 @@ class LangGraphSDLCWorkflow:
         branch = self._branch_name(event)
         logger.info("Initializing SDLC workflow: issue=%s branch=%s", event.issue_id, branch)
 
-        try:
-            local = self._git("branch", "--list", branch)
-            if local:
-                self._git("checkout", branch)
-            else:
-                self._git("checkout", "-b", branch)
-        except Exception:
+        with tracer.trace_span("sdlc.initialize", {"issue_id": event.issue_id, "branch": branch}):
             try:
-                self._git("checkout", branch)
+                local = self._git("branch", "--list", branch)
+                if local:
+                    self._git("checkout", branch)
+                else:
+                    self._git("checkout", "-b", branch)
             except Exception:
-                pass
+                try:
+                    self._git("checkout", branch)
+                except Exception:
+                    pass
+
+            recalled = self.hermes.recall_relevant_skills(
+                self.root, f"{event.title} {event.description}"
+            )
 
         return {
             "event": event,
             "branch": branch,
+            "file_snapshots": {},
+            "rolled_back": False,
+            "recalled_skills": recalled,
+            "approval_card": None,
+            "crew_trace": [],
+            "hermes_skill": None,
+            "hermes_trajectory": None,
             "attempt": 0,
             "max_attempts": self.max_repairs,
             "error": None,
@@ -383,39 +736,113 @@ class LangGraphSDLCWorkflow:
         }
 
     async def propose_patches(self, state: AgentState) -> Dict[str, Any]:
-        patches = await self.agent.propose(state["payload"])
+        event = state["event"]
+        caller_key = f"issue-{event.issue_id}"
+        recalled = state.get("recalled_skills") or []
+        est_tokens = TokenCircuitBreaker.estimate_tokens(
+            f"{event.title} {event.description} {' '.join(recalled)}"
+        )
+        allowed, _rem, err_reason = self.token_breaker.check_and_consume(caller_key, est_tokens)
+        trace = list(state.get("crew_trace") or [])
+        if not allowed:
+            task_out = self.crew.record_task(
+                self.crew.ARCHITECT, "propose_patches", err_reason or "Token limit exceeded", status="failed"
+            )
+            trace.append(task_out.model_dump())
+            return {"error": err_reason, "crew_trace": trace}
+
+        with tracer.trace_span("sdlc.propose_patches", {"issue_id": event.issue_id, "recalled_skills": len(recalled)}):
+            patches = await self.agent.propose(state["payload"], recalled_skills=recalled)
+
         if not patches:
-            return {"error": "Agent produced no patch proposals"}
-        return {"patches": patches}
+            task_out = self.crew.record_task(
+                self.crew.ARCHITECT,
+                "propose_patches",
+                "No patch proposals generated.",
+                status="failed",
+            )
+            trace.append(task_out.model_dump())
+            return {"error": "Agent produced no patch proposals", "crew_trace": trace}
+
+        task_out = self.crew.record_task(
+            self.crew.ARCHITECT,
+            "propose_patches",
+            f"Proposed {len(patches)} file patch(es): {', '.join(p.file_path for p in patches)}",
+        )
+        trace.append(task_out.model_dump())
+        return {"patches": patches, "crew_trace": trace}
 
     async def apply_patches(self, state: AgentState) -> Dict[str, Any]:
-        self._apply_patches_logic(state["patches"])
-        return {}
+        snapshots = dict(state.get("file_snapshots") or {})
+        with tracer.trace_span("sdlc.apply_patches", {"patch_count": len(state["patches"])}):
+            self._apply_patches_logic(state["patches"], snapshots)
+        return {"file_snapshots": snapshots}
 
     async def audit_patches(self, state: AgentState) -> Dict[str, Any]:
         violations: List[str] = []
-        for patch in state["patches"]:
-            result = await PolicyEngine.evaluate_patch(patch.file_path, patch.content, [], "pending")
-            violations.extend(result.violations)
-        verdict = await self.judge.evaluate_diff(
-            state["patches"],
-            requirements=state["event"].title if state.get("event") else "",
+        with tracer.trace_span("sdlc.audit_patches", {"attempt": state.get("attempt", 0)}):
+            for patch in state["patches"]:
+                result = await PolicyEngine.evaluate_patch(patch.file_path, patch.content, [], "pending")
+                violations.extend(result.violations)
+            verdict = await self.judge.evaluate_diff(
+                state["patches"],
+                requirements=state["event"].title if state.get("event") else "",
+            )
+            if not verdict.passed:
+                for finding in verdict.findings:
+                    if finding not in violations:
+                        violations.append(finding)
+
+        trace = list(state.get("crew_trace") or [])
+        task_out = self.crew.record_task(
+            self.crew.AUDITOR,
+            "audit_patches",
+            f"Judge verdict={verdict.verdict} (score={verdict.score})",
+            status="completed" if not violations and verdict.passed else "failed",
         )
+        trace.append(task_out.model_dump())
         return {
             "violations": violations,
             "judge_verdict": verdict.model_dump(),
+            "crew_trace": trace,
         }
 
-    def check_audit_results(self, state: AgentState) -> Literal["failed", "passed"]:
-        return "failed" if state.get("violations") else "passed"
+    def check_audit_results(self, state: AgentState) -> Literal["passed", "repair", "rollback"]:
+        violations = state.get("violations") or []
+        verdict = state.get("judge_verdict") or {}
+        if not violations and verdict.get("passed", True):
+            return "passed"
+
+        # Hard-block secret leaks and protected-path tampering immediately without retry
+        non_retryable = any(
+            tok in v.lower()
+            for v in violations
+            for tok in ("secret detected", "protected path")
+        )
+        can_repair = (
+            not non_retryable
+            and state["attempt"] < state["max_attempts"]
+            and ("repair_patches" in state["payload"] or "patches" not in state["payload"])
+        )
+        return "repair" if can_repair else "rollback"
 
     async def run_tests(self, state: AgentState) -> Dict[str, Any]:
         import asyncio
-        result = await asyncio.to_thread(self._run_tests_logic)
-        triage = self.triager.classify_failure(result.returncode, result.output)
+        with tracer.trace_span("sdlc.run_tests", {"attempt": state.get("attempt", 0)}):
+            result = await asyncio.to_thread(self._run_tests_logic)
+            triage = self.triager.classify_failure(result.returncode, result.output)
+        trace = list(state.get("crew_trace") or [])
+        task_out = self.crew.record_task(
+            self.crew.TRIAGER,
+            "run_tests",
+            triage.concise_summary,
+            status="completed" if result.returncode == 0 else "failed",
+        )
+        trace.append(task_out.model_dump())
         return {
             "test_result": {"returncode": result.returncode, "output": result.output},
             "triage_summary": triage.model_dump(),
+            "crew_trace": trace,
         }
 
     def check_test_results(self, state: AgentState) -> Literal["passed", "failed", "max_attempts_reached"]:
@@ -427,27 +854,140 @@ class LangGraphSDLCWorkflow:
         return "failed"
 
     async def repair_patches(self, state: AgentState) -> Dict[str, Any]:
+        event = state["event"]
+        caller_key = f"issue-{event.issue_id}"
         raw_out = state["test_result"]["output"] if state.get("test_result") else ""
+        if state.get("violations"):
+            raw_out = "AUDIT VIOLATIONS:\n" + "\n".join(state["violations"]) + "\n" + raw_out
         compacted = compact_agent_context(raw_out, state.get("triage_summary"), max_chars=2500)
-        patches = await self.agent.repair(state["payload"], compacted)
+
+        est_tokens = TokenCircuitBreaker.estimate_tokens(compacted)
+        allowed, _rem, err_reason = self.token_breaker.check_and_consume(caller_key, est_tokens)
+        trace = list(state.get("crew_trace") or [])
+        if not allowed:
+            task_out = self.crew.record_task(
+                self.crew.ARCHITECT, "repair_patches", err_reason or "Token limit exceeded", status="failed"
+            )
+            trace.append(task_out.model_dump())
+            return {
+                "error": err_reason,
+                "attempt": state["attempt"] + 1,
+                "crew_trace": trace,
+            }
+
+        with tracer.trace_span("sdlc.repair_patches", {"attempt": state["attempt"] + 1}):
+            patches = await self.agent.repair(
+                state["payload"],
+                compacted,
+                recalled_skills=state.get("recalled_skills"),
+            )
+
         if not patches:
-            return {"error": "Agent produced no repair patches", "attempt": state["attempt"] + 1}
-        return {"patches": patches, "attempt": state["attempt"] + 1}
+            task_out = self.crew.record_task(
+                self.crew.ARCHITECT,
+                "repair_patches",
+                f"Repair attempt {state['attempt'] + 1} produced no patches.",
+                status="failed",
+            )
+            trace.append(task_out.model_dump())
+            return {
+                "error": "Agent produced no repair patches",
+                "attempt": state["attempt"] + 1,
+                "crew_trace": trace,
+            }
+        task_out = self.crew.record_task(
+            self.crew.ARCHITECT,
+            "repair_patches",
+            f"Repair attempt {state['attempt'] + 1} synthesized {len(patches)} patch(es).",
+        )
+        trace.append(task_out.model_dump())
+        return {
+            "patches": patches,
+            "violations": [],
+            "attempt": state["attempt"] + 1,
+            "crew_trace": trace,
+        }
+
+    async def rollback_patches(self, state: AgentState) -> Dict[str, Any]:
+        """Deterministically restore sandbox files to their pre-patch state on audit or test failure."""
+        snapshots = state.get("file_snapshots") or {}
+        with tracer.trace_span("sdlc.rollback_patches", {"files_restored": len(snapshots)}):
+            self._rollback_patches_logic(snapshots)
+        return {"rolled_back": True}
+
+    async def synthesize_hermes_skill(self, state: AgentState) -> Dict[str, Any]:
+        """Hermes Agent node: distill reusable SKILL.md and ShareGPT RL trajectory after tests pass."""
+        event = state["event"]
+        with tracer.trace_span("sdlc.synthesize_hermes_skill", {"issue_id": event.issue_id}):
+            skill = self.hermes.synthesize_skill(
+                event=event,
+                patches=state["patches"],
+                judge_verdict=state.get("judge_verdict"),
+                triage_summary=state.get("triage_summary"),
+                sandbox_root=self.root,
+                persist=self.persist_hermes_skill,
+            )
+            trajectory = self.hermes.export_rl_trajectory(
+                event=event,
+                branch=state["branch"],
+                patches=state["patches"],
+                judge_verdict=state.get("judge_verdict"),
+                triage_summary=state.get("triage_summary"),
+                repairs_used=state.get("attempt", 0),
+            )
+        return {
+            "hermes_skill": skill.model_dump(),
+            "hermes_trajectory": trajectory.model_dump(),
+        }
 
     async def finalize(self, state: AgentState) -> Dict[str, Any]:
         event = state["event"]
         branch = state["branch"]
         patches = state["patches"]
+        affected = [p.file_path for p in patches]
+        risk_tier, high_risk_files = PolicyEngine.classify_autonomy_risk(affected)
+        requires_hitl = risk_tier == "high_risk" and self.require_hitl_for_high_risk
+
+        card = ApprovalCard(
+            risk_tier="high_risk" if risk_tier == "high_risk" else "low_risk",
+            requires_human_approval=requires_hitl,
+            status="pending_human_approval" if requires_hitl else "auto_approved",
+            affected_files=affected,
+            high_risk_files=high_risk_files,
+            reason=(
+                f"High-risk files modified ({', '.join(high_risk_files)}); awaiting human approval."
+                if requires_hitl
+                else "All security gates, Judge rubric, and pytest checks passed."
+            ),
+        )
+
+        if requires_hitl:
+            return {
+                "status": "pending_approval",
+                "approval_card": card.model_dump(),
+                "pushed": False,
+                "pr_url": None,
+            }
 
         try:
             self._git("add", "--", *(p.file_path for p in patches))
             self._git("commit", "-m", f"Implement #{event.issue_id}: {event.title}")
             pushed = self._push(branch)
             pr_url = self._create_pr(event, branch) if pushed else None
-            return {"status": "completed", "pushed": pushed, "pr_url": pr_url}
+            return {
+                "status": "completed",
+                "approval_card": card.model_dump(),
+                "pushed": pushed,
+                "pr_url": pr_url,
+            }
         except Exception as exc:
             logger.warning("Finalization git operations failed: %s", exc)
-            return {"status": "completed", "pushed": False, "pr_url": None}
+            return {
+                "status": "completed",
+                "approval_card": card.model_dump(),
+                "pushed": False,
+                "pr_url": None,
+            }
 
     # -----------------------------------------------------------------------
     # Git & Sandbox Helpers
@@ -463,19 +1003,54 @@ class LangGraphSDLCWorkflow:
             raise RuntimeError(f"git {' '.join(args)} failed: {res.stderr.strip()}")
         return res.stdout.strip()
 
-    def _apply_patches_logic(self, patches: List[PatchProposal]) -> None:
+    def _apply_patches_logic(
+        self,
+        patches: List[PatchProposal],
+        snapshots: Optional[Dict[str, Optional[str]]] = None,
+    ) -> None:
         for patch in patches:
             rel = Path(patch.file_path)
             if rel.is_absolute() or ".." in rel.parts or (rel.parts and rel.parts[0] == ".git"):
                 raise ValueError(f"Unsafe patch path: {patch.file_path}")
             target = (self.root / rel).resolve()
+            if snapshots is not None and patch.file_path not in snapshots:
+                snapshots[patch.file_path] = (
+                    target.read_text(encoding="utf-8") if target.exists() else None
+                )
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(patch.content, encoding="utf-8")
 
+    def _rollback_patches_logic(self, snapshots: Dict[str, Optional[str]]) -> None:
+        for rel_path, orig_content in snapshots.items():
+            target = (self.root / Path(rel_path)).resolve()
+            try:
+                if orig_content is None:
+                    if target.exists():
+                        target.unlink()
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(orig_content, encoding="utf-8")
+            except Exception as exc:
+                logger.warning("Rollback failed for %s: %s", rel_path, exc)
+
     def _run_tests_logic(self) -> TestResult:
         cmd = shlex.split(self.test_command)
-        res = subprocess.run(cmd, cwd=self.root, capture_output=True, text=True, check=False)
-        return TestResult(res.returncode, res.stdout + res.stderr)
+        try:
+            res = subprocess.run(
+                cmd,
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.test_timeout_seconds,
+            )
+            return TestResult(res.returncode, res.stdout + res.stderr)
+        except subprocess.TimeoutExpired as exc:
+            out = (exc.stdout or "") + (exc.stderr or "")
+            return TestResult(
+                124,
+                f"TimeoutError: Test command '{self.test_command}' timed out after {self.test_timeout_seconds}s.\n{out}",
+            )
 
     def _push(self, branch: str) -> bool:
         should_push = self.push if self.push is not None else os.getenv("SDLC_PUSH", "false").lower() == "true"
@@ -517,10 +1092,17 @@ class LangGraphSDLCWorkflow:
             "event": event,
             "branch": "",
             "patches": [],
+            "file_snapshots": {},
+            "rolled_back": False,
+            "recalled_skills": [],
+            "approval_card": None,
             "violations": [],
             "test_result": None,
             "triage_summary": None,
             "judge_verdict": None,
+            "crew_trace": [],
+            "hermes_skill": None,
+            "hermes_trajectory": None,
             "attempt": 0,
             "max_attempts": self.max_repairs,
             "error": None,
@@ -534,13 +1116,25 @@ class LangGraphSDLCWorkflow:
         if final_state.get("violations"):
             raise ValueError("Security gate failed: " + "; ".join(final_state["violations"]))
 
+        approval = final_state.get("approval_card")
+        status_str = (
+            "pending_approval"
+            if approval and approval.get("requires_human_approval")
+            else "completed"
+        )
         return {
-            "status": "completed",
+            "status": status_str,
             "issue_id": event.issue_id,
             "branch": final_state.get("branch"),
             "tests": self.test_command,
             "triage_summary": final_state.get("triage_summary"),
             "judge_verdict": final_state.get("judge_verdict"),
+            "crew_trace": final_state.get("crew_trace", []),
+            "hermes_skill": final_state.get("hermes_skill"),
+            "hermes_trajectory": final_state.get("hermes_trajectory"),
+            "recalled_skills": final_state.get("recalled_skills", []),
+            "approval_card": approval,
+            "rolled_back": final_state.get("rolled_back", False),
             "subagent_routing": {
                 "orchestrator": "inherit",
                 "triager": "flash (test-triager)",
