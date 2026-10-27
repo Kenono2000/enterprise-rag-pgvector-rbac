@@ -73,7 +73,7 @@ ORDER BY c.embedding <=> $1::vector LIMIT $3;
 flowchart LR
     subgraph DevBootstrap ["1. Bootstrap & Verify"]
         direction TB
-        Venv["Install .venv & Deps"] --> Pytest["Run 122 Offline Tests"]
+        Venv["Install .venv & Deps"] --> Pytest["Run 123 Pytest Tests"]
     end
     subgraph Containers ["2. Docker Infrastructure"]
         direction TB
@@ -91,7 +91,7 @@ flowchart LR
 ```powershell
 git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
 python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run 100% offline test suite (122 tests)
+python -m pytest -v                                                     # 1. Run full test suite (123 tests)
 docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)

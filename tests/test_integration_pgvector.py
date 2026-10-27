@@ -31,7 +31,7 @@ def test_pgvector_container_integration():
     schema_sql = schema_path.read_text(encoding="utf-8")
 
     with PostgresContainer("pgvector/pgvector:pg16") as postgres:
-        conn_url = postgres.get_connection_url()
+        conn_url = postgres.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg2.connect(conn_url) as conn:
             with conn.cursor() as cur:
                 # Apply full consolidated schema
