@@ -151,22 +151,22 @@ flowchart LR
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 8, 'rankSpacing': 16, 'padding': 4}}}%%
 flowchart LR
-    subgraph Intake ["1. Webhook & MCP"]
+    subgraph Intake ["1. Webhook & Recall"]
         direction TB
-        Hook["HMAC Webhook"] --> Init["Init Branch &<br/>FastMCP Context"]
+        Hook["HMAC Webhook"] --> Init["Init & Recall<br/>Hermes Skills"]
     end
     subgraph Gen ["2. CrewAI Architect"]
         direction TB
-        Propose["Propose Patch<br/>(model: inherit)"] --> Apply["Sandbox Apply<br/>(Path Guard)"]
+        Propose["Propose Patch<br/>(model: inherit)"] --> Apply["Snapshot & Apply<br/>(Path Guard)"]
     end
     subgraph Audit ["3. CrewAI Pro Judge"]
         direction TB
-        Inspect["AST + Pro Judge<br/>(cross-model-judge)"] -->|Fail| Reject["Blocked"]
+        Inspect["Deep AST + Judge<br/>(model: pro)"] -->|Secret/Max| Reject["Atomic Rollback"]
     end
     subgraph Verify ["4. Flash Triage & Hermes"]
         direction TB
-        Test{"test-triager<br/>(model: flash)"} -->|Retry < 3| Repair["Repair (<=3x)"]
-        Test -->|Passed| Hermes["Hermes SKILL.md<br/>+ ShareGPT & PR"]
+        Test{"test-triager<br/>(30s Timeout)"} -->|Retry < 3| Repair["Repair (<=3x)"]
+        Test -->|Passed| Hermes["Hermes SKILL.md<br/>+ HITL Gate / PR"]
     end
     Intake --> Gen --> Audit -->|Pass| Verify
     style Intake fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
