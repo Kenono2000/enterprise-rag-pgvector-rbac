@@ -30,10 +30,12 @@ def test_schema_sql_contains_normalized_tables_and_indexes():
     assert "REFERENCES documents(id) ON DELETE CASCADE" in sql_text
     assert "embedding vector(1536)" in sql_text
 
-    # 3. High-Performance HNSW vector index
+    # 3. High-Performance HNSW vector index & pgvector 0.8+ iterative scan tuning
     assert "idx_chunks_embedding_hnsw" in sql_text
     assert "USING hnsw (embedding vector_cosine_ops)" in sql_text
     assert "m = 16, ef_construction = 64" in sql_text
+    assert "hnsw.iterative_scan" in sql_text
+    assert "relaxed_order" in sql_text
 
     # 4. GIN Role Index
     assert "idx_documents_allowed_roles_gin" in sql_text
@@ -254,3 +256,23 @@ async def test_filtered_similarity_benchmark_simulation():
     assert all(math.isclose(s, 1.0, rel_tol=1e-5) for s in similarities)
     # 1,000 similarity calculations on CPU take less than 15 milliseconds
     assert elapsed < 0.15, f"Vector calculation benchmark took {elapsed}s"
+
+
+@pytest.mark.asyncio
+async def test_pgvector_08_iterative_scan_configuration():
+    """Verify DatabaseManager.configure_iterative_scan sets pgvector 0.8+ HNSW iterative scan GUCs and handles fallback."""
+    mock_conn = AsyncMock()
+    ok = await DatabaseManager.configure_iterative_scan(
+        mock_conn, mode="relaxed_order", max_scan_tuples=20000
+    )
+    assert ok is True
+    assert mock_conn.execute.call_count == 2
+    calls = [c.args[0] for c in mock_conn.execute.call_args_list]
+    assert "SET hnsw.iterative_scan = 'relaxed_order'" in calls
+    assert "SET hnsw.max_scan_tuples = 20000" in calls
+
+    # Verify graceful fallback on pgvector < 0.8.0
+    failing_conn = AsyncMock()
+    failing_conn.execute.side_effect = RuntimeError("unrecognized configuration parameter")
+    fallback_ok = await DatabaseManager.configure_iterative_scan(failing_conn)
+    assert fallback_ok is False

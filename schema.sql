@@ -90,6 +90,15 @@ ON document_chunks
 USING hnsw (embedding vector_cosine_ops)
 WITH (m = 16, ef_construction = 64);
 
+-- 5.1b pgvector 0.8+ Iterative Index Scan Tuning (prevents overfiltering on narrow RBAC roles)
+DO $$
+BEGIN
+    EXECUTE 'SET hnsw.iterative_scan = ''relaxed_order''';
+    EXECUTE 'SET hnsw.max_scan_tuples = 20000';
+EXCEPTION WHEN OTHERS THEN
+    NULL; -- Gracefully no-op on pgvector < 0.8.0
+END $$;
+
 -- 5.2 GIN Role Index: constant-time JSONB role membership pre-filter
 CREATE INDEX IF NOT EXISTS idx_documents_allowed_roles_gin 
 ON documents 

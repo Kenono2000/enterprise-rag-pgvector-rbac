@@ -24,6 +24,31 @@ def get_db_url():
 class DatabaseManager:
     _pool: Optional[asyncpg.Pool] = None
     _loop: Optional[asyncio.AbstractEventLoop] = None
+    HNSW_ITERATIVE_SCAN_MODE: str = os.getenv("PGVECTOR_ITERATIVE_SCAN", "relaxed_order")
+    HNSW_MAX_SCAN_TUPLES: int = int(os.getenv("PGVECTOR_MAX_SCAN_TUPLES", "20000"))
+
+    @classmethod
+    async def configure_iterative_scan(
+        cls,
+        conn: Any,
+        mode: Optional[str] = None,
+        max_scan_tuples: Optional[int] = None,
+    ) -> bool:
+        """
+        Configure pgvector 0.8+ HNSW iterative index scans on a connection so selective
+        RBAC WHERE clauses (`allowed_roles ?| $2::text[]`) never suffer from ANN overfiltering.
+        Gracefully returns False on pgvector < 0.8.0.
+        """
+        scan_mode = (mode or cls.HNSW_ITERATIVE_SCAN_MODE or "relaxed_order").strip()
+        if scan_mode not in ("off", "strict_order", "relaxed_order"):
+            scan_mode = "relaxed_order"
+        tuples_limit = int(max_scan_tuples or cls.HNSW_MAX_SCAN_TUPLES or 20000)
+        try:
+            await conn.execute(f"SET hnsw.iterative_scan = '{scan_mode}'")
+            await conn.execute(f"SET hnsw.max_scan_tuples = {tuples_limit}")
+            return True
+        except Exception:
+            return False
 
     @classmethod
     async def get_pool(cls) -> asyncpg.Pool:
@@ -59,6 +84,7 @@ class DatabaseManager:
                 db_url,
                 min_size=1,
                 max_size=5,
+                init=cls.configure_iterative_scan,
                 ssl="require" if "localhost" not in db_url else None
             )
             cls._loop = current_loop

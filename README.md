@@ -36,7 +36,7 @@ flowchart LR
 ```
 | Topic | Architectural Pillar | Core Engineering Pattern | Primary Security & Performance Outcome |
 | :-: | :--- | :--- | :--- |
-| **1** | **In-DB RBAC & Storage** | Pre-filtered GIN + HNSW RBAC & 1536-d Matryoshka vectors | Zero recall starvation, zero memory leaks, **50% RAM savings** (>98% recall). |
+| **1** | **In-DB RBAC & Storage** | Pre-filtered GIN + HNSW iterative scan (`relaxed_order`) & 1536-d Matryoshka | Zero recall starvation, zero overfiltering, **50% RAM savings** (>98% recall). |
 | **2** | **Quickstart & Runtime** | Event-loop-scoped `asyncpg` pools, `SKIP LOCKED` outbox & `/readyz` | Prevents closed-loop crashes; durable worker queue; Kubernetes probe ready. |
 | **3** | **Identity & Sessions** | Stateless OAuth 2.0 PKCE, HMAC state & encrypted cookies | Survives F5 reloads & multi-worker scale-out with **zero Redis**; SOC-2 15m/12h bounds. |
 | **4** | **Ingestion & Hybrid RAG** | 64KB SHA-256 de-dup, Dense + Sparse RRF (`k=60`) & `GroundingGuardrail` | `O(1)` skip for unchanged files; captures exact SKUs/error codes; verified citations. |
@@ -52,7 +52,7 @@ flowchart LR
     end
     subgraph PreFilter ["✅ Shift-Left In-DB RBAC"]
         direction TB
-        GIN["1. GIN Role Pre-Filter<br/>(allowed_roles ?| $2)"] --> HNSW["2. HNSW Cosine Scan<br/>(1536-d Matryoshka)"]
+        GIN["1. GIN Role Pre-Filter<br/>(allowed_roles ?| $2)"] --> HNSW["2. HNSW Iterative Scan<br/>(relaxed_order, 1536-d)"]
     end
     PostFilter -.->|"Replaced By"| PreFilter
     style PostFilter fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
@@ -64,7 +64,7 @@ FROM document_chunks c JOIN documents d ON c.document_id = d.id
 WHERE d.allowed_roles ?| $2::text[] AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)
 ORDER BY c.embedding <=> $1::vector LIMIT $3;
 ```
-* **No Recall Starvation & Zero Memory Leaks**: PostgreSQL evaluates `WHERE d.allowed_roles ?| $2::text[]` via the **GIN Index** *before* scanning the **HNSW Vector Index**—unauthorized rows never leave disk or enter Python RAM.
+* **No Recall Starvation & pgvector 0.8+ Iterative Scans**: PostgreSQL evaluates `WHERE d.allowed_roles ?| $2::text[]` via the **GIN Index** and automatically configures `SET hnsw.iterative_scan = 'relaxed_order'` (`max_scan_tuples = 20000`) per pooled connection—eliminating ANN overfiltering on selective roles while ensuring unauthorized rows never enter Python RAM.
 * **SQL Injection & Empty-Role Guards**: Binds roles strictly as a parameterized `$2::text[]` array and returns `[]` immediately before DB execution if `user_roles` is empty.
 * **Matryoshka 1536-d & Normalized Schema**: Truncates `text-embedding-3-large` from `3072` to `1536` dims (**50% RAM savings**, **>98% recall**) across normalized `documents` + `document_chunks` (`ON DELETE CASCADE`) tables (see [`schema.sql`](file:///c:/src/enterprise-rag-pgvector-rbac/schema.sql)).
 ## 2. 5-Minute Quickstart and Runtime Stack
@@ -73,7 +73,7 @@ ORDER BY c.embedding <=> $1::vector LIMIT $3;
 flowchart LR
     subgraph DevBootstrap ["1. Bootstrap & Verify"]
         direction TB
-        Venv["Install .venv & Deps"] --> Pytest["Run 123 Pytest Tests"]
+        Venv["Install .venv & Deps"] --> Pytest["Run 124 Pytest Tests"]
     end
     subgraph Containers ["2. Docker Infrastructure"]
         direction TB
@@ -91,7 +91,7 @@ flowchart LR
 ```powershell
 git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
 python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run full test suite (123 tests)
+python -m pytest -v                                                     # 1. Run full test suite (124 tests)
 docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
