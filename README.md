@@ -5,8 +5,8 @@
 | **API Docs** | Live OpenAPI / Interactive Swagger UI | [enterprise-rag-api-ksez.onrender.com/docs](https://enterprise-rag-api-ksez.onrender.com/docs) |
 | **Source Code** | Auditable Source Repository & Offline Test Suite | [github.com/Kenono2000/enterprise-rag-pgvector-rbac](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac) |
 
-**Architect:** **[Ken Wong](https://www.linkedin.com/in/kenwong-architect/)** — Shift-left **In-Database Zero-Trust Vector RBAC** & **Autonomous Self-Healing SDLC Agent** (`PostgreSQL 16 + pgvector`, `FastAPI`, `Streamlit`, `OAuth 2.0 PKCE`, `JWKS`, `FastMCP`, `LangGraph`, `CrewAI`, `Hermes Agent`).<br/>
-**Quick Navigation:** [1. In-Database RBAC & Storage](#1-in-database-rbac--vector-storage-schemasql--appdb) · [2. Quickstart & Runtime Stack](#2-5-minute-quickstart--runtime-stack) · [3. Identity & Session Security](#3-identity-oauth-20-pkce--session-security-appauth) · [4. Ingestion & Hybrid RAG](#4-ingestion-pipeline--hybrid-rag-quality-scriptsingestpy--libs) · [5. Gateways, OTel & SDLC Agent](#5-gateways-observability--autonomous-sdlc-agent-app--agent) · [6. Multi-Cloud & Runbook](#6-multi-cloud-strategy--runbook)
+**Architect:** **[Ken Wong](https://www.linkedin.com/in/kenwong-architect/)** — Shift-left **In-Database Zero-Trust Vector RBAC** & **Autonomous Self-Healing SDLC Agent** (`PostgreSQL 16 + pgvector`, `FastAPI`, `Streamlit`, `OAuth 2.0 PKCE`, `JWKS`, `FastMCP`, `LangGraph`, `CrewAI`, `Hermes Agent`).\
+**Quick Navigation:** [1. In-Database RBAC & Storage](#1-in-database-rbac-and-vector-storage-schemasql-appdb) · [2. Quickstart & Runtime Stack](#2-5-minute-quickstart-and-runtime-stack) · [3. Identity & Session Security](#3-identity-oauth-20-pkce-and-session-security-appauth) · [4. Ingestion & Hybrid RAG](#4-ingestion-pipeline-and-hybrid-rag-quality-scriptsingestpy-libs) · [5. Gateways, OTel & SDLC Agent](#5-gateways-observability-and-autonomous-sdlc-agent-app-agent) · [6. Multi-Cloud & Runbook](#6-multi-cloud-strategy-and-runbook)
 ## Complete System Architecture
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 8, 'rankSpacing': 16, 'padding': 4}}}%%
@@ -42,7 +42,7 @@ flowchart LR
 | **4** | **Ingestion & Hybrid RAG** | 64KB SHA-256 de-dup, Dense + Sparse RRF (`k=60`) & `GroundingGuardrail` | `O(1)` skip for unchanged files; captures exact SKUs/error codes; verified citations. |
 | **5** | **Gateways, OTel & SDLC** | Zero-Trust FastMCP, Jaeger Badger LSM & Tri-Paradigm SDLC (`LangGraph`/`CrewAI`/`Hermes`) | 60 req/min + 8K/50K token circuit breakers; AST-audited PRs; `SKILL.md` + ShareGPT RL export. |
 | **6** | **Multi-Cloud & Runbook** | Quad-mode strategy (`pgvector`, `azure`, `gcp`, `databricks`) | Zero-downtime `.env` switching with native pre-filtering across all 4 engines. |
-## 1. In-Database RBAC & Vector Storage (`schema.sql` & `app/db/`)
+## 1. In-Database RBAC and Vector Storage (`schema.sql`, `app/db/`)
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 8, 'rankSpacing': 16, 'padding': 4}}}%%
 flowchart LR
@@ -67,7 +67,7 @@ ORDER BY c.embedding <=> $1::vector LIMIT $3;
 * **No Recall Starvation & Zero Memory Leaks**: PostgreSQL evaluates `WHERE d.allowed_roles ?| $2::text[]` via the **GIN Index** *before* scanning the **HNSW Vector Index**—unauthorized rows never leave disk or enter Python RAM.
 * **SQL Injection & Empty-Role Guards**: Binds roles strictly as a parameterized `$2::text[]` array and returns `[]` immediately before DB execution if `user_roles` is empty.
 * **Matryoshka 1536-d & Normalized Schema**: Truncates `text-embedding-3-large` from `3072` to `1536` dims (**50% RAM savings**, **>98% recall**) across normalized `documents` + `document_chunks` (`ON DELETE CASCADE`) tables (see [`schema.sql`](file:///c:/src/enterprise-rag-pgvector-rbac/schema.sql)).
-## 2. 5-Minute Quickstart & Runtime Stack
+## 2. 5-Minute Quickstart and Runtime Stack
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 8, 'rankSpacing': 16, 'padding': 4}}}%%
 flowchart LR
@@ -100,7 +100,7 @@ python -m agent status                                                   # 6. Ru
 ```
 * **Local Endpoints**: Streamlit UI (`http://localhost:8501`) · Swagger Docs (`http://localhost:8000/docs`) · Health Probes (`/healthz`, `/readyz`) · Telemetry (`/api/v1/metrics/observability`) · Jaeger UI (`http://localhost:16686`).
 * **Loop-Scoped Async Concurrency**: `DatabaseManager` and `get_openai_client()` scope connection pools to `asyncio.get_running_loop()`, preventing `RuntimeError: Event loop is closed` across Streamlit threads.
-## 3. Identity, OAuth 2.0 PKCE & Session Security (`app/auth/`)
+## 3. Identity, OAuth 2.0 PKCE, and Session Security (`app/auth/`)
 ```mermaid
 %%{init: {'sequence': {'mirrorActors': false, 'actorMargin': 18, 'boxMargin': 4, 'messageMargin': 14}}}%%
 sequenceDiagram
@@ -119,7 +119,7 @@ sequenceDiagram
 * **Stateless HMAC PKCE State**: `encode_pkce_state()` signs `{b64_payload}.{sig}` (300s TTL) with HMAC-SHA256, surviving OAuth redirects and multi-worker restarts without Redis.
 * **F5 Reload Resilience**: Compresses (`zlib`) and HMAC-signs session tokens into the `enterprise_rag_session` cookie, rehydrating `st.session_state` and silently rotating expired tokens on browser refresh.
 * **Multi-IdP JWKS & SOC-2 Bounds**: Validates RS256 signatures (`leeway=60s`), maps claims across Google, Azure AD, Okta, Cognito, and Keycloak against `KNOWN_ROLES`, and enforces a **15-minute idle timeout** and **12-hour hard ceiling**.
-## 4. Ingestion Pipeline & Hybrid RAG Quality (`scripts/ingest.py` & `libs/`)
+## 4. Ingestion Pipeline and Hybrid RAG Quality (`scripts/ingest.py`, `libs/`)
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 8, 'rankSpacing': 16, 'padding': 4}}}%%
 flowchart LR
@@ -148,7 +148,7 @@ flowchart LR
 * **Table-Safe Chunking & Rate-Limit Retry**: Splits documents into 800-token chunks without breaking Markdown tables, and embeds in 64-chunk batches with automatic exponential backoff (`tenacity`) on HTTP `429` rate limits.
 * **Hybrid Search (Semantic + Keyword RRF)**: Combines vector search (meaning) with full-text search (exact SKUs/error codes like `ERR-502`) using Reciprocal Rank Fusion (`k=60`), pre-filtered by user role in PostgreSQL.
 * **Re-Ranking & Citation Guardrail (`GroundingGuardrail`)**: Re-ranks top results with a `CrossEncoder` and requires every answer to cite `[Doc: <Title>, Chunk <Index>]`—explicitly refusing to answer when context is missing.
-## 5. Gateways, Observability & Autonomous SDLC Agent (`app/` & `agent/`)
+## 5. Gateways, Observability, and Autonomous SDLC Agent (`app/`, `agent/`)
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 8, 'rankSpacing': 16, 'padding': 4}}}%%
 flowchart LR
@@ -180,7 +180,7 @@ flowchart LR
 * **Zero-Trust FastMCP Gateway (`app/mcp/gateway.py`)**: Exposes `search_sdlc_context`, `propose_patch`, `run_sdlc_crew`, `recall_hermes_skills`, and `policy://sdlc-budget` over `stdio`/`SSE` with `ConfigDict(extra="forbid")` schemas (`MCPSearchRequest`, `MCPPatchRequest`, `MCPSDLCCrewRequest`, `MCPHermesSkillRequest`), 60 req/min `SlidingWindowRateLimiter`, and 8K/50K `TokenCircuitBreaker`.
 * **Full-Stack OpenTelemetry (`app/observability.py`)**: Streams OTLP gRPC spans (`:4317`) to **Jaeger** (persistent Badger LSM disk store, 7-day TTL) and **Azure Application Insights**, backed by a 1,000-event ring buffer (`GET /api/v1/metrics/observability`) and non-root `Dockerfile` (`UID 10001`).
 * **Tri-Paradigm SDLC Workflow (`agent/workflow.py`)**: Unites **LangChain/LangGraph** (`LangGraphSDLCWorkflow` cyclic state machine + `MemorySaver` + atomic `rollback_patches` + per-node OTel spans), **CrewAI** (`SDLCCrewOrchestrator` role-based crew + `build_crewai_crew`/`kickoff_crew` upstream `crewai` SDK adapter: `Principal SDLC Architect` [`inherit`], `Lead Security & AST Auditor` [`pro`], and `Site Reliability & Pytest Triager` [`flash`]), and **Hermes Agent** (`HermesSkillSynthesizer` closed-loop `recall_relevant_skills`, portable `SKILL.md` distillation, and ShareGPT RL export) guarded by `PolicyEngine` (deep AST blocking `eval`/`exec`/`os.system`/`subprocess(shell=True)`/`pickle.loads`, protected-path guards, 30s subprocess timeouts, and `ApprovalCard` HITL risk gating).
-## 6. Multi-Cloud Strategy & Runbook
+## 6. Multi-Cloud Strategy and Runbook
 * **Zero-Downtime Cutover & Failover**: Switch `RETRIEVAL_BACKEND` in `.env` (`pgvector` | `azure` | `gcp` | `databricks`) or run `python scripts/migrate_multicloud.py --target all`.
 * **Incident Runbook**: On DB latency alerts in Jaeger (`http://localhost:16686`), fail over `RETRIEVAL_BACKEND` in `.env`; on JWKS key rotation, restart the auth worker to flush `JWKSClient`; verify Badger LSM persistence via `docker compose restart jaeger`.
 ```mermaid
