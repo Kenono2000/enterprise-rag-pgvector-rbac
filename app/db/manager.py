@@ -1,4 +1,5 @@
 import os
+import struct
 import asyncio
 import asyncpg
 import json
@@ -6,6 +7,7 @@ from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv(), override=True)
+
 
 def get_db_url():
     # Priority: OS Env -> Streamlit Secrets
@@ -16,16 +18,33 @@ def get_db_url():
             url = st.secrets.get("DATABASE_URL")
         except Exception:
             pass
-    
+
     if url and url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
     return url
+
 
 class DatabaseManager:
     _pool: Optional[asyncpg.Pool] = None
     _loop: Optional[asyncio.AbstractEventLoop] = None
     HNSW_ITERATIVE_SCAN_MODE: str = os.getenv("PGVECTOR_ITERATIVE_SCAN", "relaxed_order")
     HNSW_MAX_SCAN_TUPLES: int = int(os.getenv("PGVECTOR_MAX_SCAN_TUPLES", "20000"))
+    USE_HALFVEC_INDEX: bool = os.getenv("PGVECTOR_USE_HALFVEC", "true").lower() == "true"
+
+    @classmethod
+    def format_halfvec(cls, query_vector: List[float], dimensions: int = 1536) -> str:
+        """
+        Quantize float vector values to IEEE 754 16-bit half-precision (`halfvec(1536)`)
+        and serialize into a pgvector literal string `[v1,v2,...]` for 50% RAM compaction.
+        """
+        quantized: List[str] = []
+        for val in query_vector[:dimensions]:
+            try:
+                f16 = struct.unpack("e", struct.pack("e", float(val)))[0]
+                quantized.append(str(round(f16, 6)))
+            except (OverflowError, ValueError):
+                quantized.append("0.0")
+        return f"[{','.join(quantized)}]"
 
     @classmethod
     async def configure_iterative_scan(
@@ -97,7 +116,13 @@ class DatabaseManager:
             cls._pool = None
 
     @classmethod
-    async def secure_search(cls, query_vector: List[float], user_roles: List[str], limit: int = 10):
+    async def secure_search(
+        cls,
+        query_vector: List[float],
+        user_roles: List[str],
+        limit: int = 10,
+        use_halfvec: Optional[bool] = None,
+    ):
         # Zero-Trust: If caller has no roles, return empty results immediately
         if not user_roles:
             return []
@@ -112,16 +137,26 @@ class DatabaseManager:
             return []
 
         pool = await cls.get_pool()
-        vector_str = f"[{','.join(map(str, query_vector))}]"
-        
-        sql = """
+        halfvec_enabled = cls.USE_HALFVEC_INDEX if use_halfvec is None else use_halfvec
+        vector_str = (
+            cls.format_halfvec(query_vector)
+            if halfvec_enabled
+            else f"[{','.join(map(str, query_vector))}]"
+        )
+
+        distance_expr = (
+            "c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)"
+            if halfvec_enabled
+            else "c.embedding <=> $1::vector"
+        )
+        sql = f"""
             SELECT d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles, 
-                   1 - (c.embedding <=> $1::vector) as similarity
+                   1 - ({distance_expr}) as similarity
             FROM document_chunks c
             JOIN documents d ON c.document_id = d.id
             WHERE d.allowed_roles ?| $2::text[]
               AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)
-            ORDER BY c.embedding <=> $1::vector
+            ORDER BY {distance_expr}
             LIMIT $3
         """
         async with pool.acquire() as conn:
@@ -135,9 +170,10 @@ class DatabaseManager:
         user_roles: List[str],
         limit: int = 10,
         rrf_k: int = 60,
+        use_halfvec: Optional[bool] = None,
     ) -> List[dict]:
         """
-        Execute Hybrid Search combining Dense Vector Search (HNSW cosine similarity)
+        Execute Hybrid Search combining Dense Vector Search (HNSW 16-bit halfvec cosine similarity)
         and Sparse Full-Text Search (GIN tsvector / ts_rank) with Reciprocal Rank Fusion (RRF).
         Enforces Zero-Trust RBAC: documents outside user_roles are filtered at SQL execution time.
         """
@@ -153,25 +189,41 @@ class DatabaseManager:
             return []
 
         pool = await cls.get_pool()
-        vector_str = f"[{','.join(map(str, query_vector))}]"
+        halfvec_enabled = cls.USE_HALFVEC_INDEX if use_halfvec is None else use_halfvec
+        vector_str = (
+            cls.format_halfvec(query_vector)
+            if halfvec_enabled
+            else f"[{','.join(map(str, query_vector))}]"
+        )
 
-        # 1. Dense retrieval (HNSW cosine distance)
-        dense_sql = """
+        dense_dist = (
+            "c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)"
+            if halfvec_enabled
+            else "c.embedding <=> $1::vector"
+        )
+        sparse_dist = (
+            "c.embedding::halfvec(1536) <=> $2::vector::halfvec(1536)"
+            if halfvec_enabled
+            else "c.embedding <=> $2::vector"
+        )
+
+        # 1. Dense retrieval (HNSW halfvec cosine distance)
+        dense_sql = f"""
             SELECT c.id::text as chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
-                   1 - (c.embedding <=> $1::vector) AS similarity
+                   1 - ({dense_dist}) AS similarity
             FROM document_chunks c
             JOIN documents d ON c.document_id = d.id
             WHERE d.allowed_roles ?| $2::text[]
               AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)
-            ORDER BY c.embedding <=> $1::vector
+            ORDER BY {dense_dist}
             LIMIT $3
         """
 
         # 2. Sparse retrieval (Full-Text Search with ts_rank)
-        sparse_sql = """
+        sparse_sql = f"""
             SELECT c.id::text as chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
                    ts_rank(c.tsv, plainto_tsquery('english', $1)) AS text_rank,
-                   1 - (c.embedding <=> $2::vector) AS similarity
+                   1 - ({sparse_dist}) AS similarity
             FROM document_chunks c
             JOIN documents d ON c.document_id = d.id
             WHERE d.allowed_roles ?| $3::text[]
@@ -245,14 +297,13 @@ class DatabaseManager:
                 "vector_extension": "available" if ext == "vector" else "missing",
             }
 
-
     @classmethod
     async def ingest_document(
-        cls, 
-        document_id: str, 
-        title: str, 
-        content: str, 
-        allowed_roles: List[str], 
+        cls,
+        document_id: str,
+        title: str,
+        content: str,
+        allowed_roles: List[str],
         embedding: List[float],
         file_hash: Optional[str] = None,
     ):
@@ -284,7 +335,8 @@ class DatabaseManager:
         file_type: str = "markdown",
     ) -> str:
         """
-        Ingest a document and its chunks into normalized documents and document_chunks tables.
+        Ingest a document and its chunks into normalized documents and document_chunks tables
+        with 16-bit `halfvec(1536)` quantization (`embedding_halfvec` generated column).
         Atomic transaction ensures all chunks or none are persisted.
         """
         pool = await cls.get_pool()
@@ -310,20 +362,20 @@ class DatabaseManager:
                 )
                 doc_uuid = doc_row["id"]
 
-                # 2. Insert/replace chunks
+                # 2. Insert/replace chunks with 16-bit halfvec quantization
                 await conn.execute("DELETE FROM document_chunks WHERE document_id = $1", doc_uuid)
                 for idx, chunk in enumerate(chunks):
                     chunk_id = chunk.get("chunk_id", f"{document_id}_chunk_{idx+1}")
                     content = chunk.get("content", "")
                     embedding = chunk.get("embedding", [])
-                    vector_str = f"[{','.join(map(str, embedding))}]"
+                    vector_str = cls.format_halfvec(embedding)
                     model = chunk.get("embedding_model", "text-embedding-3-large")
                     tokens = chunk.get("token_count", len(content.split()))
 
                     await conn.execute(
                         """
                         INSERT INTO document_chunks (document_id, chunk_id, chunk_index, content, token_count, embedding, embedding_model)
-                        VALUES ($1, $2, $3, $4, $5, $6::vector, $7)
+                        VALUES ($1, $2, $3, $4, $5, $6::vector::halfvec(1536)::vector, $7)
                         ON CONFLICT (chunk_id) DO UPDATE
                         SET content = EXCLUDED.content,
                             token_count = EXCLUDED.token_count,
@@ -358,6 +410,97 @@ class DatabaseManager:
             return "DELETE 1" in result
 
     # -----------------------------------------------------------------------
+    # LangGraph PostgreSQL Checkpoint Persistence (sdlc_workflow_checkpoints)
+    # -----------------------------------------------------------------------
+
+    @classmethod
+    async def save_workflow_checkpoint(
+        cls,
+        thread_id: str,
+        checkpoint_id: str,
+        checkpoint_payload: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+        checkpoint_ns: str = "",
+        parent_checkpoint_id: Optional[str] = None,
+    ) -> bool:
+        """
+        Persist a LangGraph SDLC workflow state checkpoint into `sdlc_workflow_checkpoints`
+        so multi-worker instances can resume crashed or human-gated (HITL) workflows.
+        """
+        pool = await cls.get_pool()
+        payload_json = json.dumps(checkpoint_payload, default=str)
+        meta_json = json.dumps(metadata or {}, default=str)
+        sql = """
+            INSERT INTO sdlc_workflow_checkpoints (
+                thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, checkpoint_payload, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+            ON CONFLICT (thread_id, checkpoint_ns, checkpoint_id) DO UPDATE
+            SET checkpoint_payload = EXCLUDED.checkpoint_payload,
+                metadata = EXCLUDED.metadata,
+                created_at = CURRENT_TIMESTAMP
+        """
+        async with pool.acquire() as conn:
+            res = await conn.execute(
+                sql,
+                thread_id,
+                checkpoint_ns,
+                checkpoint_id,
+                parent_checkpoint_id,
+                payload_json,
+                meta_json,
+            )
+            return "INSERT" in str(res) or "UPDATE" in str(res)
+
+    @classmethod
+    async def load_workflow_checkpoint(
+        cls,
+        thread_id: str,
+        checkpoint_ns: str = "",
+        checkpoint_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Load the latest (or specific `checkpoint_id`) LangGraph workflow state checkpoint
+        from `sdlc_workflow_checkpoints` for crash-resilient multi-worker resumption.
+        """
+        pool = await cls.get_pool()
+        async with pool.acquire() as conn:
+            if checkpoint_id:
+                row = await conn.fetchrow(
+                    """
+                    SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, checkpoint_payload, metadata
+                    FROM sdlc_workflow_checkpoints
+                    WHERE thread_id = $1 AND checkpoint_ns = $2 AND checkpoint_id = $3
+                    LIMIT 1
+                    """,
+                    thread_id,
+                    checkpoint_ns,
+                    checkpoint_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, checkpoint_payload, metadata
+                    FROM sdlc_workflow_checkpoints
+                    WHERE thread_id = $1 AND checkpoint_ns = $2
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    thread_id,
+                    checkpoint_ns,
+                )
+            if not row:
+                return None
+            record = dict(row)
+            for field in ("checkpoint_payload", "metadata"):
+                if isinstance(record.get(field), str):
+                    try:
+                        record[field] = json.loads(record[field])
+                    except Exception:
+                        pass
+            return record
+
+    # -----------------------------------------------------------------------
     # Transactional Outbox & Distributed Worker Queue (FOR UPDATE SKIP LOCKED)
     # -----------------------------------------------------------------------
 
@@ -374,14 +517,6 @@ class DatabaseManager:
         """
         pool = await cls.get_pool()
         payload_json = json.dumps(payload)
-        sql = """
-            INSERT INTO sdlc_outbox_events (event_key, aggregate_type, payload, status)
-            VALUES ($1, $2, $3::jsonb, 'PENDING')
-            ON CONFLICT (event_key) DO UPDATE
-            SET updated_at = CURRENT_TIMESTAMP
-            WHERE FALSE
-            RETURNING id
-        """
         async with pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(

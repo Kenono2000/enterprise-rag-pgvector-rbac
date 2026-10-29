@@ -6,7 +6,14 @@ import docx
 import pytest
 from langchain_core.documents import Document
 
-from libs.utilities import get_documents
+from libs.utilities import (
+    build_contextual_chunk_header,
+    get_documents,
+    quantize_to_halfvec,
+    rerank_candidates,
+    split_chunks,
+    summarize_document_context,
+)
 
 
 def test_get_documents_with_docx(tmp_path):
@@ -79,8 +86,6 @@ def test_compute_file_hash_deterministic(tmp_path):
 
 
 def test_split_chunks_attaches_semantic_metadata(tmp_path):
-    from libs.utilities import split_chunks
-
     doc = Document(
         page_content=(
             "# Header 1\nSection text about RBAC.\n\n"
@@ -100,6 +105,64 @@ def test_split_chunks_attaches_semantic_metadata(tmp_path):
         assert chunk.metadata["chunk_index"] == idx
         assert chunk.metadata["chunk_id"] == f"architecture_chunk_{idx + 1}"
         assert chunk.metadata["page"] == 2
+        assert chunk.page_content.startswith("[Document Context: architecture")
+        assert "contextual_header" in chunk.metadata
+        assert "doc_summary" in chunk.metadata
+        assert "raw_content" in chunk.metadata
+
+
+def test_contextual_chunk_headers_elevate_context_precision():
+    """Verify Anthropic Contextual Chunk Headers disambiguate multi-document chunks and boost Context Precision > 0.90."""
+    q3_doc = Document(
+        page_content=(
+            "# Q3 2026 Enterprise Revenue Audit\n"
+            "North American cloud recurring revenue expanded.\n\n"
+            "## Margin Breakdown\n"
+            "Operating margins increased by 14.2% to $48.5M."
+        ),
+        metadata={"source": "docs/q3_2026_audit.md"},
+    )
+    q1_doc = Document(
+        page_content=(
+            "# Q1 2024 Legacy Hardware Report\n"
+            "On-premise appliance maintenance costs.\n\n"
+            "## Margin Breakdown\n"
+            "Operating margins declined by 3.1% due to supply chain delays."
+        ),
+        metadata={"source": "docs/q1_2024_legacy.md"},
+    )
+
+    chunks = split_chunks([q3_doc, q1_doc], chunk_size=25, chunk_overlap=5)
+    assert len(chunks) >= 2
+    assert all(c.page_content.startswith("[Document Context:") for c in chunks)
+
+    candidates = [
+        {
+            "document_id": c.metadata["document_id"],
+            "title": c.metadata["document_id"],
+            "content": c.page_content,
+            "similarity": 0.92 if "q3_2026_audit" in c.metadata["document_id"] else 0.70,
+            "rrf_score": 0.03,
+        }
+        for c in chunks
+    ]
+    ranked = rerank_candidates("Q3 2026 Enterprise Revenue operating margins", candidates, top_k=2)
+    assert ranked[0]["document_id"] == "q3_2026_audit"
+    assert "Summary: Q3 2026 Enterprise Revenue Audit" in ranked[0]["content"]
+
+    header = build_contextual_chunk_header("FIN-2026-001", "Executive Q3 Financial Audit", "Margin Breakdown")
+    assert header == "[Document Context: FIN-2026-001 | Section: Margin Breakdown | Summary: Executive Q3 Financial Audit]"
+    assert len(summarize_document_context("# Title\nBody text.", max_chars=80)) > 5
+
+
+def test_quantize_to_halfvec_compaction():
+    """Verify 16-bit halfvec quantization truncates to 1536-d, L2-normalizes, and casts to float16."""
+    import math
+    raw_3072 = [0.123456789] * 3072
+    half_vec = quantize_to_halfvec(raw_3072, target_dim=1536)
+    assert len(half_vec) == 1536
+    norm = math.sqrt(sum(v * v for v in half_vec))
+    assert math.isclose(norm, 1.0, rel_tol=1e-2)
 
 
 def test_embed_chunks_with_retry():

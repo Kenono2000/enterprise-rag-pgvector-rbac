@@ -12,7 +12,9 @@ import pytest
 # Check Docker and testcontainers availability
 _HAS_TESTCONTAINERS = False
 try:
+    import docker
     from testcontainers.postgres import PostgresContainer
+    docker.from_env().ping()
     _HAS_TESTCONTAINERS = True
 except Exception:
     _HAS_TESTCONTAINERS = False
@@ -68,5 +70,7 @@ def test_schema_sql_container_readiness():
     assert "CREATE EXTENSION IF NOT EXISTS vector;" in content
     assert "tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED" in content
     assert "idx_chunks_embedding_hnsw" in content
+    assert "idx_chunks_embedding_halfvec_hnsw" in content
     assert "idx_chunks_content_tsv" in content
     assert "idx_documents_allowed_roles_gin" in content
+    assert "sdlc_workflow_checkpoints" in content

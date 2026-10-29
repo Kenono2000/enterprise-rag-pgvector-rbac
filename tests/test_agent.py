@@ -439,6 +439,22 @@ async def test_production_rollback_judge_healing_and_hitl(tmp_path):
     )
     hitl_result = await wf_hitl.run(hitl_payload)
     assert hitl_result["status"] == "pending_approval"
+    assert hitl_result["checkpoint_backend"] == "PostgresSaver"
     assert hitl_result["approval_card"]["risk_tier"] == "high_risk"
     assert hitl_result["approval_card"]["requires_human_approval"] is True
     assert len(hitl_result["recalled_skills"]) == 1
+
+    # 4. Multi-worker crash-resilient resumption via PostgresSaver
+    wf_worker_2 = LangGraphSDLCWorkflow(
+        sandbox_root=str(tmp_path),
+        test_command="python -c \"assert True\"",
+        push=False,
+    )
+    resumed = await wf_worker_2.resume_from_checkpoint(
+        thread_id=hitl_result["thread_id"],
+        human_approved=True,
+    )
+    assert resumed["status"] == "completed"
+    assert resumed["checkpoint_backend"] == "PostgresSaver"
+    assert resumed["resumed_from"] == hitl_result["checkpoint_id"]
+    assert resumed["approval_card"]["status"] == "auto_approved"

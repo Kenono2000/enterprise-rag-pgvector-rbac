@@ -2,8 +2,8 @@
 scripts/ingest.py
 -----------------
 Document ingestion pipeline for PostgreSQL 16 + pgvector.
-Supports normalized schema (documents + document_chunks) with dual indexing (HNSW + GIN),
-cryptographic SHA-256 de-duplication, batched embeddings, and backward-compatible fallbacks.
+Supports normalized schema (documents + document_chunks) with dual indexing (HNSW halfvec + GIN),
+Contextual Chunk Headers, cryptographic SHA-256 de-duplication, batched embeddings, and backward-compatible fallbacks.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from utilities import (
     get_documents,
     get_embedding_model,
     load_config,
+    quantize_to_halfvec,
     split_chunks,
 )
 
@@ -99,7 +100,8 @@ def ingest_data(
     batch_size: int = 64,
 ):
     """
-    Embed and ingest document chunks into normalized PostgreSQL schema (documents + document_chunks).
+    Embed and ingest document chunks into normalized PostgreSQL schema (documents + document_chunks)
+    with 16-bit halfvec quantization.
     """
     if not chunks:
         print("No chunks to ingest.")
@@ -162,7 +164,7 @@ def ingest_data(
                     # 2. Delete previous chunks if re-indexing an updated file
                     cur.execute("DELETE FROM document_chunks WHERE document_id = %s", (doc_uuid,))
 
-                    # 3. Insert chunks for this document
+                    # 3. Insert chunks for this document with 16-bit halfvec quantization
                     chunks_data = [
                         (
                             doc_uuid,
@@ -170,7 +172,7 @@ def ingest_data(
                             idx,
                             text,
                             len(text.split()),
-                            str(emb),
+                            str(quantize_to_halfvec(emb)),
                             "text-embedding-3-large",
                         )
                         for idx, (_, text, emb, chunk) in enumerate(items)
@@ -188,7 +190,7 @@ def ingest_data(
                             embedding_model = EXCLUDED.embedding_model
                         """,
                         chunks_data,
-                        template="(%s, %s, %s, %s, %s, %s::vector, %s)",
+                        template="(%s, %s, %s, %s, %s, %s::vector::halfvec(1536)::vector, %s)",
                         page_size=100,
                     )
             conn.commit()

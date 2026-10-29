@@ -25,6 +25,8 @@ from agent.workflow import (
     HermesSkillArtifact,
     HermesTrajectoryRecord,
     HermesSkillSynthesizer,
+    PostgresCheckpointSaver,
+    PostgresSaver,
     compact_agent_context,
 )
 
@@ -51,5 +53,7 @@ __all__ = [
     "HermesSkillArtifact",
     "HermesTrajectoryRecord",
     "HermesSkillSynthesizer",
+    "PostgresCheckpointSaver",
+    "PostgresSaver",
     "compact_agent_context",
 ]

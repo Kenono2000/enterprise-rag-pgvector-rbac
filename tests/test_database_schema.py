@@ -25,14 +25,17 @@ def test_schema_sql_contains_normalized_tables_and_indexes():
     assert "file_hash CHAR(64) UNIQUE" in sql_text
     assert "allowed_roles JSONB" in sql_text
 
-    # 2. Document chunks table with foreign key and ON DELETE CASCADE
+    # 2. Document chunks table with foreign key, ON DELETE CASCADE, and 16-bit halfvec(1536) column
     assert "CREATE TABLE IF NOT EXISTS document_chunks" in sql_text
     assert "REFERENCES documents(id) ON DELETE CASCADE" in sql_text
     assert "embedding vector(1536)" in sql_text
+    assert "embedding_halfvec halfvec(1536)" in sql_text
 
-    # 3. High-Performance HNSW vector index & pgvector 0.8+ iterative scan tuning
+    # 3. High-Performance HNSW vector & halfvec indexes + pgvector 0.8+ iterative scan tuning
     assert "idx_chunks_embedding_hnsw" in sql_text
     assert "USING hnsw (embedding vector_cosine_ops)" in sql_text
+    assert "idx_chunks_embedding_halfvec_hnsw" in sql_text
+    assert "halfvec_cosine_ops" in sql_text
     assert "m = 16, ef_construction = 64" in sql_text
     assert "hnsw.iterative_scan" in sql_text
     assert "relaxed_order" in sql_text
@@ -49,9 +52,11 @@ def test_schema_sql_contains_normalized_tables_and_indexes():
     assert "idx_chunks_content_tsv" in sql_text
     assert "USING gin (tsv)" in sql_text
 
-    # 7. Transactional Outbox & Distributed Worker Queue
+    # 7. Transactional Outbox & LangGraph PostgreSQL Checkpoint Persistence
     assert "CREATE TABLE IF NOT EXISTS sdlc_outbox_events" in sql_text
     assert "idx_sdlc_outbox_pending" in sql_text
+    assert "CREATE TABLE IF NOT EXISTS sdlc_workflow_checkpoints" in sql_text
+    assert "idx_sdlc_checkpoints_thread" in sql_text
 
     # 8. Consolidated legacy migration and cleanup logic in schema.sql
     assert "DROP TABLE enterprise_documents CASCADE;" in sql_text
@@ -276,3 +281,47 @@ async def test_pgvector_08_iterative_scan_configuration():
     failing_conn.execute.side_effect = RuntimeError("unrecognized configuration parameter")
     fallback_ok = await DatabaseManager.configure_iterative_scan(failing_conn)
     assert fallback_ok is False
+
+
+@pytest.mark.asyncio
+async def test_database_manager_halfvec_and_workflow_checkpoints():
+    """Verify 16-bit halfvec serialization and PostgreSQL LangGraph checkpoint save/load."""
+    vec_str = DatabaseManager.format_halfvec([0.123456789] * 1536)
+    assert vec_str.startswith("[0.123474")
+    assert len(vec_str.strip("[]").split(",")) == 1536
+
+    mock_conn = AsyncMock()
+    mock_conn.execute.return_value = "INSERT 0 1"
+    mock_conn.fetchrow.return_value = {
+        "thread_id": "sdlc-org/repo-99",
+        "checkpoint_ns": "",
+        "checkpoint_id": "ckpt-99-0",
+        "parent_checkpoint_id": None,
+        "checkpoint_payload": '{"branch": "feature/AGENT-99-fix"}',
+        "metadata": '{"status": "pending_approval"}',
+    }
+
+    class MockPoolAcquire:
+        async def __aenter__(self):
+            return mock_conn
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value = MockPoolAcquire()
+
+    with patch.object(DatabaseManager, "get_pool", new_callable=AsyncMock, return_value=mock_pool):
+        saved = await DatabaseManager.save_workflow_checkpoint(
+            thread_id="sdlc-org/repo-99",
+            checkpoint_id="ckpt-99-0",
+            checkpoint_payload={"branch": "feature/AGENT-99-fix"},
+            metadata={"status": "pending_approval"},
+        )
+        assert saved is True
+        assert "INSERT INTO sdlc_workflow_checkpoints" in mock_conn.execute.call_args[0][0]
+
+        loaded = await DatabaseManager.load_workflow_checkpoint("sdlc-org/repo-99")
+        assert loaded is not None
+        assert loaded["checkpoint_id"] == "ckpt-99-0"
+        assert loaded["checkpoint_payload"]["branch"] == "feature/AGENT-99-fix"
+        assert loaded["metadata"]["status"] == "pending_approval"

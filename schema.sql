@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS documents (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- 3. Document Chunks Table (Vector Embeddings, Content, Chunk Sequence)
+-- 3. Document Chunks Table (Vector Embeddings, 16-bit halfvec Compaction, Content, Chunk Sequence)
 CREATE TABLE IF NOT EXISTS document_chunks (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     content TEXT NOT NULL,
     token_count INT,
     embedding vector(1536) NOT NULL,
+    embedding_halfvec halfvec(1536) GENERATED ALWAYS AS (embedding::halfvec(1536)) STORED,
     embedding_model VARCHAR(100) DEFAULT 'text-embedding-3-large',
     tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -90,6 +91,12 @@ ON document_chunks
 USING hnsw (embedding vector_cosine_ops)
 WITH (m = 16, ef_construction = 64);
 
+-- 5.1a 16-bit Half-Precision (halfvec) HNSW Index: additional 50% RAM savings (cumulative 75% over 3072-d)
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding_halfvec_hnsw
+ON document_chunks
+USING hnsw ((embedding::halfvec(1536)) halfvec_cosine_ops)
+WITH (m = 16, ef_construction = 64);
+
 -- 5.1b pgvector 0.8+ Iterative Index Scan Tuning (prevents overfiltering on narrow RBAC roles)
 DO $$
 BEGIN
@@ -138,6 +145,21 @@ CREATE TABLE IF NOT EXISTS sdlc_outbox_events (
 CREATE INDEX IF NOT EXISTS idx_sdlc_outbox_pending
 ON sdlc_outbox_events (created_at ASC)
 WHERE status = 'PENDING';
+
+-- 5.8 LangGraph PostgreSQL Checkpoint Persistence (PostgresSaver Crash-Resilient Resume)
+CREATE TABLE IF NOT EXISTS sdlc_workflow_checkpoints (
+    thread_id VARCHAR(255) NOT NULL,
+    checkpoint_ns VARCHAR(255) NOT NULL DEFAULT '',
+    checkpoint_id VARCHAR(255) NOT NULL,
+    parent_checkpoint_id VARCHAR(255),
+    checkpoint_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sdlc_checkpoints_thread
+ON sdlc_workflow_checkpoints (thread_id, created_at DESC);
 
 -- ============================================================================
 -- 6. Deterministic Mock Seed Data (100% Offline Testing & Initial Boot)
