@@ -852,9 +852,9 @@ def _render_user_header() -> None:
                 key="token_enforce_toggle",
             )
             new_blocked = st.toggle(
-                "Emergency Kill-Switch (Turn Off)",
+                "Emergency Kill-Switch (Block Tokens)",
                 value=blocked,
-                help="Turn ON to immediately shut off all token consumption for this caller.",
+                help="Turn ON to immediately shut off all token consumption and lock the chat input.",
                 key="token_killswitch_toggle",
             )
             if (new_enforce != enforce) or (new_blocked != blocked):
@@ -950,8 +950,37 @@ def _render_rag_interface() -> None:
                 with st.expander("🔍 Executed RBAC Query", expanded=False):
                     st.code(msg["sql"], language="sql")
 
-    # Chat input
-    if prompt_input := st.chat_input("What does the Mindstream report say about AI agents?"):
+    # Check token limits and emergency kill-switch state before rendering chat input
+    caller_key = st.session_state.get("user_email") or st.session_state.get("user_sub") or "anonymous"
+    token_is_blocked = False
+    block_reason = None
+    try:
+        allowed, cur_tok, max_tok, enforce, err_reason = run_async(
+            DatabaseManager.check_token_limit(caller_key, requested_tokens=0)
+        )
+        if not allowed:
+            token_is_blocked = True
+            block_reason = err_reason or "Token consumption is turned OFF."
+    except Exception as exc:
+        logger.debug("Pre-chat token limit check deferred: %s", exc)
+
+    if token_is_blocked:
+        st.error(
+            f"⛔ **Token Consumption Turned OFF**: {block_reason}  \n"
+            "Further questions are disabled. Disengage the Emergency Kill-Switch or reset token usage in the sidebar to re-enable chat."
+        )
+
+    # Chat input - dynamically disabled when kill-switch is active or quota exceeded
+    chat_placeholder = (
+        "⛔ Token consumption turned OFF — chat disabled"
+        if token_is_blocked
+        else "What does the Mindstream report say about AI agents?"
+    )
+    if prompt_input := st.chat_input(chat_placeholder, disabled=token_is_blocked):
+        if token_is_blocked:
+            st.error(f"⛔ Token consumption turned OFF: {block_reason}")
+            st.stop()
+
         t_start_chat = time.perf_counter()
         st.session_state.messages.append({"role": "user", "content": prompt_input})
         with st.chat_message("user"):
@@ -970,8 +999,12 @@ def _render_rag_interface() -> None:
                                 "blocked": True,
                                 "reason": err_reason or f"Managed token limit exceeded ({cur_tok}/{max_tok}). Token consumption turned off.",
                             }
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("Token limit check error in perform_search: %s", exc)
+                        return {
+                            "blocked": True,
+                            "reason": f"Token verification error: {exc}. Token consumption turned off for security.",
+                        }
 
                     backend = os.getenv("RETRIEVAL_BACKEND", "").lower()
                     emb = await generate_embedding(prompt_input)
@@ -1067,6 +1100,7 @@ def _render_rag_interface() -> None:
                     response_text = f"⛔ **Token Consumption Turned Off**: {result.get('reason', 'Managed limit reached.')}"
                     st.error(response_text)
                     citations = []
+                    sql_query = "-- Query execution blocked: token consumption turned off by emergency kill-switch or managed budget limit."
                 elif not result:
                     status.update(label="Access Denied / Not Found", state="error", expanded=False)
                     response_text = (
