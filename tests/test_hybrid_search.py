@@ -86,6 +86,60 @@ async def test_database_manager_hybrid_search_rrf_fusion():
 
 
 @pytest.mark.asyncio
+async def test_database_manager_hybrid_search_adaptive_weights():
+    """Verify hybrid_search applies dense_weight and sparse_weight in Reciprocal Rank Fusion."""
+    mock_conn = AsyncMock()
+    dense_results = [
+        {
+            "chunk_id_pk": "chunk-dense-1",
+            "document_id": "DENSE-001",
+            "title": "Dense Match",
+            "chunk_index": 0,
+            "content": "Dense semantic match content.",
+            "allowed_roles": ["engineer"],
+            "similarity": 0.90,
+        }
+    ]
+    sparse_results = [
+        {
+            "chunk_id_pk": "chunk-dense-1",
+            "document_id": "DENSE-001",
+            "title": "Dense Match",
+            "chunk_index": 0,
+            "content": "Dense semantic match content.",
+            "allowed_roles": ["engineer"],
+            "text_rank": 0.80,
+            "similarity": 0.90,
+        }
+    ]
+    mock_conn.fetch.side_effect = [dense_results, sparse_results]
+
+    class MockPoolAcquire:
+        async def __aenter__(self):
+            return mock_conn
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value = MockPoolAcquire()
+
+    with patch.object(DatabaseManager, "get_pool", new_callable=AsyncMock, return_value=mock_pool):
+        results = await DatabaseManager.hybrid_search(
+            query_text="semantic match",
+            query_vector=[0.1] * 1536,
+            user_roles=["engineer"],
+            limit=2,
+            rrf_k=60,
+            dense_weight=2.0,
+            sparse_weight=0.5,
+        )
+        assert len(results) == 1
+        # RRF formula: 2.0 / (60 + 1) + 0.5 / (60 + 1) = 2.5 / 61
+        expected_score = (2.0 / 61) + (0.5 / 61)
+        assert pytest.approx(results[0]["rrf_score"], rel=1e-3) == expected_score
+
+
+@pytest.mark.asyncio
 async def test_database_manager_hybrid_search_zero_trust_empty_roles():
     """Verify hybrid_search returns empty list immediately if caller has no roles."""
     res = await DatabaseManager.hybrid_search(

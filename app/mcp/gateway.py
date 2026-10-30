@@ -36,6 +36,15 @@ mcp_token_breaker = TokenCircuitBreaker(
     max_tokens_per_issue=int(os.getenv("MCP_MAX_TOKENS_PER_ISSUE", "50000")),
 )
 
+# Tool-level Role-Based Access Control (ACL) mapping to prevent confused deputy exploits (RFC 8707)
+TOOL_REQUIRED_ROLES: Dict[str, List[str]] = {
+    "search_sdlc_context": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+    "propose_patch": ["engineer", "admin"],
+    "run_sdlc_crew": ["engineer", "admin"],
+    "recall_hermes_skills": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+    "get_gateway_metadata": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+}
+
 
 # ---------------------------------------------------------------------------
 # Strict Deterministic Pydantic Tool Schemas (extra='forbid')
@@ -104,6 +113,20 @@ def _resolve_tool_roles(
     return fallback_roles, None
 
 
+def check_tool_permission(tool_name: str, roles: Optional[List[str]]) -> Tuple[bool, Optional[str]]:
+    """
+    Enforce tool-level Role-Based Access Control (ACL) to block confused deputy exploits (RFC 8707).
+    """
+    if roles is None or not roles:
+        return True, None
+    required = TOOL_REQUIRED_ROLES.get(tool_name)
+    if not required or "*" in required:
+        return True, None
+    if any(r in required for r in roles):
+        return True, None
+    return False, f"Tool authorization error: Tool '{tool_name}' requires one of {required}. Current roles: {roles}"
+
+
 def _resolve_caller_attribution(auth_token: Optional[str] = None) -> Dict[str, str]:
     """Extract deterministic caller attribution metadata (`sub`, `email`) for audit spans."""
     if auth_token:
@@ -153,6 +176,20 @@ async def search_sdlc_context(
             roles=roles,
             duration_ms=duration_ms,
             error=error,
+        )
+        return res
+
+    allowed_acl, acl_err = check_tool_permission("search_sdlc_context", roles)
+    if not allowed_acl:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {acl_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="search_sdlc_context",
+            parameters={"question": validated.question, **attribution},
+            result=res,
+            roles=roles,
+            duration_ms=duration_ms,
+            error=acl_err,
         )
         return res
 
@@ -270,6 +307,20 @@ async def propose_patch(
         try:
             payload = verify_google_token(validated.auth_token)
             submitter = payload.get("email") or payload.get("sub", "authenticated-user")
+            caller_roles = extract_roles(payload)
+            allowed_acl, acl_err = check_tool_permission("propose_patch", caller_roles)
+            if not allowed_acl:
+                duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+                err_msg = f"⛔ {acl_err}"
+                tracer.record_mcp_tool_execution(
+                    tool_name="propose_patch",
+                    parameters={"branch_name": validated.branch_name, "caller_sub": submitter},
+                    result=err_msg,
+                    roles=caller_roles,
+                    duration_ms=duration_ms,
+                    error=acl_err,
+                )
+                return err_msg
         except Exception as exc:
             duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
             err_msg = f"⛔ Authentication failed: {str(exc)}"
@@ -378,6 +429,20 @@ async def run_sdlc_crew(
         )
         return res
 
+    allowed_acl, acl_err = check_tool_permission("run_sdlc_crew", roles)
+    if not allowed_acl:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {acl_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="run_sdlc_crew",
+            parameters={"issue_title": validated.issue_title, **attribution},
+            result=res,
+            roles=roles,
+            duration_ms=duration_ms,
+            error=acl_err,
+        )
+        return res
+
     allowed_rate, remaining_reqs, retry_after = mcp_rate_limiter.allow_request(caller_key)
     if not allowed_rate:
         duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
@@ -475,6 +540,20 @@ async def recall_hermes_skills(
         )
         return res
 
+    allowed_acl, acl_err = check_tool_permission("recall_hermes_skills", roles)
+    if not allowed_acl:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {acl_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="recall_hermes_skills",
+            parameters={"query": validated.query, **attribution},
+            result=res,
+            roles=roles,
+            duration_ms=duration_ms,
+            error=acl_err,
+        )
+        return res
+
     allowed_rate, remaining_reqs, retry_after = mcp_rate_limiter.allow_request(caller_key)
     if not allowed_rate:
         duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
@@ -532,6 +611,81 @@ async def recall_hermes_skills(
     return payload_out
 
 
+@mcp.tool()
+async def get_gateway_metadata(
+    auth_token: Optional[str] = None,
+) -> str:
+    """
+    Expose RFC 9728 Protected Resource Metadata for dynamic MCP client discovery,
+    including token verification authorities, tool-level ACL policies, rate limit quotas,
+    and circuit breaker thresholds.
+    """
+    t_start = time.perf_counter()
+    attribution = _resolve_caller_attribution(auth_token)
+    metadata = {
+        "resource": os.getenv("MCP_RESOURCE_INDICATOR", "https://enterprise-rag.internal/mcp"),
+        "authorization_servers": [
+            "https://accounts.google.com",
+            f"https://securetoken.google.com/{os.getenv('PROJECT_ID', 'gen-lang-client-0795078481')}",
+        ],
+        "scopes_supported": ["openid", "email", "profile"],
+        "bearer_methods_supported": ["header", "body"],
+        "rfc_compliance": ["RFC 9728", "RFC 8707", "OAuth 2.1"],
+        "tool_catalog": [
+            {
+                "name": "search_sdlc_context",
+                "risk_tier": "read_only",
+                "required_roles": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+                "rate_limit": f"{mcp_rate_limiter.max_requests} req / {mcp_rate_limiter.window_seconds}s",
+            },
+            {
+                "name": "propose_patch",
+                "risk_tier": "mutation_high_risk",
+                "required_roles": ["engineer", "admin"],
+                "rate_limit": f"{mcp_rate_limiter.max_requests} req / {mcp_rate_limiter.window_seconds}s",
+            },
+            {
+                "name": "run_sdlc_crew",
+                "risk_tier": "orchestration_tiered",
+                "required_roles": ["engineer", "admin"],
+                "rate_limit": f"{mcp_rate_limiter.max_requests} req / {mcp_rate_limiter.window_seconds}s",
+            },
+            {
+                "name": "recall_hermes_skills",
+                "risk_tier": "read_only",
+                "required_roles": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+                "rate_limit": f"{mcp_rate_limiter.max_requests} req / {mcp_rate_limiter.window_seconds}s",
+            },
+            {
+                "name": "get_gateway_metadata",
+                "risk_tier": "discovery",
+                "required_roles": ["*"],
+                "rate_limit": "unthrottled",
+            },
+        ],
+        "rate_limiter": {
+            "type": "SlidingWindowRateLimiter",
+            "window_seconds": mcp_rate_limiter.window_seconds,
+            "max_requests": mcp_rate_limiter.max_requests,
+        },
+        "circuit_breaker": {
+            "type": "TokenCircuitBreaker",
+            "max_tokens_per_request": mcp_token_breaker.max_tokens_per_request,
+            "max_tokens_per_issue": mcp_token_breaker.max_tokens_per_issue,
+        },
+        "caller_attribution": attribution,
+    }
+    duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+    tracer.record_mcp_tool_execution(
+        tool_name="get_gateway_metadata",
+        parameters=attribution,
+        result="RFC 9728 Protected Resource Metadata returned",
+        roles=None,
+        duration_ms=duration_ms,
+    )
+    return json.dumps(metadata, indent=2)
+
+
 @mcp.resource("policy://sdlc-budget")
 def get_budget_policy() -> str:
     return json.dumps({
@@ -545,6 +699,7 @@ def get_budget_policy() -> str:
             "propose_patch",
             "run_sdlc_crew",
             "recall_hermes_skills",
+            "get_gateway_metadata",
         ],
     })
 

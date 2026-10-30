@@ -47,6 +47,10 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
     synth_p.add_argument("title", help="Issue or task title")
     synth_p.add_argument("--persist", action="store_true", help="Write SKILL.md to .agent/skills/")
 
+    chk_p = subparsers.add_parser("checkpoints", help="Inspect chronological checkpoint history for a thread")
+    chk_p.add_argument("thread_id", help="Workflow thread ID (e.g. sdlc-repo-1)")
+    chk_p.add_argument("--limit", type=int, default=10, help="Maximum checkpoints to display")
+
     args = parser.parse_args(argv)
     sandbox_root = Path.cwd().resolve()
 
@@ -74,6 +78,7 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
                 'hermes recall "<query>"',
                 'hermes crew "<issue_title>" ["<description>"]',
                 'hermes synthesize "<issue_title>" [--persist]',
+                'hermes checkpoints "<thread_id>" [--limit 10]',
             ],
         }
         print(json.dumps(payload, indent=2))
@@ -134,6 +139,37 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
                     "sharegpt_trajectory": trajectory.model_dump(),
                 },
                 indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "checkpoints":
+        import asyncio
+        import concurrent.futures
+        from agent.workflow import LangGraphSDLCWorkflow
+
+        workflow = LangGraphSDLCWorkflow()
+        coro = workflow.get_execution_history(args.thread_id, limit=args.limit)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                history = pool.submit(asyncio.run, coro).result()
+        else:
+            history = asyncio.run(coro)
+
+        print(
+            json.dumps(
+                {
+                    "thread_id": args.thread_id,
+                    "checkpoints_count": len(history),
+                    "history": history,
+                },
+                indent=2,
+                default=str,
             )
         )
         return 0

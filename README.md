@@ -17,15 +17,15 @@ flowchart LR
     end
     subgraph Gateways ["2 & 5. Gateways & OTel"]
         direction TB
-        API["FastAPI (:8000) & FastMCP"] --> OTel["OpenTelemetry SDK<br/>(Jaeger Badger LSM)"]
+        API["FastAPI & FastMCP Gateway<br/>(RFC 9728 Discovery & ACLs)"] --> OTel["OpenTelemetry SDK<br/>(Jaeger Badger LSM)"]
     end
     subgraph RAGCore ["1 & 4. Ingest & In-DB RBAC"]
         direction TB
-        PG["PG16 GIN RBAC + halfvec HNSW<br/>(Contextual Chunk Ingest)"] --> RRF["Hybrid RRF (k=60)<br/>+ Grounding Guard"]
+        PG["PG16 GIN RBAC + halfvec HNSW<br/>(Contextual Chunk Ingest)"] --> RRF["Adaptive Hybrid RRF<br/>+ Grounding Guard"]
     end
     subgraph CloudAndSDLC ["5 & 6. SDLC & Clouds"]
         direction TB
-        SDLC["LangGraph PostgresSaver<br/>+ CrewAI + Hermes Agent"]
+        SDLC["LangGraph PostgresSaver<br/>(Lineage + CrewAI + Hermes)"]
         Clouds["Multi-Cloud Vector<br/>(Azure / GCP / DBX)"]
     end
     Identity --> Gateways --> RAGCore --> CloudAndSDLC
@@ -39,8 +39,8 @@ flowchart LR
 | **1** | **In-DB RBAC & Storage** | Pre-filtered GIN + HNSW iterative scan (`relaxed_order`) & 16-bit `halfvec(1536)` | Zero recall starvation, zero overfiltering, **75% cumulative RAM savings** (>98% recall). |
 | **2** | **Quickstart & Runtime** | Event-loop-scoped `asyncpg` pools, `SKIP LOCKED` outbox & `/readyz` | Prevents closed-loop crashes; durable worker queue; Kubernetes probe ready. |
 | **3** | **Identity & Sessions** | Stateless OAuth 2.0 PKCE, HMAC state & encrypted cookies | Survives F5 reloads & multi-worker scale-out with **zero Redis**; SOC-2 15m/12h bounds. |
-| **4** | **Ingestion & Hybrid RAG** | Contextual Chunk Headers, 64KB SHA-256 de-dup, Dense + Sparse RRF (`k=60`) | **>0.90 Context Precision**; `O(1)` skip for unchanged files; verified citations. |
-| **5** | **Gateways, OTel & SDLC** | Zero-Trust FastMCP, `PostgresSaver` Checkpoints & Tri-Paradigm SDLC (`LangGraph`/`CrewAI`/`Hermes`) | Crash-resilient multi-worker resume; 60 req/min + 8K/50K breakers; `SKILL.md` + ShareGPT RL export. |
+| **4** | **Ingestion & Hybrid RAG** | Contextual Headers, 64KB SHA-256 de-dup, Adaptive Dense + Sparse RRF (`dense_weight` / `sparse_weight`) | **>0.90 Context Precision**; `O(1)` skip for unchanged files; domain-adaptive fusion. |
+| **5** | **Gateways, OTel & SDLC** | Zero-Trust FastMCP (RFC 9728 Discovery & RFC 8707 Tool ACLs), `PostgresSaver` & Time-Travel Lineage | Crash-resilient resume & time-travel auditing; confused deputy prevention; 60 req/min + 8K/50K breakers. |
 | **6** | **Multi-Cloud & Runbook** | Quad-mode strategy (`pgvector`, `azure`, `gcp`, `databricks`) | Zero-downtime `.env` switching with native pre-filtering across all 4 engines. |
 ## 1. In-Database RBAC and Vector Storage (`schema.sql`, `app/db/`)
 ```mermaid
@@ -74,7 +74,7 @@ ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 flowchart LR
     subgraph DevBootstrap ["1. Bootstrap & Verify"]
         direction TB
-        Venv["Install .venv & Deps"] --> Pytest["Run 127 Pytest Tests"]
+        Venv["Install .venv & Deps"] --> Pytest["Run 130 Pytest Tests"]
     end
     subgraph Containers ["2. Docker Infrastructure"]
         direction TB
@@ -92,12 +92,13 @@ flowchart LR
 ```powershell
 git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
 python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run full test suite (127 tests)
+python -m pytest -v                                                     # 1. Run full test suite (130 tests)
 docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
 python -m app.mcp                                                        # 5. Launch FastMCP Gateway (stdio/SSE)
 python -m agent status                                                   # 6. Run Hermes + CrewAI + LangGraph SDLC CLI
+python -m agent checkpoints "<thread_id>"                                # 7. Inspect Time-Travel Checkpoint Lineage
 ```
 * **Local Endpoints**: Streamlit UI (`http://localhost:8501`) · Swagger Docs (`http://localhost:8000/docs`) · Health Probes (`/healthz`, `/readyz`) · Telemetry (`/api/v1/metrics/observability`) · Jaeger UI (`http://localhost:16686`).
 * **Loop-Scoped Async Concurrency**: `DatabaseManager` and `get_openai_client()` scope connection pools to `asyncio.get_running_loop()`, preventing `RuntimeError: Event loop is closed` across Streamlit threads.
@@ -147,7 +148,7 @@ flowchart LR
 ```
 * **Skip Unchanged Files (SHA-256 Hashing)**: Hashes files in 64KB blocks (`O(1)` lookup) to skip unchanged documents with zero API calls, and automatically replaces old chunks when a file is updated.
 * **Contextual Chunk Headers & Table-Safe Splitting**: `split_chunks()` (`libs/utilities.py`) extracts parent document summaries (`summarize_document_context`) and prepends `[Document Context: <id> | Section: <sec> | Summary: <summary>]` headers (`build_contextual_chunk_header`) to 800-token chunks without breaking Markdown tables—elevating **Context Precision > 0.90** while embedding in 64-chunk batches with exponential backoff (`tenacity`).
-* **Hybrid Search (Semantic + Keyword RRF)**: Combines 16-bit `halfvec(1536)` cosine search with full-text search (exact SKUs/error codes like `ERR-502`) using Reciprocal Rank Fusion (`k=60`), pre-filtered by user role in PostgreSQL.
+* **Adaptive Hybrid Search (Semantic + Keyword RRF)**: Combines 16-bit `halfvec(1536)` cosine search with robust full-text search (`plainto_tsquery` + `websearch_to_tsquery` fallback) using parameterized Reciprocal Rank Fusion (`dense_weight / (k + rank) + sparse_weight / (k + rank)`, default `k=60`), pre-filtered by user role in PostgreSQL.
 * **Re-Ranking & Citation Guardrail (`GroundingGuardrail`)**: Re-ranks top results with a `CrossEncoder` and requires every answer to cite `[Doc: <Title>, Chunk <Index>]`—explicitly refusing to answer when context is missing.
 ## 5. Gateways, Observability, and Autonomous SDLC Agent (`app/`, `agent/`)
 ```mermaid
@@ -168,7 +169,7 @@ flowchart LR
     subgraph Verify ["4. Flash Triage & PostgresSaver"]
         direction TB
         Test{"test-triager<br/>(30s Timeout)"} -->|Retry < 3| Repair["Repair (<=3x)"]
-        Test -->|Passed| Hermes["PostgresSaver + SKILL.md<br/>+ HITL Gate / PR"]
+        Test -->|Passed| Hermes["PostgresSaver Lineage<br/>+ SKILL.md + HITL / PR"]
     end
     Intake --> Gen --> Audit -->|Pass| Verify
     style Intake fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
@@ -178,9 +179,9 @@ flowchart LR
     style Reject fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
     style Hermes fill:#dcfce7,stroke:#22c55e,stroke-width:1.5px
 ```
-* **Zero-Trust FastMCP Gateway (`app/mcp/gateway.py`)**: Exposes `search_sdlc_context`, `propose_patch`, `run_sdlc_crew`, `recall_hermes_skills`, and `policy://sdlc-budget` over `stdio`/`SSE` with `ConfigDict(extra="forbid")` schemas (`MCPSearchRequest`, `MCPPatchRequest`, `MCPSDLCCrewRequest`, `MCPHermesSkillRequest`), 60 req/min `SlidingWindowRateLimiter`, and 8K/50K `TokenCircuitBreaker`.
+* **Zero-Trust FastMCP Gateway (`app/mcp/gateway.py`)**: Exposes `search_sdlc_context`, `propose_patch`, `run_sdlc_crew`, `recall_hermes_skills`, `get_gateway_metadata`, and `policy://sdlc-budget` over `stdio`/`SSE` with `ConfigDict(extra="forbid")` schemas, RFC 9728 Protected Resource Metadata discovery, RFC 8707 tool-level Role-Based Access Control (`check_tool_permission` blocking confused deputy exploits), 60 req/min `SlidingWindowRateLimiter`, and 8K/50K `TokenCircuitBreaker`.
 * **Full-Stack OpenTelemetry (`app/observability.py`)**: Streams OTLP gRPC spans (`:4317`) to **Jaeger** (persistent Badger LSM disk store, 7-day TTL) and **Azure Application Insights**, backed by a 1,000-event ring buffer (`GET /api/v1/metrics/observability`) and non-root `Dockerfile` (`UID 10001`).
-* **Tri-Paradigm SDLC Workflow & `PostgresSaver` (`agent/workflow.py`)**: Unites **LangChain/LangGraph** (`LangGraphSDLCWorkflow` cyclic state machine + PostgreSQL checkpoint persistence via `PostgresSaver`/`sdlc_workflow_checkpoints` + `resume_from_checkpoint` multi-worker recovery + atomic `rollback_patches`), **CrewAI** (`SDLCCrewOrchestrator` role-based crew: `Principal SDLC Architect` [`inherit`], `Lead Security & AST Auditor` [`pro`], and `Site Reliability & Pytest Triager` [`flash`]), and **Hermes Agent** (`HermesSkillSynthesizer` closed-loop `recall_relevant_skills`, portable `SKILL.md` distillation, and ShareGPT RL export) guarded by `PolicyEngine`.
+* **Tri-Paradigm SDLC Workflow & `PostgresSaver` (`agent/workflow.py`)**: Unites **LangChain/LangGraph** (`LangGraphSDLCWorkflow` cyclic state machine + PostgreSQL checkpoint persistence via `PostgresSaver`/`sdlc_workflow_checkpoints` + `resume_from_checkpoint` multi-worker recovery + `get_execution_history` time-travel lineage auditing + atomic `rollback_patches`), **CrewAI** (`SDLCCrewOrchestrator` role-based crew: `Principal SDLC Architect` [`inherit`], `Lead Security & AST Auditor` [`pro`], and `Site Reliability & Pytest Triager` [`flash`]), and **Hermes Agent** (`HermesSkillSynthesizer` closed-loop `recall_relevant_skills`, portable `SKILL.md` distillation, and ShareGPT RL export) guarded by `PolicyEngine`.
 ## 6. Multi-Cloud Strategy and Runbook
 * **Zero-Downtime Cutover & Failover**: Switch `RETRIEVAL_BACKEND` in `.env` (`pgvector` | `azure` | `gcp` | `databricks`) or run `python scripts/migrate_multicloud.py --target all`.
 * **Incident Runbook**: On DB latency alerts in Jaeger (`http://localhost:16686`), fail over `RETRIEVAL_BACKEND` in `.env`; on JWKS key rotation, restart the auth worker to flush `JWKSClient`; verify Badger LSM persistence via `docker compose restart jaeger`.

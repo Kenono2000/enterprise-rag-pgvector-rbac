@@ -171,10 +171,13 @@ class DatabaseManager:
         limit: int = 10,
         rrf_k: int = 60,
         use_halfvec: Optional[bool] = None,
+        dense_weight: float = 1.0,
+        sparse_weight: float = 1.0,
     ) -> List[dict]:
         """
         Execute Hybrid Search combining Dense Vector Search (HNSW 16-bit halfvec cosine similarity)
         and Sparse Full-Text Search (GIN tsvector / ts_rank) with Reciprocal Rank Fusion (RRF).
+        Supports adaptive dense_weight and sparse_weight to balance semantic vs keyword retrieval.
         Enforces Zero-Trust RBAC: documents outside user_roles are filtered at SQL execution time.
         """
         if not user_roles:
@@ -219,7 +222,7 @@ class DatabaseManager:
             LIMIT $3
         """
 
-        # 2. Sparse retrieval (Full-Text Search with ts_rank)
+        # 2. Sparse retrieval (Full-Text Search with ts_rank and robust fallback)
         sparse_sql = f"""
             SELECT c.id::text as chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
                    ts_rank(c.tsv, plainto_tsquery('english', $1)) AS text_rank,
@@ -227,7 +230,7 @@ class DatabaseManager:
             FROM document_chunks c
             JOIN documents d ON c.document_id = d.id
             WHERE d.allowed_roles ?| $3::text[]
-              AND c.tsv @@ plainto_tsquery('english', $1)
+              AND (c.tsv @@ plainto_tsquery('english', $1) OR c.tsv @@ websearch_to_tsquery('english', $1))
             ORDER BY text_rank DESC
             LIMIT $4
         """
@@ -241,7 +244,7 @@ class DatabaseManager:
                 sparse_rows = []
 
         # 3. Reciprocal Rank Fusion (RRF)
-        # RRF Score = sum( 1 / (k + rank) )
+        # RRF Score = sum( weight / (k + rank) )
         candidates = {}
 
         for rank, row in enumerate(dense_rows):
@@ -257,12 +260,12 @@ class DatabaseManager:
                 "text_rank": 0.0,
                 "dense_rank": rank + 1,
                 "sparse_rank": None,
-                "rrf_score": 1.0 / (rrf_k + (rank + 1)),
+                "rrf_score": float(dense_weight) / (rrf_k + (rank + 1)),
             }
 
         for rank, row in enumerate(sparse_rows):
             key = row["chunk_id_pk"]
-            sparse_score = 1.0 / (rrf_k + (rank + 1))
+            sparse_score = float(sparse_weight) / (rrf_k + (rank + 1))
             if key in candidates:
                 candidates[key]["sparse_rank"] = rank + 1
                 candidates[key]["text_rank"] = float(row.get("text_rank", 0.0))
@@ -499,6 +502,43 @@ class DatabaseManager:
                     except Exception:
                         pass
             return record
+
+    @classmethod
+    async def list_workflow_checkpoints(
+        cls,
+        thread_id: str,
+        checkpoint_ns: str = "",
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """
+        List chronological LangGraph workflow state checkpoints from `sdlc_workflow_checkpoints`
+        for time-travel inspection and audit traceability.
+        """
+        pool = await cls.get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, checkpoint_payload, metadata, created_at
+                FROM sdlc_workflow_checkpoints
+                WHERE thread_id = $1 AND checkpoint_ns = $2
+                ORDER BY created_at ASC
+                LIMIT $3
+                """,
+                thread_id,
+                checkpoint_ns,
+                limit,
+            )
+            results: List[Dict[str, Any]] = []
+            for row in rows:
+                record = dict(row)
+                for field in ("checkpoint_payload", "metadata"):
+                    if isinstance(record.get(field), str):
+                        try:
+                            record[field] = json.loads(record[field])
+                        except Exception:
+                            pass
+                results.append(record)
+            return results
 
     # -----------------------------------------------------------------------
     # Transactional Outbox & Distributed Worker Queue (FOR UPDATE SKIP LOCKED)

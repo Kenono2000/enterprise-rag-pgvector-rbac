@@ -12,6 +12,8 @@ from pydantic import ValidationError
 
 from app.mcp.gateway import (
     _resolve_tool_roles,
+    check_tool_permission,
+    get_gateway_metadata,
     search_sdlc_context,
     propose_patch,
     run_sdlc_crew,
@@ -111,6 +113,38 @@ class TestMcpToolsAuth:
             auth_token="valid.token",
         )
         assert "matched_count" in hermes_out
+
+    async def test_tool_permission_acl_blocks_unauthorized_roles(self):
+        """Verify check_tool_permission enforces tool-level ACL and prevents confused deputy calls."""
+        import asyncio
+        await asyncio.sleep(0)
+        # propose_patch requires engineer or admin
+        ok_eng, err_eng = check_tool_permission("propose_patch", ["engineer"])
+        assert ok_eng is True
+        assert err_eng is None
+
+        ok_fin, err_fin = check_tool_permission("propose_patch", ["finance_executive"])
+        assert ok_fin is False
+        assert "Tool authorization error" in err_fin
+
+        # search_sdlc_context allows finance_executive
+        ok_search, err_search = check_tool_permission("search_sdlc_context", ["finance_executive"])
+        assert ok_search is True
+        assert err_search is None
+
+    async def test_get_gateway_metadata_rfc9728(self):
+        """Verify get_gateway_metadata returns RFC 9728 & RFC 8707 compliant metadata."""
+        import json
+        meta_str = await get_gateway_metadata()
+        meta = json.loads(meta_str)
+        assert meta["resource"] == "https://enterprise-rag.internal/mcp"
+        assert "https://accounts.google.com" in meta["authorization_servers"]
+        assert "RFC 9728" in meta["rfc_compliance"]
+        assert "RFC 8707" in meta["rfc_compliance"]
+        tools = [t["name"] for t in meta["tool_catalog"]]
+        assert "search_sdlc_context" in tools
+        assert "propose_patch" in tools
+        assert "get_gateway_metadata" in tools
 
 
 class TestMcpStrictSchemasAndBlastRadius:

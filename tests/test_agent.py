@@ -458,3 +458,10 @@ async def test_production_rollback_judge_healing_and_hitl(tmp_path):
     assert resumed["checkpoint_backend"] == "PostgresSaver"
     assert resumed["resumed_from"] == hitl_result["checkpoint_id"]
     assert resumed["approval_card"]["status"] == "auto_approved"
+
+    # 5. Checkpoint execution history time-travel inspection & CLI
+    history = await wf_worker_2.get_execution_history(hitl_result["thread_id"])
+    assert len(history) >= 1
+
+    from agent.__main__ import run_cli
+    assert run_cli(["checkpoints", hitl_result["thread_id"]]) == 0

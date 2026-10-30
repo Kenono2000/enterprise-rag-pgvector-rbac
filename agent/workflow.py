@@ -816,6 +816,32 @@ class PostgresCheckpointSaver(MemorySaver):
                 logger.debug("PostgresSaver DB read fell back to shared store: %s", exc)
         return self._shared_store.get(thread_id)
 
+    async def list_checkpoints(
+        self,
+        thread_id: str,
+        checkpoint_ns: str = "",
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve chronological checkpoint chain for time-travel auditing."""
+        if self.db_url:
+            try:
+                from app.db.manager import DatabaseManager
+                db_records = await DatabaseManager.list_workflow_checkpoints(
+                    thread_id=thread_id,
+                    checkpoint_ns=checkpoint_ns,
+                    limit=limit,
+                )
+                if db_records:
+                    return db_records
+            except Exception as exc:
+                logger.debug("PostgresSaver list_checkpoints DB read fell back: %s", exc)
+
+        matches = [
+            v for k, v in self._shared_store.items()
+            if v.get("thread_id") == thread_id
+        ]
+        return matches[:limit]
+
 
 PostgresSaver = PostgresCheckpointSaver
 
@@ -1415,3 +1441,16 @@ class LangGraphSDLCWorkflow:
             "approval_card": approval,
             "resumed_from": record.get("checkpoint_id"),
         }
+
+    async def get_execution_history(
+        self,
+        thread_id: str,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve chronological checkpoint history and time-travel execution records
+        for a workflow thread across distributed LangGraph workers.
+        """
+        if hasattr(self.checkpointer, "list_checkpoints"):
+            return await self.checkpointer.list_checkpoints(thread_id=thread_id, limit=limit)
+        return []
