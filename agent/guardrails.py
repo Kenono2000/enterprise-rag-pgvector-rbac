@@ -181,6 +181,8 @@ class PolicyEngine:
         re.compile(r"(?:sk-|key-|token-|secret-)[a-zA-Z0-9]{20,}", re.IGNORECASE),
         re.compile(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----"),
         re.compile(r"AIza[0-9A-Za-z-_]{35}"),  # Google API Key
+        re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS Access Key ID
+        re.compile(r"ghp_[a-zA-Z0-9]{30,}"),  # GitHub Personal Access Token
     ]
 
     PROTECTED_PATHS = (
@@ -221,6 +223,8 @@ class PolicyEngine:
     def verify_protected_path(cls, file_path: str) -> List[str]:
         norm = re.sub(r"^(?:\./)+", "", (file_path or "").replace("\\", "/"))
         violations: List[str] = []
+        if ".." in norm.split("/") or norm.startswith("../") or "/../" in norm:
+            violations.append(f"Protected path traversal blocked: '{file_path}'")
         for protected in cls.PROTECTED_PATHS:
             if norm == protected.rstrip("/") or norm.startswith(protected):
                 violations.append(f"Protected path modification blocked: '{file_path}'")
@@ -250,6 +254,11 @@ class PolicyEngine:
                     if isinstance(node.func, ast.Name):
                         if node.func.id in ("exec", "eval", "__import__", "compile"):
                             violations.append(f"Forbidden dynamic execution: {node.func.id}()")
+                        elif node.func.id == "open":
+                            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                                path_val = node.args[0].value.replace("\\", "/")
+                                if ".." in path_val.split("/") or path_val.startswith("../") or "/../" in path_val:
+                                    violations.append(f"Forbidden path traversal in open(): '{node.args[0].value}'")
                     elif isinstance(node.func, ast.Attribute):
                         if node.func.attr == "__import__":
                             violations.append("Forbidden dunder import: __import__()")
