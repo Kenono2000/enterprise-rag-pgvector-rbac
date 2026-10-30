@@ -412,6 +412,50 @@ class DatabaseManager:
             result = await conn.execute("DELETE FROM documents WHERE document_id = $1", document_id)
             return "DELETE 1" in result
 
+    @classmethod
+    async def list_documents(
+        cls,
+        user_roles: Optional[List[str]] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[dict]:
+        """
+        List documents pre-filtered by user_roles using the GIN index on allowed_roles.
+        Fails closed: if user_roles is empty or None, returns [] without querying the DB.
+        """
+        if not user_roles:
+            return []
+
+        clean_roles = [r for r in user_roles if isinstance(r, str) and re.match(r"^[a-zA-Z0-9_\-\.\@]+$", r)]
+        if not clean_roles:
+            return []
+
+        pool = await cls.get_pool()
+        async with pool.acquire() as conn:
+            query = """
+                SELECT d.id, d.document_id, d.title, d.file_hash, d.allowed_roles, d.created_at,
+                       COUNT(c.id) AS chunk_count
+                FROM documents d
+                LEFT JOIN document_chunks c ON d.id = c.document_id
+                WHERE d.allowed_roles ?| $1::text[]
+                GROUP BY d.id, d.document_id, d.title, d.file_hash, d.allowed_roles, d.created_at
+                ORDER BY d.created_at DESC
+                LIMIT $2 OFFSET $3;
+            """
+            rows = await conn.fetch(query, clean_roles, limit, offset)
+            return [
+                {
+                    "id": str(r["id"]),
+                    "document_id": r["document_id"],
+                    "title": r["title"],
+                    "file_hash": r["file_hash"],
+                    "allowed_roles": json.loads(r["allowed_roles"]) if isinstance(r["allowed_roles"], str) else (r["allowed_roles"] or []),
+                    "chunk_count": int(r["chunk_count"]),
+                    "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                }
+                for r in rows
+            ]
+
     # -----------------------------------------------------------------------
     # LangGraph PostgreSQL Checkpoint Persistence (sdlc_workflow_checkpoints)
     # -----------------------------------------------------------------------

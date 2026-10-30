@@ -39,6 +39,7 @@ mcp_token_breaker = TokenCircuitBreaker(
 # Tool-level Role-Based Access Control (ACL) mapping to prevent confused deputy exploits (RFC 8707)
 TOOL_REQUIRED_ROLES: Dict[str, List[str]] = {
     "search_sdlc_context": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+    "list_documents": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
     "propose_patch": ["engineer", "admin"],
     "run_sdlc_crew": ["engineer", "admin"],
     "recall_hermes_skills": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
@@ -80,6 +81,14 @@ class MCPHermesSkillRequest(BaseModel):
     query: str = Field(..., min_length=1, description="Search query to recall matching Hermes SKILL.md playbooks.")
     max_skills: int = Field(default=2, ge=1, le=10, description="Maximum number of skills to recall.")
     auth_token: Optional[str] = Field(default=None, description="Google OAuth ID token.")
+
+
+class MCPListDocumentsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=20, ge=1, le=100, description="Maximum number of documents to return.")
+    auth_token: Optional[str] = Field(default=None, description="Google OAuth ID token.")
+    user_roles: Optional[List[str]] = Field(default=None, description="Fallback roles when REQUIRE_GOOGLE_AUTH=false.")
 
 
 def _resolve_tool_roles(
@@ -609,6 +618,82 @@ async def recall_hermes_skills(
         duration_ms=duration_ms,
     )
     return payload_out
+
+
+@mcp.tool()
+async def list_documents(
+    limit: int = 20,
+    auth_token: Optional[str] = None,
+    user_roles: Optional[List[str]] = None,
+) -> str:
+    """
+    List documents pre-filtered by caller's verified roles using PostgreSQL GIN index.
+    Fails closed if user has no authorized roles.
+    """
+    t_start = time.perf_counter()
+    tool_req = MCPListDocumentsRequest(limit=limit, auth_token=auth_token, user_roles=user_roles)
+
+    roles, auth_err = _resolve_tool_roles(tool_req.auth_token, tool_req.user_roles)
+    if auth_err:
+        tracer.record_mcp_tool_execution(
+            tool_name="list_documents",
+            parameters={"limit": tool_req.limit},
+            result=auth_err,
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=auth_err,
+        )
+        return f"⛔ {auth_err}"
+
+    allowed_perm, perm_err = check_tool_permission("list_documents", roles)
+    if not allowed_perm:
+        tracer.record_mcp_tool_execution(
+            tool_name="list_documents",
+            parameters={"limit": tool_req.limit},
+            result=perm_err,
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=perm_err,
+        )
+        return f"⛔ {perm_err}"
+
+    attribution = _resolve_caller_attribution(tool_req.auth_token)
+    caller_key = attribution.get("caller_sub") or "anonymous"
+    allowed_rate, _rem_reqs, retry_after = mcp_rate_limiter.allow_request(caller_key)
+    if not allowed_rate:
+        err_msg = f"Rate limit exceeded: caller '{caller_key}' hit threshold. Retry after {retry_after}s."
+        tracer.record_mcp_tool_execution(
+            tool_name="list_documents",
+            parameters={"limit": tool_req.limit},
+            result=err_msg,
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=err_msg,
+        )
+        return f"⛔ {err_msg}"
+
+    try:
+        docs = await DatabaseManager.list_documents(user_roles=roles, limit=tool_req.limit)
+        payload = json.dumps({"count": len(docs), "documents": docs}, indent=2)
+        tracer.record_mcp_tool_execution(
+            tool_name="list_documents",
+            parameters={"limit": tool_req.limit},
+            result=f"{len(docs)} documents returned",
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+        )
+        return payload
+    except Exception as exc:
+        err_msg = f"Failed to list documents: {str(exc)}"
+        tracer.record_mcp_tool_execution(
+            tool_name="list_documents",
+            parameters={"limit": tool_req.limit},
+            result=err_msg,
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=err_msg,
+        )
+        return f"⛔ {err_msg}"
 
 
 @mcp.tool()
