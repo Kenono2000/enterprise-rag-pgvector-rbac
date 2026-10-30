@@ -54,6 +54,15 @@ def test_get_documents_docx_with_docx2txt_loader(tmp_path):
         mock_loader_cls.assert_called_once_with(str(doc_path))
 
 
+def test_get_documents_with_markdown(tmp_path):
+    md_path = tmp_path / "spec.md"
+    md_path.write_text("# System Spec\nThis is a test spec.", encoding="utf-8")
+    docs = get_documents([str(md_path)])
+    assert len(docs) == 1
+    assert "System Spec" in docs[0].page_content
+    assert docs[0].metadata.get("source") == str(md_path)
+
+
 def test_get_documents_skips_unsupported(tmp_path):
     txt_path = tmp_path / "sample.unsupported"
     txt_path.write_text("Hello")

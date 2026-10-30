@@ -27,14 +27,31 @@ import logging
 import operator
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Union
+
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 import numpy as np
 import openai
 import psycopg2
 from dotenv import load_dotenv
-from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, UnstructuredMarkdownLoader
+from langchain_community.document_loaders import (
+    Docx2txtLoader,
+    PyMuPDFLoader,
+    PyPDFLoader,
+    TextLoader,
+)
 from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -169,11 +186,22 @@ def get_documents(file_paths: list[str]) -> list[Document]:
         try:
             suffix = Path(file_path).suffix.lower()
             if suffix == ".pdf":
-                loader = PyPDFLoader(file_path)
-                documents.extend(loader.load())
-            elif suffix == ".md":
-                loader = UnstructuredMarkdownLoader(file_path)
-                documents.extend(loader.load())
+                try:
+                    loader = PyPDFLoader(file_path)
+                    documents.extend(loader.load())
+                except Exception as pdf_err:
+                    try:
+                        loader = PyMuPDFLoader(file_path)
+                        documents.extend(loader.load())
+                    except Exception:
+                        raise pdf_err
+            elif suffix in {".md", ".markdown", ".txt"}:
+                try:
+                    loader = TextLoader(file_path, encoding="utf-8")
+                    documents.extend(loader.load())
+                except Exception:
+                    text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                    documents.append(Document(page_content=text, metadata={"source": str(file_path)}))
             elif suffix == ".docx":
                 try:
                     loader = Docx2txtLoader(file_path)

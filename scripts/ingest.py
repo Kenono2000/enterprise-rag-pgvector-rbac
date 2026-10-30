@@ -16,6 +16,17 @@ import sys
 from pathlib import Path
 from typing import Any, List, Optional
 
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # Add project root and libs directory to sys.path so utilities can be resolved
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "libs"))
@@ -214,13 +225,16 @@ def main():
         return
 
     file_paths: list[str] = []
+    ignored_dir_names = {".git", ".venv", ".pytest_cache", "__pycache__", "node_modules", ".vscode", ".devcontainer"}
+    valid_suffixes = {".pdf", ".md", ".markdown", ".docx", ".txt"}
     for path in args.paths:
         p = Path(path)
         if p.is_dir():
-            file_paths.extend(str(f) for f in p.rglob("*.pdf"))
-            file_paths.extend(str(f) for f in p.rglob("*.md"))
-            file_paths.extend(str(f) for f in p.rglob("*.docx"))
-        elif p.is_file() and p.suffix.lower() in {".pdf", ".md", ".docx"}:
+            for f in p.rglob("*"):
+                if f.is_file() and not any(part in ignored_dir_names or part.startswith(".") for part in f.parts):
+                    if f.suffix.lower() in valid_suffixes:
+                        file_paths.append(str(f))
+        elif p.is_file() and p.suffix.lower() in valid_suffixes:
             file_paths.append(str(p))
         else:
             print(f"⚠️ Skipping: {path}")
