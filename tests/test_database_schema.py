@@ -63,6 +63,13 @@ def test_schema_sql_contains_normalized_tables_and_indexes():
     assert "DROP VIEW IF EXISTS enterprise_documents CASCADE;" in sql_text
     assert "DROP FUNCTION IF EXISTS trg_enterprise_documents_upsert CASCADE;" in sql_text
 
+    # 9. Token Consumption Ledger & Managed Budget Limits
+    assert "CREATE TABLE IF NOT EXISTS token_consumption_ledger" in sql_text
+    assert "idx_token_ledger_caller_time" in sql_text
+    assert "CREATE TABLE IF NOT EXISTS token_managed_limits" in sql_text
+    assert "idx_token_limits_caller" in sql_text
+    assert "INSERT INTO token_managed_limits" in sql_text
+
 
 def test_consolidated_schema_migration_integrity():
     """Verify schema.sql consolidates complete initialization, migration, and seed logic."""

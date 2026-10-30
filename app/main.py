@@ -91,6 +91,33 @@ class UserIdentity(BaseModel):
     roles: List[str]
 
 
+class TokenLimitUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    caller_id: str = Field(..., min_length=1, description="Target caller ID, email, or 'global'")
+    max_budget_tokens: Optional[int] = Field(default=None, ge=1, description="Managed token limit")
+    enforce_limit: Optional[bool] = Field(default=None, description="Option to turn on/off limit enforcement")
+    is_blocked: Optional[bool] = Field(default=None, description="Option to turn on/off token consumption immediately")
+
+
+class TokenResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    caller_id: str = Field(..., min_length=1, description="Caller ID to reset")
+
+
+class TokenManagedLimitResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    caller_id: str
+    max_budget_tokens: int
+    current_tokens: int
+    enforce_limit: bool
+    is_blocked: bool
+    tier: Optional[str] = "standard"
+    remaining_tokens: int
+
+
 # ---------------------------------------------------------------------------
 # Auth Dependency
 # ---------------------------------------------------------------------------
@@ -269,6 +296,19 @@ async def query_rag(
             detail=token_err,
         )
 
+    # In-database managed token limit & kill switch check
+    try:
+        db_allowed, cur_tok, max_tok, enforce, db_err = await DatabaseManager.check_token_limit(caller_key, req_tokens)
+        if not db_allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=db_err or f"Managed token limit exceeded ({cur_tok}/{max_tok}). Token consumption turned off.",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.debug("Database token limit check bypassed (deferred/pool offline): %s", exc)
+
     logger.info("RAG query: user=%s roles=%s mode=%s query=%r", caller_key, user.roles, request.mode, request.question[:60])
 
     t_start = time.perf_counter()
@@ -330,10 +370,12 @@ async def query_rag(
     gen_start = time.perf_counter()
     answer_text = await chat_completion(prompt)
     gen_ms = round((time.perf_counter() - gen_start) * 1000, 2)
+    p_tokens = len(prompt.split())
+    c_tokens = len(answer_text.split())
     tracer.record_generation(
         model="gpt-4o",
-        prompt_tokens=len(prompt.split()),
-        completion_tokens=len(answer_text.split()),
+        prompt_tokens=p_tokens,
+        completion_tokens=c_tokens,
         duration_ms=gen_ms,
     )
     tracer.record_chat_interaction(
@@ -344,12 +386,155 @@ async def query_rag(
         model="gpt-4o",
     )
 
+    # Persist token consumption ledger to database and update managed limits
+    try:
+        await DatabaseManager.record_token_consumption(
+            caller_id=caller_key,
+            prompt_tokens=p_tokens,
+            completion_tokens=c_tokens,
+            model="gpt-4o",
+            operation_type="rag_query",
+            metadata={"mode": request.mode, "citations_count": len(citations)},
+        )
+    except Exception as exc:
+        logger.debug("Database token ledger recording deferred: %s", exc)
+
     return RAGResponse(
         answer=answer_text,
         citations=citations,
         confidence_score=avg_confidence,
         authorized_roles_evaluated=user.roles,
     )
+
+
+# ---------------------------------------------------------------------------
+# Token Consumption & Managed Limits Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/tokens/usage", response_model=List[TokenManagedLimitResponse], tags=["Token Budget"])
+async def get_token_usage(
+    caller_id: Optional[str] = None,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """
+    Retrieve token consumption and managed limits for a caller or global fleet.
+    Caller identity defaults to authenticated user's sub/email if caller_id is not specified.
+    """
+    target = caller_id or user.email or user.sub or "anonymous"
+    try:
+        limits = await DatabaseManager.get_token_managed_limits(caller_id=target)
+        if not limits:
+            used = api_token_breaker.get_usage(target)
+            return [
+                TokenManagedLimitResponse(
+                    caller_id=target,
+                    max_budget_tokens=api_token_breaker.max_tokens_per_issue,
+                    current_tokens=used,
+                    enforce_limit=api_token_breaker.is_enforce_limit(target),
+                    is_blocked=api_token_breaker.is_blocked(target),
+                    tier="standard",
+                    remaining_tokens=max(0, api_token_breaker.max_tokens_per_issue - used),
+                )
+            ]
+        return [
+            TokenManagedLimitResponse(
+                caller_id=r["caller_id"],
+                max_budget_tokens=r["max_budget_tokens"],
+                current_tokens=r["current_tokens"],
+                enforce_limit=r["enforce_limit"],
+                is_blocked=r["is_blocked"],
+                tier=r.get("tier", "standard"),
+                remaining_tokens=max(0, r["max_budget_tokens"] - r["current_tokens"]),
+            )
+            for r in limits
+        ]
+    except Exception as exc:
+        logger.warning("Error fetching token limits: %s", exc)
+        used = api_token_breaker.get_usage(target)
+        return [
+            TokenManagedLimitResponse(
+                caller_id=target,
+                max_budget_tokens=api_token_breaker.max_tokens_per_issue,
+                current_tokens=used,
+                enforce_limit=api_token_breaker.is_enforce_limit(target),
+                is_blocked=api_token_breaker.is_blocked(target),
+                tier="fallback",
+                remaining_tokens=max(0, api_token_breaker.max_tokens_per_issue - used),
+            )
+        ]
+
+
+@app.post("/api/v1/tokens/limit", tags=["Token Budget"])
+async def configure_token_limit(
+    request: TokenLimitUpdateRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """
+    Configure a managed token limit, toggle limit enforcement (`enforce_limit`),
+    or toggle emergency shutoff (`is_blocked`) to turn off token consumption.
+    """
+    if "admin" not in user.roles and "engineer" not in user.roles and request.caller_id not in (user.email, user.sub, "anonymous", "legacy-header-user"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Admin or Engineer role required to modify global or other caller token limits.",
+        )
+
+    if request.max_budget_tokens is not None:
+        api_token_breaker.max_tokens_per_issue = request.max_budget_tokens
+    if request.enforce_limit is not None:
+        api_token_breaker.set_enforce_limit(request.caller_id, request.enforce_limit)
+    if request.is_blocked is not None:
+        api_token_breaker.set_blocked(request.caller_id, request.is_blocked)
+
+    try:
+        updated = await DatabaseManager.set_token_managed_limit(
+            caller_id=request.caller_id,
+            max_budget_tokens=request.max_budget_tokens,
+            enforce_limit=request.enforce_limit,
+            is_blocked=request.is_blocked,
+        )
+        return {"status": "success", "limit": updated}
+    except Exception as exc:
+        logger.warning("Database limit update deferred: %s", exc)
+        return {
+            "status": "success",
+            "caller_id": request.caller_id,
+            "max_budget_tokens": request.max_budget_tokens or api_token_breaker.max_tokens_per_issue,
+            "enforce_limit": request.enforce_limit if request.enforce_limit is not None else True,
+            "is_blocked": request.is_blocked if request.is_blocked is not None else False,
+            "storage": "memory_fallback",
+        }
+
+
+@app.post("/api/v1/tokens/reset", tags=["Token Budget"])
+async def reset_token_usage(
+    request: TokenResetRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Reset accumulated token usage and clear blocked state for a caller."""
+    api_token_breaker.reset(request.caller_id)
+    try:
+        success = await DatabaseManager.reset_token_usage(request.caller_id)
+        return {"status": "success", "caller_id": request.caller_id, "reset_db": success}
+    except Exception as exc:
+        logger.warning("Database token reset deferred: %s", exc)
+        return {"status": "success", "caller_id": request.caller_id, "reset_db": False}
+
+
+@app.get("/api/v1/tokens/ledger", tags=["Token Budget"])
+async def get_token_ledger(
+    caller_id: Optional[str] = None,
+    limit: int = 50,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Retrieve individual token consumption transaction ledger events from the database."""
+    target = caller_id or user.email or user.sub or "anonymous"
+    try:
+        events = await DatabaseManager.get_token_usage_ledger(caller_id=target, limit=limit)
+        return {"caller_id": target, "count": len(events), "events": events}
+    except Exception as exc:
+        logger.warning("Database ledger lookup deferred: %s", exc)
+        return {"caller_id": target, "count": 0, "events": [], "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------

@@ -160,6 +160,20 @@ async def query_rag(
     The caller's roles (extracted from the verified Google ID token) are passed
     directly into the pgvector RBAC SQL filter — no post-processing step.
     """
+    caller_key = user.email or user.sub or "anonymous"
+    est_tokens = max(len(request.question.split()), (len(request.question) + 3) // 4)
+    try:
+        allowed, cur_tok, max_tok, enforce, err_reason = await DatabaseManager.check_token_limit(caller_key, est_tokens)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=err_reason or f"Managed token limit exceeded ({cur_tok}/{max_tok}). Token consumption turned off.",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.debug("Database token limit check bypassed in rag router: %s", exc)
+
     logger.info(
         "RAG query: sub=%s roles=%s question=%r",
         user.sub,
@@ -196,6 +210,20 @@ async def query_rag(
 
     prompt = f"Answer strictly using context:\n\n{context_chunks}\n\nQuestion: {request.question}"
     answer_text = await chat_completion(prompt)
+
+    try:
+        p_tokens = len(prompt.split())
+        c_tokens = len(answer_text.split())
+        await DatabaseManager.record_token_consumption(
+            caller_id=caller_key,
+            prompt_tokens=p_tokens,
+            completion_tokens=c_tokens,
+            model="gpt-4o",
+            operation_type="rag_query",
+            metadata={"citations_count": len(citations)},
+        )
+    except Exception as exc:
+        logger.debug("Token consumption recording deferred in rag router: %s", exc)
 
     return RAGResponse(
         answer=answer_text,

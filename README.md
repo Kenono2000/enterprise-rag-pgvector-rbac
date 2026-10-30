@@ -36,11 +36,11 @@ flowchart LR
 ```
 | Topic | Architectural Pillar | Core Engineering Pattern | Primary Security & Performance Outcome |
 | :-: | :--- | :--- | :--- |
-| **1** | **In-DB RBAC & Storage** | Pre-filtered GIN + HNSW iterative scan (`relaxed_order`) & 16-bit `halfvec(1536)` | Zero recall starvation, zero overfiltering, **75% cumulative RAM savings** (>98% recall). |
-| **2** | **Quickstart & Runtime** | Event-loop-scoped `asyncpg` pools, `SKIP LOCKED` outbox & `/readyz` | Prevents closed-loop crashes; durable worker queue; Kubernetes probe ready. |
+| **1** | **In-DB RBAC & Storage** | Pre-filtered GIN + HNSW iterative scan (`relaxed_order`), 16-bit `halfvec(1536)` & Token Ledger | Zero recall starvation, zero overfiltering, **75% RAM savings**, in-DB token audit & managed shutoff. |
+| **2** | **Quickstart & Runtime** | Event-loop-scoped `asyncpg` pools, `SKIP LOCKED` outbox & `/readyz` | Prevents closed-loop crashes; durable worker queue; Kubernetes probe ready (140 tests). |
 | **3** | **Identity & Sessions** | Stateless OAuth 2.0 PKCE, HMAC state & encrypted cookies | Survives F5 reloads & multi-worker scale-out with **zero Redis**; SOC-2 15m/12h bounds. |
 | **4** | **Ingestion & Hybrid RAG** | Contextual Headers, 64KB SHA-256 de-dup, Adaptive Dense + Sparse RRF (`dense_weight` / `sparse_weight`) | **>0.90 Context Precision**; `O(1)` skip for unchanged files; domain-adaptive fusion. |
-| **5** | **Gateways, OTel & SDLC** | Zero-Trust FastMCP (RFC 9728 Discovery & RFC 8707 Tool ACLs), `PostgresSaver` & Time-Travel Lineage | Crash-resilient resume & time-travel auditing; confused deputy prevention; 60 req/min + 8K/50K breakers. |
+| **5** | **Gateways, OTel & SDLC** | Zero-Trust FastMCP (RFC 9728 & RFC 8707 Tool ACLs), `PostgresSaver` & Managed Quota API | Crash-resilient resume; token consumption kill-switch (`enforce_limit`/`is_blocked`); 60 req/min limits. |
 | **6** | **Multi-Cloud & Runbook** | Quad-mode strategy (`pgvector`, `azure`, `gcp`, `databricks`) | Zero-downtime `.env` switching with native pre-filtering across all 4 engines. |
 ## 1. In-Database RBAC and Vector Storage (`schema.sql`, `app/db/`)
 ```mermaid
@@ -68,13 +68,14 @@ ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 * **No Recall Starvation & pgvector 0.8+ Iterative Scans**: PostgreSQL evaluates `WHERE d.allowed_roles ?| $2::text[]` via the **GIN Index** and automatically configures `SET hnsw.iterative_scan = 'relaxed_order'` (`max_scan_tuples = 20000`) per pooled connection—eliminating ANN overfiltering on selective roles while ensuring unauthorized rows never enter Python RAM.
 * **SQL Injection & Empty-Role Guards**: Binds roles strictly as a parameterized `$2::text[]` array and returns `[]` immediately before DB execution if `user_roles` is empty.
 * **Matryoshka 1536-d + 16-Bit `halfvec(1536)` Compaction**: Truncates `text-embedding-3-large` from `3072` to `1536` dims and quantizes to IEEE 754 16-bit floats (`embedding_halfvec halfvec(1536)`, `idx_chunks_embedding_halfvec_hnsw` with `halfvec_cosine_ops`) for **50% additional HNSW RAM savings** (**75% cumulative reduction**, **>98% recall**) across normalized `documents` + `document_chunks` (`ON DELETE CASCADE`) tables (see [`schema.sql`](file:///c:/src/enterprise-rag-pgvector-rbac/schema.sql)).
+* **Persistent Token Consumption Ledger & Managed Budget Controls**: `token_consumption_ledger` records atomic prompt and completion token counts per caller and model, while `token_managed_limits` enforces caller quotas (`max_budget_tokens`), provides administrative toggles to disable enforcement (`enforce_limit`), and trips an emergency kill-switch (`is_blocked`) to turn off token consumption once limits are exceeded.
 ## 2. 5-Minute Quickstart and Runtime Stack
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
     subgraph DevBootstrap ["1. Bootstrap & Verify"]
         direction TB
-        Venv["Install .venv & Deps"] --> Pytest["Run 130 Pytest Tests"]
+        Venv["Install .venv & Deps"] --> Pytest["Run 140 Pytest Tests"]
     end
     subgraph Containers ["2. Docker Infrastructure"]
         direction TB
@@ -92,7 +93,7 @@ flowchart LR
 ```powershell
 git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
 python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run full test suite (130 tests)
+python -m pytest -v                                                     # 1. Run full test suite (140 tests)
 docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
@@ -100,7 +101,7 @@ python -m app.mcp                                                        # 5. La
 python -m agent status                                                   # 6. Run Hermes + CrewAI + LangGraph SDLC CLI
 python -m agent checkpoints "<thread_id>"                                # 7. Inspect Time-Travel Checkpoint Lineage
 ```
-* **Local Endpoints**: Streamlit UI (`http://localhost:8501`) · Swagger Docs (`http://localhost:8000/docs`) · Health Probes (`/healthz`, `/readyz`) · Telemetry (`/api/v1/metrics/observability`) · Jaeger UI (`http://localhost:16686`).
+* **Local Endpoints**: Streamlit UI (`http://localhost:8501`) · Swagger Docs (`http://localhost:8000/docs`) · Health Probes (`/healthz`, `/readyz`) · Token Budget Controls (`/api/v1/tokens/usage`, `/api/v1/tokens/limit`) · Telemetry (`/api/v1/metrics/observability`) · Jaeger UI (`http://localhost:16686`).
 * **Loop-Scoped Async Concurrency**: `DatabaseManager` and `get_openai_client()` scope connection pools to `asyncio.get_running_loop()`, preventing `RuntimeError: Event loop is closed` across Streamlit threads.
 ## 3. Identity, OAuth 2.0 PKCE, and Session Security (`app/auth/`)
 ```mermaid
@@ -180,6 +181,7 @@ flowchart LR
     style Hermes fill:#dcfce7,stroke:#22c55e,stroke-width:1.5px
 ```
 * **Zero-Trust FastMCP Gateway (`app/mcp/gateway.py`)**: Exposes `search_sdlc_context`, `propose_patch`, `run_sdlc_crew`, `recall_hermes_skills`, `get_gateway_metadata`, and `policy://sdlc-budget` over `stdio`/`SSE` with `ConfigDict(extra="forbid")` schemas, RFC 9728 Protected Resource Metadata discovery, RFC 8707 tool-level Role-Based Access Control (`check_tool_permission` blocking confused deputy exploits), 60 req/min `SlidingWindowRateLimiter`, and 8K/50K `TokenCircuitBreaker`.
+* **Managed Token Budget & Administrative Shutoff API (`app/main.py`)**: Provides endpoints (`/api/v1/tokens/usage`, `/api/v1/tokens/limit`, `/api/v1/tokens/reset`, `/api/v1/tokens/ledger`) backed by PostgreSQL `token_consumption_ledger` and `token_managed_limits`, enabling administrators and callers to monitor token velocity, toggle enforcement (`enforce_limit`), or trigger emergency kill-switches (`is_blocked`) to immediately turn off token consumption.
 * **Full-Stack OpenTelemetry (`app/observability.py`)**: Streams OTLP gRPC spans (`:4317`) to **Jaeger** (persistent Badger LSM disk store, 7-day TTL) and **Azure Application Insights**, backed by a 1,000-event ring buffer (`GET /api/v1/metrics/observability`) and non-root `Dockerfile` (`UID 10001`).
 * **Tri-Paradigm SDLC Workflow & `PostgresSaver` (`agent/workflow.py`)**: Unites **LangChain/LangGraph** (`LangGraphSDLCWorkflow` cyclic state machine + PostgreSQL checkpoint persistence via `PostgresSaver`/`sdlc_workflow_checkpoints` + `resume_from_checkpoint` multi-worker recovery + `get_execution_history` time-travel lineage auditing + atomic `rollback_patches`), **CrewAI** (`SDLCCrewOrchestrator` role-based crew: `Principal SDLC Architect` [`inherit`], `Lead Security & AST Auditor` [`pro`], and `Site Reliability & Pytest Triager` [`flash`]), and **Hermes Agent** (`HermesSkillSynthesizer` closed-loop `recall_relevant_skills`, portable `SKILL.md` distillation, and ShareGPT RL export) guarded by `PolicyEngine`.
 ## 6. Multi-Cloud Strategy and Runbook

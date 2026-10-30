@@ -819,6 +819,57 @@ def _render_user_header() -> None:
                     else:
                         st.error("Failed to refresh token: server rejected grant.")
 
+        # Token Budget & Managed Quota Sidebar
+        caller_key = st.session_state.get("user_email") or st.session_state.get("user_sub") or "anonymous"
+        st.divider()
+        st.markdown("**📊 Token Budget & Managed Limit**")
+        try:
+            limits = run_async(DatabaseManager.get_token_managed_limits(caller_key))
+            limit_info = limits[0] if limits else None
+        except Exception:
+            limit_info = None
+
+        cur_tok = int(limit_info["current_tokens"]) if limit_info else st.session_state.get("token_usage_cached", 0)
+        max_tok = int(limit_info["max_budget_tokens"]) if limit_info else 50000
+        enforce = bool(limit_info["enforce_limit"]) if limit_info else True
+        blocked = bool(limit_info["is_blocked"]) if limit_info else False
+
+        pct = min(1.0, cur_tok / max(1, max_tok))
+        st.progress(pct, text=f"Used: {cur_tok:,} / {max_tok:,} tokens ({int(pct*100)}%)")
+
+        if blocked:
+            st.error("⛔ Token consumption turned OFF (Limit reached or blocked)")
+        elif pct >= 0.9:
+            st.warning("⚠️ Approaching managed token limit")
+        else:
+            st.caption(f"Remaining budget: **{max(0, max_tok - cur_tok):,}** tokens")
+
+        with st.expander("⚙️ Token Consumption Controls", expanded=False):
+            new_enforce = st.toggle(
+                "Enforce Managed Limit",
+                value=enforce,
+                help="Turn OFF to allow unthrottled token consumption beyond the managed limit.",
+                key="token_enforce_toggle",
+            )
+            new_blocked = st.toggle(
+                "Emergency Kill-Switch (Turn Off)",
+                value=blocked,
+                help="Turn ON to immediately shut off all token consumption for this caller.",
+                key="token_killswitch_toggle",
+            )
+            if (new_enforce != enforce) or (new_blocked != blocked):
+                run_async(DatabaseManager.set_token_managed_limit(
+                    caller_id=caller_key,
+                    enforce_limit=new_enforce,
+                    is_blocked=new_blocked,
+                ))
+                st.rerun()
+
+            if st.button("🔄 Reset Token Counter", use_container_width=True):
+                run_async(DatabaseManager.reset_token_usage(caller_key))
+                st.success("Token usage reset to 0.")
+                st.rerun()
+
         st.divider()
         if st.button("Sign out", use_container_width=True):
             _clear_auth()
@@ -910,6 +961,18 @@ def _render_rag_interface() -> None:
         with st.chat_message("assistant"):
             with st.status("Querying knowledge base...", expanded=True) as status:
                 async def perform_search():
+                    caller_id = st.session_state.get("user_email") or st.session_state.get("user_sub") or "anonymous"
+                    est_tokens = max(len(prompt_input.split()), (len(prompt_input) + 3) // 4)
+                    try:
+                        allowed, cur_tok, max_tok, enforce, err_reason = await DatabaseManager.check_token_limit(caller_id, est_tokens)
+                        if not allowed:
+                            return {
+                                "blocked": True,
+                                "reason": err_reason or f"Managed token limit exceeded ({cur_tok}/{max_tok}). Token consumption turned off.",
+                            }
+                    except Exception:
+                        pass
+
                     backend = os.getenv("RETRIEVAL_BACKEND", "").lower()
                     emb = await generate_embedding(prompt_input)
                     if backend == "azure":
@@ -999,7 +1062,12 @@ def _render_rag_interface() -> None:
                         "-- 3. Reciprocal Rank Fusion: RRF_Score = sum( 1 / (60 + rank) )\n"
                         f"-- Parameter bindings: $1=<1536-dim vector>, $2={roles_repr}, $3={json.dumps(prompt_input)}"
                     )
-                if not result:
+                if result and result.get("blocked"):
+                    status.update(label="Token Quota Exceeded / Turn-Off Active", state="error", expanded=False)
+                    response_text = f"⛔ **Token Consumption Turned Off**: {result.get('reason', 'Managed limit reached.')}"
+                    st.error(response_text)
+                    citations = []
+                elif not result:
                     status.update(label="Access Denied / Not Found", state="error", expanded=False)
                     response_text = (
                         "⚠️ No authorized documentation found matching your security credentials. "
@@ -1011,6 +1079,22 @@ def _render_rag_interface() -> None:
                     status.update(label="Response Streaming", state="complete", expanded=False)
                     response_text = st.write_stream(chat_completion_stream_sync(result["prompt"]))
                     citations = result["rows"]
+                    try:
+                        p_tokens = max(len(result["prompt"].split()), (len(result["prompt"]) + 3) // 4)
+                        c_tokens = max(len(response_text.split()), (len(response_text) + 3) // 4)
+                        caller_key_curr = st.session_state.get("user_email") or st.session_state.get("user_sub") or "anonymous"
+                        rec = run_async(DatabaseManager.record_token_consumption(
+                            caller_id=caller_key_curr,
+                            prompt_tokens=p_tokens,
+                            completion_tokens=c_tokens,
+                            model="gpt-4o",
+                            operation_type="streamlit_chat",
+                            metadata={"roles": roles, "citations": len(citations)},
+                        ))
+                        if rec and "cumulative_tokens" in rec:
+                            st.session_state["token_usage_cached"] = rec["cumulative_tokens"]
+                    except Exception as exc:
+                        logger.error("Streamlit token ledger record error: %s", exc)
 
                 chat_duration_ms = round((time.perf_counter() - t_start_chat) * 1000, 2)
                 tracer.record_chat_interaction(
@@ -1039,6 +1123,7 @@ def _render_rag_interface() -> None:
             "citations": citations,
             "sql": sql_query,
         })
+        st.rerun()
 
     # Educational Architectural Deep Dive
     st.divider()

@@ -72,17 +72,22 @@ class SlidingWindowRateLimiter:
 class TokenCircuitBreaker:
     """
     Request-level and cumulative caller/issue token circuit breaker enforcing
-    `policy://sdlc-budget` limits (`max_tokens_per_request`, `max_tokens_per_issue`).
+    `policy://sdlc-budget` limits (`max_tokens_per_request`, `max_tokens_per_issue`),
+    with managed limit enforcement toggles and emergency shutoff kill-switches.
     """
 
     def __init__(
         self,
         max_tokens_per_request: int = 8000,
         max_tokens_per_issue: int = 50000,
+        enforce_limit: bool = True,
     ):
         self.max_tokens_per_request = max_tokens_per_request
         self.max_tokens_per_issue = max_tokens_per_issue
+        self.enforce_limit = enforce_limit
         self._consumed: Dict[str, int] = {}
+        self._enforce_overrides: Dict[str, bool] = {}
+        self._blocked: Dict[str, bool] = {}
 
     @staticmethod
     def estimate_tokens(text: str) -> int:
@@ -90,6 +95,28 @@ class TokenCircuitBreaker:
             return 0
         # Deterministic ~4 chars/token heuristic bounded by word count
         return max(len(text.split()), (len(text) + 3) // 4)
+
+    def set_enforce_limit(self, caller_key: Optional[str] = None, enforce: bool = True) -> None:
+        """Toggle whether token consumption limits are strictly enforced or advisory."""
+        if caller_key is None:
+            self.enforce_limit = enforce
+        else:
+            self._enforce_overrides[(caller_key or "anonymous").strip() or "anonymous"] = enforce
+
+    def is_enforce_limit(self, caller_key: Optional[str] = None) -> bool:
+        if caller_key is None:
+            return self.enforce_limit
+        key = (caller_key or "anonymous").strip() or "anonymous"
+        return self._enforce_overrides.get(key, self.enforce_limit)
+
+    def set_blocked(self, caller_key: str, blocked: bool = True) -> None:
+        """Emergency kill-switch to manually or automatically turn off token consumption."""
+        key = (caller_key or "anonymous").strip() or "anonymous"
+        self._blocked[key] = blocked
+
+    def is_blocked(self, caller_key: str) -> bool:
+        key = (caller_key or "anonymous").strip() or "anonymous"
+        return self._blocked.get(key, False)
 
     def check_and_consume(
         self,
@@ -104,6 +131,14 @@ class TokenCircuitBreaker:
         """
         key = (caller_key or "anonymous").strip() or "anonymous"
         used = self._consumed.get(key, 0)
+        should_enforce = self.is_enforce_limit(key)
+
+        if self._blocked.get(key, False):
+            return (
+                False,
+                max(0, self.max_tokens_per_issue - used),
+                f"Token consumption turned off for caller '{key}': account is blocked or reached managed limit.",
+            )
 
         if requested_tokens > self.max_tokens_per_request:
             return (
@@ -112,7 +147,8 @@ class TokenCircuitBreaker:
                 f"Token circuit breaker tripped: request tokens ({requested_tokens}) exceed max_tokens_per_request ({self.max_tokens_per_request}).",
             )
 
-        if used + requested_tokens > self.max_tokens_per_issue:
+        if should_enforce and (used + requested_tokens > self.max_tokens_per_issue):
+            self._blocked[key] = True
             return (
                 False,
                 max(0, self.max_tokens_per_issue - used),
@@ -129,8 +165,13 @@ class TokenCircuitBreaker:
     def reset(self, caller_key: Optional[str] = None) -> None:
         if caller_key is None:
             self._consumed.clear()
+            self._blocked.clear()
+            self._enforce_overrides.clear()
         else:
-            self._consumed.pop(caller_key, None)
+            key = (caller_key or "anonymous").strip() or "anonymous"
+            self._consumed.pop(key, None)
+            self._blocked.pop(key, None)
+            self._enforce_overrides.pop(key, None)
 
 
 class PolicyEngine:

@@ -161,6 +161,42 @@ CREATE TABLE IF NOT EXISTS sdlc_workflow_checkpoints (
 CREATE INDEX IF NOT EXISTS idx_sdlc_checkpoints_thread
 ON sdlc_workflow_checkpoints (thread_id, created_at DESC);
 
+-- 5.9 Token Consumption Ledger & Managed Budget Limits
+CREATE TABLE IF NOT EXISTS token_consumption_ledger (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    caller_id VARCHAR(128) NOT NULL,
+    model VARCHAR(100) NOT NULL DEFAULT 'gpt-4o',
+    prompt_tokens INT NOT NULL DEFAULT 0,
+    completion_tokens INT NOT NULL DEFAULT 0,
+    total_tokens INT NOT NULL,
+    operation_type VARCHAR(64) NOT NULL DEFAULT 'rag_query',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_token_ledger_caller_time
+ON token_consumption_ledger (caller_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_token_ledger_created_at
+ON token_consumption_ledger (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS token_managed_limits (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    caller_id VARCHAR(128) NOT NULL UNIQUE,
+    max_budget_tokens BIGINT NOT NULL DEFAULT 50000,
+    current_tokens BIGINT NOT NULL DEFAULT 0,
+    enforce_limit BOOLEAN NOT NULL DEFAULT TRUE,
+    is_blocked BOOLEAN NOT NULL DEFAULT FALSE,
+    tier VARCHAR(32) NOT NULL DEFAULT 'standard',
+    reset_interval VARCHAR(32) NOT NULL DEFAULT 'cumulative',
+    last_reset_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_token_limits_caller
+ON token_managed_limits (caller_id);
+
 -- ============================================================================
 -- 6. Deterministic Mock Seed Data (100% Offline Testing & Initial Boot)
 -- ============================================================================
@@ -218,3 +254,11 @@ SELECT
     (SELECT array_agg(0.015 * (i % 4))::vector(1536) FROM generate_series(1, 1536) i)
 FROM documents d WHERE d.document_id = 'ENG-2026-105'
 ON CONFLICT (chunk_id) DO NOTHING;
+
+-- Managed Token Limits Seed
+INSERT INTO token_managed_limits (caller_id, max_budget_tokens, current_tokens, enforce_limit, is_blocked)
+VALUES 
+    ('global', 100000, 0, TRUE, FALSE),
+    ('anonymous', 25000, 0, TRUE, FALSE),
+    ('legacy-header-user', 50000, 0, TRUE, FALSE)
+ON CONFLICT (caller_id) DO NOTHING;

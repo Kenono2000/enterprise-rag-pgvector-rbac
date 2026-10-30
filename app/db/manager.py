@@ -3,7 +3,7 @@ import struct
 import asyncio
 import asyncpg
 import json
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv(), override=True)
@@ -632,3 +632,295 @@ class DatabaseManager:
         async with pool.acquire() as conn:
             res = await conn.execute(sql, event_id, status)
             return "UPDATE 1" in res
+
+    # =========================================================================
+    # Token Consumption Ledger & Managed Budget Limit Controls
+    # =========================================================================
+
+    @classmethod
+    async def record_token_consumption(
+        cls,
+        caller_id: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        model: str = "gpt-4o",
+        operation_type: str = "rag_query",
+        metadata: Optional[Dict[str, Any]] = None,
+        default_budget_limit: int = 50000,
+    ) -> Dict[str, Any]:
+        """
+        Persist token consumption event to token_consumption_ledger and atomically
+        accumulate usage in token_managed_limits. If enforce_limit is enabled and
+        cumulative tokens reach or exceed max_budget_tokens, is_blocked is set to TRUE.
+        """
+        pool = await cls.get_pool()
+        cid = (caller_id or "anonymous").strip() or "anonymous"
+        p_tokens = max(0, int(prompt_tokens))
+        c_tokens = max(0, int(completion_tokens))
+        t_tokens = p_tokens + c_tokens
+        meta_json = json.dumps(metadata or {})
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                ledger_row = await conn.fetchrow(
+                    """
+                    INSERT INTO token_consumption_ledger (
+                        caller_id, model, prompt_tokens, completion_tokens, total_tokens, operation_type, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                    RETURNING id::text, caller_id, total_tokens, created_at
+                    """,
+                    cid,
+                    model,
+                    p_tokens,
+                    c_tokens,
+                    t_tokens,
+                    operation_type,
+                    meta_json,
+                )
+
+                limit_row = await conn.fetchrow(
+                    """
+                    INSERT INTO token_managed_limits (
+                        caller_id, max_budget_tokens, current_tokens, enforce_limit, is_blocked, updated_at
+                    )
+                    VALUES ($1, $2, $3, TRUE, FALSE, CURRENT_TIMESTAMP)
+                    ON CONFLICT (caller_id) DO UPDATE
+                    SET current_tokens = token_managed_limits.current_tokens + EXCLUDED.current_tokens,
+                        is_blocked = CASE
+                            WHEN token_managed_limits.enforce_limit
+                                 AND (token_managed_limits.current_tokens + EXCLUDED.current_tokens >= token_managed_limits.max_budget_tokens)
+                            THEN TRUE
+                            ELSE token_managed_limits.is_blocked
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING caller_id, max_budget_tokens, current_tokens, enforce_limit, is_blocked
+                    """,
+                    cid,
+                    int(default_budget_limit),
+                    t_tokens,
+                )
+
+                return {
+                    "ledger_id": str(ledger_row["id"]) if ledger_row else None,
+                    "caller_id": limit_row["caller_id"],
+                    "total_tokens_consumed": t_tokens,
+                    "cumulative_tokens": int(limit_row["current_tokens"]),
+                    "max_budget_tokens": int(limit_row["max_budget_tokens"]),
+                    "enforce_limit": bool(limit_row["enforce_limit"]),
+                    "is_blocked": bool(limit_row["is_blocked"]),
+                }
+
+    @classmethod
+    async def check_token_limit(
+        cls,
+        caller_id: str,
+        requested_tokens: int = 0,
+        default_budget_limit: int = 50000,
+    ) -> Tuple[bool, int, int, bool, Optional[str]]:
+        """
+        Evaluate caller quota against token_managed_limits.
+        Returns:
+            (allowed, current_tokens, max_budget_tokens, enforce_limit, reason)
+        """
+        pool = await cls.get_pool()
+        cid = (caller_id or "anonymous").strip() or "anonymous"
+        req = max(0, int(requested_tokens))
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT caller_id, max_budget_tokens, current_tokens, enforce_limit, is_blocked
+                FROM token_managed_limits
+                WHERE caller_id = $1
+                """,
+                cid,
+            )
+
+            if not row:
+                row = await conn.fetchrow(
+                    """
+                    SELECT caller_id, max_budget_tokens, current_tokens, enforce_limit, is_blocked
+                    FROM token_managed_limits
+                    WHERE caller_id = 'global'
+                    """
+                )
+
+            if row:
+                current_tokens = int(row["current_tokens"])
+                max_budget = int(row["max_budget_tokens"])
+                enforce = bool(row["enforce_limit"])
+                is_blocked = bool(row["is_blocked"])
+            else:
+                current_tokens = 0
+                max_budget = int(default_budget_limit)
+                enforce = True
+                is_blocked = False
+
+            if is_blocked:
+                return (
+                    False,
+                    current_tokens,
+                    max_budget,
+                    enforce,
+                    f"Token consumption turned off for caller '{cid}': account is blocked or reached managed limit.",
+                )
+
+            if enforce and (current_tokens + req > max_budget):
+                return (
+                    False,
+                    current_tokens,
+                    max_budget,
+                    enforce,
+                    f"Token managed limit reached: projected tokens ({current_tokens + req}) exceed managed limit ({max_budget}). Token consumption turned off.",
+                )
+
+            return True, current_tokens, max_budget, enforce, None
+
+    @classmethod
+    async def get_token_managed_limits(
+        cls,
+        caller_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch managed limit configurations and current consumption."""
+        pool = await cls.get_pool()
+        async with pool.acquire() as conn:
+            if caller_id:
+                rows = await conn.fetch(
+                    """
+                    SELECT caller_id, max_budget_tokens, current_tokens, enforce_limit, is_blocked,
+                           tier, reset_interval, last_reset_at, created_at, updated_at
+                    FROM token_managed_limits
+                    WHERE caller_id = $1
+                    """,
+                    caller_id.strip(),
+                )
+                if not rows:
+                    rows = await conn.fetch(
+                        """
+                        SELECT caller_id, max_budget_tokens, current_tokens, enforce_limit, is_blocked,
+                               tier, reset_interval, last_reset_at, created_at, updated_at
+                        FROM token_managed_limits
+                        WHERE caller_id = 'global'
+                        """
+                    )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT caller_id, max_budget_tokens, current_tokens, enforce_limit, is_blocked,
+                           tier, reset_interval, last_reset_at, created_at, updated_at
+                    FROM token_managed_limits
+                    ORDER BY caller_id ASC
+                    """
+                )
+            return [dict(r) for r in rows]
+
+    @classmethod
+    async def set_token_managed_limit(
+        cls,
+        caller_id: str,
+        max_budget_tokens: Optional[int] = None,
+        enforce_limit: Optional[bool] = None,
+        is_blocked: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """
+        Update or create a managed token limit and controls (toggle enforce_limit or is_blocked kill-switch).
+        """
+        pool = await cls.get_pool()
+        cid = (caller_id or "anonymous").strip() or "anonymous"
+
+        async with pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                "SELECT caller_id, max_budget_tokens, current_tokens, enforce_limit, is_blocked FROM token_managed_limits WHERE caller_id = $1",
+                cid,
+            )
+            cur_limit = int(existing["max_budget_tokens"]) if existing else 50000
+            cur_enforce = bool(existing["enforce_limit"]) if existing else True
+            cur_blocked = bool(existing["is_blocked"]) if existing else False
+            cur_tokens = int(existing["current_tokens"]) if existing else 0
+
+            new_limit = cur_limit if max_budget_tokens is None else int(max_budget_tokens)
+            new_enforce = cur_enforce if enforce_limit is None else bool(enforce_limit)
+            new_blocked = cur_blocked if is_blocked is None else bool(is_blocked)
+
+            if is_blocked is None:
+                if not new_enforce:
+                    new_blocked = False
+                elif cur_tokens < new_limit:
+                    new_blocked = False
+
+            row = await conn.fetchrow(
+                """
+                INSERT INTO token_managed_limits (
+                    caller_id, max_budget_tokens, current_tokens, enforce_limit, is_blocked, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                ON CONFLICT (caller_id) DO UPDATE
+                SET max_budget_tokens = EXCLUDED.max_budget_tokens,
+                    enforce_limit = EXCLUDED.enforce_limit,
+                    is_blocked = EXCLUDED.is_blocked,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING caller_id, max_budget_tokens, current_tokens, enforce_limit, is_blocked
+                """,
+                cid,
+                new_limit,
+                cur_tokens,
+                new_enforce,
+                new_blocked,
+            )
+            return dict(row)
+
+    @classmethod
+    async def reset_token_usage(cls, caller_id: str) -> bool:
+        """Reset current token counter and clear is_blocked for a caller."""
+        pool = await cls.get_pool()
+        cid = (caller_id or "anonymous").strip() or "anonymous"
+        async with pool.acquire() as conn:
+            res = await conn.execute(
+                """
+                UPDATE token_managed_limits
+                SET current_tokens = 0,
+                    is_blocked = FALSE,
+                    last_reset_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE caller_id = $1
+                """,
+                cid,
+            )
+            return "UPDATE 1" in res
+
+    @classmethod
+    async def get_token_usage_ledger(
+        cls,
+        caller_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve recent individual token consumption events."""
+        pool = await cls.get_pool()
+        fetch_limit = max(1, min(1000, int(limit)))
+        async with pool.acquire() as conn:
+            if caller_id:
+                rows = await conn.fetch(
+                    """
+                    SELECT id::text, caller_id, model, prompt_tokens, completion_tokens,
+                           total_tokens, operation_type, metadata, created_at
+                    FROM token_consumption_ledger
+                    WHERE caller_id = $1
+                    ORDER BY created_at DESC
+                    LIMIT $2
+                    """,
+                    caller_id.strip(),
+                    fetch_limit,
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT id::text, caller_id, model, prompt_tokens, completion_tokens,
+                           total_tokens, operation_type, metadata, created_at
+                    FROM token_consumption_ledger
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                    """,
+                    fetch_limit,
+                )
+            return [dict(r) for r in rows]
