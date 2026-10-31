@@ -265,6 +265,9 @@ def test_crewai_orchestrator_and_hermes_synthesizer(tmp_path):
     )
     assert trajectory.format == "sharegpt"
     assert trajectory.repairs_used == 1
+    assert trajectory.reward == 0.75
+    assert trajectory.token_efficiency_score == 0.8
+    assert "[Atropos Reward: 0.75]" in trajectory.conversations[3]["value"]
     assert trajectory.conversations[0]["from"] == "system"
     assert trajectory.conversations[2]["from"] == "gpt"
 
@@ -442,6 +445,7 @@ async def test_production_rollback_judge_healing_and_hitl(tmp_path):
     assert hitl_result["checkpoint_backend"] == "PostgresSaver"
     assert hitl_result["approval_card"]["risk_tier"] == "high_risk"
     assert hitl_result["approval_card"]["requires_human_approval"] is True
+    assert hitl_result["interrupted"] is True
     assert len(hitl_result["recalled_skills"]) == 1
 
     # 4. Multi-worker crash-resilient resumption via PostgresSaver
@@ -465,3 +469,38 @@ async def test_production_rollback_judge_healing_and_hitl(tmp_path):
 
     from agent.__main__ import run_cli
     assert run_cli(["checkpoints", hitl_result["thread_id"]]) == 0
+
+
+@pytest.mark.asyncio
+async def test_langgraph_workflow_parallel_verify(tmp_path):
+    git(tmp_path, "init")
+    git(tmp_path, "config", "user.email", "test@example.com")
+    git(tmp_path, "config", "user.name", "Test")
+    (tmp_path / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "test_value.py").write_text(
+        "from value import VALUE\n\ndef test_value():\n    assert VALUE == 2\n", encoding="utf-8"
+    )
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-m", "initial")
+    payload = {
+        "issue": {"number": 124, "title": "Fix value", "body": "Update the value."},
+        "repository": {"full_name": "org/repo"},
+        "patches": [{"file_path": "value.py", "content": "VALUE = 2\n"}],
+    }
+    workflow = LangGraphSDLCWorkflow(
+        sandbox_root=str(tmp_path), test_command="python -m pytest -q", push=False, parallel_verify=True,
+    )
+    result = await workflow.run(payload)
+    assert result["status"] == "completed"
+    assert {s["agent_name"] for s in result["crew_trace"]} == {
+        "arch-synthesizer", "cross-model-judge", "test-triager",
+    }
+    assert len(result["crew_trace"]) == 3
+
+
+def test_crewai_flow_builder_plan():
+    bundle = SDLCCrewOrchestrator.build_crewai_flow(
+        lambda: "p", lambda: "a", lambda: "t", lambda: "j"
+    )
+    assert bundle["plan"]["parallel"] == ["audit_patches", "run_tests"]
+    assert bundle["runtime"] in ("crewai_flow", "native_pydantic")

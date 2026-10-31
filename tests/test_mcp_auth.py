@@ -141,6 +141,9 @@ class TestMcpToolsAuth:
         assert "https://accounts.google.com" in meta["authorization_servers"]
         assert "RFC 9728" in meta["rfc_compliance"]
         assert "RFC 8707" in meta["rfc_compliance"]
+        assert meta["preferred_network_transport"] == "http"
+        assert "http" in meta["transports_supported"]
+        assert "streamable-http" in meta["transports_supported"]
         tools = [t["name"] for t in meta["tool_catalog"]]
         assert "search_sdlc_context" in tools
         assert "propose_patch" in tools
@@ -225,6 +228,16 @@ class TestMcpRunServer:
         )
 
     @patch("app.mcp.gateway.mcp.run")
+    def test_run_server_http_streamable_transport(self, mock_run):
+        from app.mcp.gateway import run_server
+        run_server(transport="http", host="0.0.0.0", port=9000)
+        mock_run.assert_called_once_with(
+            transport="http",
+            host="0.0.0.0",
+            port=9000,
+        )
+
+    @patch("app.mcp.gateway.mcp.run")
     def test_run_server_env_transport(self, mock_run, monkeypatch):
         monkeypatch.setenv("MCP_TRANSPORT", "streamable-http")
         monkeypatch.setenv("MCP_PORT", "8888")
@@ -254,3 +267,11 @@ async def test_mcp_observability_tracking(monkeypatch):
     assert len(mcp_events) >= 1
     assert mcp_events[-1]["tool_name"] == "search_sdlc_context"
     assert mcp_events[-1]["status"] == "error"
+
+
+def test_scaled_scan_tuples_by_role_selectivity():
+    from app.db.manager import DatabaseManager
+    base = DatabaseManager.HNSW_MAX_SCAN_TUPLES
+    assert DatabaseManager.scaled_scan_tuples(['engineer']) == base * 2
+    assert DatabaseManager.scaled_scan_tuples(['engineer', 'hr_manager']) == base
+    assert DatabaseManager.scaled_scan_tuples(['a', 'b', 'c']) == max(5000, base // 2)

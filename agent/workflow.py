@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, TypedDict, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt, Command
 
 from app.db import chat_completion
 from app.observability import tracer
@@ -92,7 +93,7 @@ class HermesSkillArtifact(BaseModel):
 
 
 class HermesTrajectoryRecord(BaseModel):
-    """Hermes Agent ShareGPT-formatted RL trajectory for lifelong memory and Atropos/vLLM training."""
+    """Hermes Agent ShareGPT-formatted RL trajectory with Atropos GRPO reward weighting."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -101,6 +102,8 @@ class HermesTrajectoryRecord(BaseModel):
     branch: str = Field(min_length=1)
     judge_score: float = Field(default=1.0, ge=0.0, le=1.0)
     repairs_used: int = Field(default=0, ge=0)
+    reward: float = Field(default=1.0, description="Atropos GRPO scalar reward factoring repairs and judge rubric.")
+    token_efficiency_score: float = Field(default=1.0, ge=0.0, le=1.0, description="Atropos token efficiency scalar.")
     conversations: List[Dict[str, str]] = Field(default_factory=list)
 
 
@@ -525,6 +528,48 @@ class SDLCCrewOrchestrator:
             }
 
     @classmethod
+    def build_crewai_flow(
+        cls,
+        propose: Any,
+        audit: Any,
+        run_tests: Any,
+        join: Any,
+    ) -> Dict[str, Any]:
+        """
+        Build a CrewAI Flow (`@start` -> parallel `@listen` audit/tests -> `@listen(and_(...))` join).
+        `propose`, `audit`, `run_tests`, `join` are callables taking/returning plain values. Falls back
+        to a deterministic plan descriptor when `crewai.flow` is unavailable.
+        """
+        plan = {
+            "start": "propose_patches",
+            "parallel": ["audit_patches", "run_tests"],
+            "join": "verify_join",
+        }
+        try:
+            from crewai.flow.flow import Flow, and_, listen, start  # type: ignore
+
+            class SDLCVerifyFlow(Flow):  # type: ignore[misc]
+                @start()
+                def propose_patches(self):
+                    return propose()
+
+                @listen(propose_patches)
+                def audit_patches(self, _proposed):
+                    return audit()
+
+                @listen(propose_patches)
+                def run_tests(self, _proposed):
+                    return run_tests()
+
+                @listen(and_(audit_patches, run_tests))
+                def verify_join(self):
+                    return join()
+
+            return {"runtime": "crewai_flow", "flow": SDLCVerifyFlow(), "plan": plan}
+        except Exception:
+            return {"runtime": "native_pydantic", "flow": None, "plan": plan}
+
+    @classmethod
     def kickoff_crew(
         cls,
         issue_title: str,
@@ -664,6 +709,12 @@ class HermesSkillSynthesizer:
         repairs_used: int = 0,
     ) -> HermesTrajectoryRecord:
         score = float(judge_verdict.get("score", 1.0)) if judge_verdict else 1.0
+        # Atropos GRPO multi-turn step reward calculation:
+        # Penalize repair loops (-0.25 per repair attempt) and scale by judge rubric score
+        repair_penalty = min(0.75, repairs_used * 0.25)
+        reward = round(max(0.0, score - repair_penalty), 3)
+        token_efficiency = round(max(0.2, 1.0 - (repairs_used * 0.2)), 2)
+
         patch_json = json.dumps([p.model_dump() for p in patches])
         triage_note = (
             triage_summary.get("concise_summary", "All tests passed.")
@@ -688,7 +739,7 @@ class HermesSkillSynthesizer:
             },
             {
                 "from": "human",
-                "value": f"[Judge Score: {score}] [Pytest Triage: {triage_note}]",
+                "value": f"[Judge Score: {score}] [Pytest Triage: {triage_note}] [Atropos Reward: {reward}]",
             },
         ]
         return HermesTrajectoryRecord(
@@ -696,6 +747,8 @@ class HermesSkillSynthesizer:
             branch=branch,
             judge_score=score,
             repairs_used=repairs_used,
+            reward=reward,
+            token_efficiency_score=token_efficiency,
             conversations=conversations,
         )
 
@@ -863,7 +916,13 @@ class LangGraphSDLCWorkflow:
         token_breaker: Optional[TokenCircuitBreaker] = None,
         checkpointer: Optional[Any] = None,
         checkpoint_db_url: Optional[str] = None,
+        parallel_verify: Optional[bool] = None,
     ):
+        self.parallel_verify_enabled = (
+            parallel_verify
+            if parallel_verify is not None
+            else os.getenv("SDLC_PARALLEL_VERIFY", "false").lower() == "true"
+        )
         self.root = Path(sandbox_root or os.getenv("SDLC_SANDBOX_ROOT", os.getcwd())).resolve()
         self.test_command = test_command or os.getenv("SDLC_TEST_COMMAND", "python -m pytest -q")
         self.max_repairs = max_repairs
@@ -911,6 +970,27 @@ class LangGraphSDLCWorkflow:
         workflow.set_entry_point("initialize")
         workflow.add_edge("initialize", "propose_patches")
         workflow.add_edge("propose_patches", "apply_patches")
+
+        if self.parallel_verify_enabled:
+            workflow.add_node("parallel_verify", self.parallel_verify)
+            workflow.add_edge("apply_patches", "parallel_verify")
+            workflow.add_conditional_edges(
+                "parallel_verify",
+                self.check_parallel_results,
+                {
+                    "passed": "synthesize_hermes_skill",
+                    "repair": "repair_patches",
+                    "failed": "repair_patches",
+                    "rollback": "rollback_patches",
+                    "max_attempts_reached": "rollback_patches",
+                },
+            )
+            workflow.add_edge("repair_patches", "apply_patches")
+            workflow.add_edge("rollback_patches", END)
+            workflow.add_edge("synthesize_hermes_skill", "finalize")
+            workflow.add_edge("finalize", END)
+            return workflow.compile(checkpointer=self.checkpointer)
+
         workflow.add_edge("apply_patches", "audit_patches")
 
         workflow.add_conditional_edges(
@@ -1047,6 +1127,41 @@ class LangGraphSDLCWorkflow:
             "judge_verdict": verdict.model_dump(),
             "crew_trace": trace,
         }
+
+    async def parallel_verify(self, state: AgentState) -> Dict[str, Any]:
+        """
+        CrewAI-Flows-style fan-out/join: the Security Auditor and Pytest Triager run concurrently.
+        Safety gate: deterministic AST/secret policy runs FIRST; tests only execute when it is clean,
+        so unaudited unsafe code is never executed by pytest.
+        """
+        import asyncio
+        static_violations: List[str] = []
+        for patch in state["patches"]:
+            result = await PolicyEngine.evaluate_patch(patch.file_path, patch.content, [], "pending")
+            static_violations.extend(result.violations)
+        if static_violations:
+            return await self.audit_patches(state)
+
+        base_len = len(state.get("crew_trace") or [])
+        audit_out, test_out = await asyncio.gather(self.audit_patches(state), self.run_tests(state))
+        merged = dict(test_out)
+        merged.update(audit_out)
+        merged["crew_trace"] = (
+            list(state.get("crew_trace") or [])
+            + list(audit_out["crew_trace"][base_len:])
+            + list(test_out["crew_trace"][base_len:])
+        )
+        return merged
+
+    def check_parallel_results(
+        self, state: AgentState
+    ) -> Literal["passed", "repair", "rollback", "failed", "max_attempts_reached"]:
+        audit = self.check_audit_results(state)
+        if audit != "passed":
+            return audit
+        if not state.get("test_result"):
+            return "passed"
+        return self.check_test_results(state)
 
     def check_audit_results(self, state: AgentState) -> Literal["passed", "repair", "rollback"]:
         violations = state.get("violations") or []
@@ -1203,12 +1318,35 @@ class LangGraphSDLCWorkflow:
         )
 
         if requires_hitl:
-            return {
-                "status": "pending_approval",
+            # Native LangGraph Human-in-the-Loop (HITL) interrupt primitive:
+            # Pauses execution and surfaces review payload to PostgreSQL checkpoint
+            review_payload = {
+                "action": "human_approval_required",
                 "approval_card": card.model_dump(),
-                "pushed": False,
-                "pr_url": None,
+                "affected_files": affected,
+                "high_risk_files": high_risk_files,
+                "issue_id": str(event.issue_id),
+                "branch": branch,
             }
+            decision = interrupt(review_payload)
+            is_approved = (
+                decision in ("approved", "auto_approved", True)
+                or (isinstance(decision, dict) and (decision.get("approved") is True or decision.get("status") in ("approved", "auto_approved")))
+            )
+            if is_approved:
+                card.status = "auto_approved"
+                card.requires_human_approval = False
+                card.reason = "Human-in-the-loop sign-off granted via native LangGraph interrupt resume."
+            else:
+                card.status = "rejected"
+                card.requires_human_approval = False
+                card.reason = f"Human reviewer rejected patch proposal: {decision}"
+                return {
+                    "status": "rejected",
+                    "approval_card": card.model_dump(),
+                    "pushed": False,
+                    "pr_url": None,
+                }
 
         try:
             self._git("add", "--", *(p.file_path for p in patches))
@@ -1357,19 +1495,35 @@ class LangGraphSDLCWorkflow:
         if final_state.get("violations"):
             raise ValueError("Security gate failed: " + "; ".join(final_state["violations"]))
 
-        approval = final_state.get("approval_card")
-        status_str = (
-            "pending_approval"
-            if approval and approval.get("requires_human_approval")
-            else "completed"
-        )
+        is_interrupted = bool(final_state.get("__interrupt__"))
+        if is_interrupted:
+            interrupts = final_state.get("__interrupt__", [])
+            interrupt_val = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
+            approval = (
+                interrupt_val.get("approval_card")
+                if isinstance(interrupt_val, dict)
+                else final_state.get("approval_card")
+            )
+            status_str = "pending_approval"
+        else:
+            approval = final_state.get("approval_card")
+            status_str = (
+                "pending_approval"
+                if approval and approval.get("requires_human_approval")
+                else "completed"
+            )
+
         checkpoint_id = f"ckpt-{event.issue_id}-{final_state.get('attempt', 0)}"
         if hasattr(self.checkpointer, "save_checkpoint"):
             await self.checkpointer.save_checkpoint(
                 thread_id=thread_id,
                 checkpoint_id=checkpoint_id,
                 state=dict(final_state),
-                metadata={"status": status_str, "branch": final_state.get("branch")},
+                metadata={
+                    "status": status_str,
+                    "branch": final_state.get("branch"),
+                    "interrupted": is_interrupted,
+                },
             )
         return {
             "status": status_str,
@@ -1386,6 +1540,7 @@ class LangGraphSDLCWorkflow:
             "hermes_trajectory": final_state.get("hermes_trajectory"),
             "recalled_skills": final_state.get("recalled_skills", []),
             "approval_card": approval,
+            "interrupted": is_interrupted,
             "rolled_back": final_state.get("rolled_back", False),
             "subagent_routing": {
                 "orchestrator": "inherit",
@@ -1403,7 +1558,7 @@ class LangGraphSDLCWorkflow:
     ) -> dict[str, Any]:
         """
         Resume a crashed or HITL-paused workflow from its PostgreSQL checkpoint (`PostgresSaver`)
-        across stateless worker processes.
+        across stateless worker processes using native LangGraph `Command(resume=...)`.
         """
         if not hasattr(self.checkpointer, "load_checkpoint"):
             raise ValueError("Configured checkpointer does not support load_checkpoint")
@@ -1411,35 +1566,61 @@ class LangGraphSDLCWorkflow:
         if not record:
             raise ValueError(f"No persisted checkpoint found for thread_id='{thread_id}'")
 
-        saved_state = dict(record.get("checkpoint_payload") or {})
-        approval = dict(saved_state.get("approval_card") or {})
-        if human_approved:
-            approval["status"] = "auto_approved"
-            approval["requires_human_approval"] = False
-            approval["reason"] = "Human-in-the-loop sign-off granted via PostgresSaver checkpoint resume."
-            saved_state["approval_card"] = approval
-            status_str = "completed"
-        else:
-            approval["status"] = "rejected"
-            saved_state["approval_card"] = approval
-            status_str = "rejected"
+        orig_ckpt_id = record.get("checkpoint_id")
+        config = {"configurable": {"thread_id": thread_id}}
+        resume_cmd = Command(resume="auto_approved" if human_approved else "rejected")
+        resumed_natively = False
+        final_state: Dict[str, Any] = {}
 
-        new_ckpt_id = f"{record.get('checkpoint_id', 'ckpt')}-resumed"
+        try:
+            res_state = await self.workflow.ainvoke(resume_cmd, config=config)
+            if res_state and not res_state.get("__interrupt__"):
+                final_state = dict(res_state)
+                resumed_natively = True
+        except Exception as exc:
+            logger.debug("Native LangGraph Command(resume=...) fell back to checkpoint rehydration: %s", exc)
+
+        saved_state = dict(record.get("checkpoint_payload") or {})
+        if not resumed_natively:
+            approval = dict(saved_state.get("approval_card") or {})
+            if human_approved:
+                approval["status"] = "auto_approved"
+                approval["requires_human_approval"] = False
+                approval["reason"] = "Human-in-the-loop sign-off granted via PostgresSaver checkpoint resume."
+                saved_state["approval_card"] = approval
+                status_str = "completed"
+            else:
+                approval["status"] = "rejected"
+                approval["requires_human_approval"] = False
+                approval["reason"] = "Human-in-the-loop sign-off rejected via checkpoint resume."
+                saved_state["approval_card"] = approval
+                status_str = "rejected"
+            final_state = saved_state
+        else:
+            approval = dict(final_state.get("approval_card") or {})
+            status_str = final_state.get("status") or ("completed" if human_approved else "rejected")
+
+        new_ckpt_id = f"{orig_ckpt_id}-resumed"
         await self.checkpointer.save_checkpoint(
             thread_id=thread_id,
             checkpoint_id=new_ckpt_id,
-            state=saved_state,
-            metadata={"status": status_str, "resumed": True},
-            parent_checkpoint_id=record.get("checkpoint_id"),
+            state=final_state,
+            metadata={
+                "status": status_str,
+                "resumed": True,
+                "resumed_natively": resumed_natively,
+            },
+            parent_checkpoint_id=orig_ckpt_id,
         )
         return {
             "status": status_str,
             "thread_id": thread_id,
             "checkpoint_id": new_ckpt_id,
             "checkpoint_backend": getattr(self.checkpointer, "backend_name", "PostgresSaver"),
-            "branch": saved_state.get("branch"),
+            "branch": final_state.get("branch") or saved_state.get("branch"),
             "approval_card": approval,
-            "resumed_from": record.get("checkpoint_id"),
+            "resumed_from": orig_ckpt_id,
+            "resumed_natively": resumed_natively,
         }
 
     async def get_execution_history(

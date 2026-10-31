@@ -54,7 +54,7 @@ async def test_database_manager_hybrid_search_rrf_fusion():
         },
     ]
 
-    mock_conn.fetch.side_effect = [dense_results, sparse_results]
+    mock_conn.fetch.side_effect = [RuntimeError("cte unsupported"), dense_results, sparse_results]
 
     class MockPoolAcquire:
         async def __aenter__(self):
@@ -112,7 +112,7 @@ async def test_database_manager_hybrid_search_adaptive_weights():
             "similarity": 0.90,
         }
     ]
-    mock_conn.fetch.side_effect = [dense_results, sparse_results]
+    mock_conn.fetch.side_effect = [RuntimeError("cte unsupported"), dense_results, sparse_results]
 
     class MockPoolAcquire:
         async def __aenter__(self):
@@ -206,3 +206,30 @@ def test_grounding_guardrail_flags_unsupported_citation():
     eval_result = GroundingGuardrail.validate_response(answer, context)
     assert eval_result["grounded"] is False
     assert any("not found in authorized context" in v for v in eval_result["violations"])
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_single_pass_sql_rrf():
+    """Single-pass CTE RRF returns fused rows in one round trip."""
+    mock_conn = AsyncMock()
+    mock_conn.fetch.return_value = [{
+        "chunk_id_pk": "c1", "document_id": "D1", "title": "T", "chunk_index": None,
+        "content": "x", "allowed_roles": ["engineer"], "similarity": 0.9, "text_rank": 0.5,
+        "dense_rank": 1, "sparse_rank": 2, "rrf_score": 1 / 61 + 1 / 62,
+    }]
+
+    class MockPoolAcquire:
+        async def __aenter__(self):
+            return mock_conn
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value = MockPoolAcquire()
+    with patch.object(DatabaseManager, "get_pool", new_callable=AsyncMock, return_value=mock_pool):
+        results = await DatabaseManager.hybrid_search("q", [0.1] * 1536, ["engineer"], limit=5)
+    assert mock_conn.fetch.await_count == 1
+    assert "FULL OUTER JOIN" in mock_conn.fetch.await_args.args[0]
+    assert results[0]["dense_rank"] == 1 and results[0]["sparse_rank"] == 2
+    assert results[0]["chunk_index"] == 0
+    assert pytest.approx(results[0]["rrf_score"]) == 1 / 61 + 1 / 62

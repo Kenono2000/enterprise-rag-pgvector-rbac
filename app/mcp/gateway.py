@@ -715,6 +715,8 @@ async def get_gateway_metadata(
         ],
         "scopes_supported": ["openid", "email", "profile"],
         "bearer_methods_supported": ["header", "body"],
+        "transports_supported": ["http", "streamable-http", "stdio", "sse"],
+        "preferred_network_transport": "http",
         "rfc_compliance": ["RFC 9728", "RFC 8707", "OAuth 2.1"],
         "tool_catalog": [
             {
@@ -796,8 +798,8 @@ def run_server(
 ) -> None:
     """
     Run the FastMCP gateway with configurable transport.
-    Supports 'stdio' (default for local CLI/subprocesses), 'sse' (HTTP Server-Sent Events
-    for network clients like OAuth/Bearer), 'http', or 'streamable-http'.
+    Supports 'http' / 'streamable-http' (Streamable HTTP, the production network standard),
+    'stdio' (local CLI/subprocesses), and 'sse' (legacy Server-Sent Events).
 
     Configuration priority:
     1. Explicit parameters passed to run_server()

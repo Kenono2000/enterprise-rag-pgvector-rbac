@@ -70,6 +70,20 @@ class DatabaseManager:
             return False
 
     @classmethod
+    def scaled_scan_tuples(cls, roles: List[str]) -> int:
+        """
+        Scale `hnsw.max_scan_tuples` by role selectivity: narrow callers (1 role) match few rows and
+        need deeper graph traversal (2x base); broad callers (3+ roles) stop earlier (base/2, floor 5000).
+        """
+        base = int(cls.HNSW_MAX_SCAN_TUPLES or 20000)
+        count = len({r for r in roles if r})
+        if count <= 1:
+            return base * 2
+        if count == 2:
+            return base
+        return max(5000, base // 2)
+
+    @classmethod
     async def get_pool(cls) -> asyncpg.Pool:
         # Streamlit may run each script rerun on a different event loop.
         # asyncpg binds connections to the loop they were created on, so a
@@ -160,6 +174,7 @@ class DatabaseManager:
             LIMIT $3
         """
         async with pool.acquire() as conn:
+            await cls.configure_iterative_scan(conn, max_scan_tuples=cls.scaled_scan_tuples(sanitized_roles))
             return await conn.fetch(sql, vector_str, sanitized_roles, limit)
 
     @classmethod
@@ -236,7 +251,82 @@ class DatabaseManager:
         """
 
         fetch_limit = limit * 2
+
+        # 0. Single-pass SQL RRF: dense + sparse CTEs fused in-database via ROW_NUMBER() window ranks,
+        # eliminating cross-network serialization of both candidate sets. Falls back to Python RRF below.
+        cte_dist = (
+            "c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)"
+            if halfvec_enabled
+            else "c.embedding <=> $1::vector"
+        )
+        fused_sql = f"""
+            WITH dense AS (
+                SELECT c.id::text AS chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content,
+                       d.allowed_roles, 1 - ({cte_dist}) AS similarity,
+                       ROW_NUMBER() OVER (ORDER BY {cte_dist}) AS rnk
+                FROM document_chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE d.allowed_roles ?| $3::text[]
+                  AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)
+                ORDER BY {cte_dist}
+                LIMIT $4
+            ),
+            sparse AS (
+                SELECT c.id::text AS chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content,
+                       d.allowed_roles, 1 - ({cte_dist}) AS similarity,
+                       ts_rank(c.tsv, plainto_tsquery('english', $2)) AS text_rank,
+                       ROW_NUMBER() OVER (ORDER BY ts_rank(c.tsv, plainto_tsquery('english', $2)) DESC) AS rnk
+                FROM document_chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE d.allowed_roles ?| $3::text[]
+                  AND (c.tsv @@ plainto_tsquery('english', $2) OR c.tsv @@ websearch_to_tsquery('english', $2))
+                ORDER BY text_rank DESC
+                LIMIT $4
+            )
+            SELECT COALESCE(dn.chunk_id_pk, sp.chunk_id_pk) AS chunk_id_pk,
+                   COALESCE(dn.document_id, sp.document_id) AS document_id,
+                   COALESCE(dn.title, sp.title) AS title,
+                   COALESCE(dn.chunk_index, sp.chunk_index) AS chunk_index,
+                   COALESCE(dn.content, sp.content) AS content,
+                   COALESCE(dn.allowed_roles, sp.allowed_roles) AS allowed_roles,
+                   COALESCE(dn.similarity, sp.similarity) AS similarity,
+                   COALESCE(sp.text_rank, 0.0) AS text_rank,
+                   dn.rnk AS dense_rank, sp.rnk AS sparse_rank,
+                   COALESCE($5::float8 / ($7::int + dn.rnk), 0.0)
+                     + COALESCE($6::float8 / ($7::int + sp.rnk), 0.0) AS rrf_score
+            FROM dense dn
+            FULL OUTER JOIN sparse sp ON dn.chunk_id_pk = sp.chunk_id_pk
+            ORDER BY rrf_score DESC
+            LIMIT $8
+        """
+        try:
+            async with pool.acquire() as conn:
+                await cls.configure_iterative_scan(conn, max_scan_tuples=cls.scaled_scan_tuples(sanitized_roles))
+                fused_rows = await conn.fetch(
+                    fused_sql, vector_str, query_text, sanitized_roles, fetch_limit,
+                    float(dense_weight), float(sparse_weight), int(rrf_k), limit,
+                )
+            return [
+                {
+                    "chunk_id_pk": r["chunk_id_pk"],
+                    "document_id": r["document_id"],
+                    "title": r["title"],
+                    "chunk_index": r["chunk_index"] if r["chunk_index"] is not None else 0,
+                    "content": r["content"],
+                    "allowed_roles": r["allowed_roles"],
+                    "similarity": float(r["similarity"] or 0.0),
+                    "text_rank": float(r["text_rank"] or 0.0),
+                    "dense_rank": r["dense_rank"],
+                    "sparse_rank": r["sparse_rank"],
+                    "rrf_score": float(r["rrf_score"]),
+                }
+                for r in fused_rows
+            ]
+        except Exception:
+            pass  # Fall back to dual-query Python RRF (e.g. missing tsv column or older Postgres)
+
         async with pool.acquire() as conn:
+            await cls.configure_iterative_scan(conn, max_scan_tuples=cls.scaled_scan_tuples(sanitized_roles))
             dense_rows = await conn.fetch(dense_sql, vector_str, sanitized_roles, fetch_limit)
             try:
                 sparse_rows = await conn.fetch(sparse_sql, query_text, vector_str, sanitized_roles, fetch_limit)
