@@ -11,7 +11,7 @@ from typing import Optional, List, Tuple, Dict, Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from dotenv import load_dotenv, find_dotenv
-load_dotenv(find_dotenv(), override=True)
+load_dotenv(find_dotenv(), override=False)
 
 from pydantic import BaseModel, ConfigDict, Field
 from fastmcp import FastMCP
@@ -125,11 +125,26 @@ def _resolve_tool_roles(
 def check_tool_permission(tool_name: str, roles: Optional[List[str]]) -> Tuple[bool, Optional[str]]:
     """
     Enforce tool-level Role-Based Access Control (ACL) to block confused deputy exploits (RFC 8707).
+
+    Fails **closed**: an authenticated caller whose token claims resolve to zero
+    application roles is denied any tool that declares required roles. Treating an
+    empty role set as "unrestricted" would let a valid-but-roleless token escalate
+    to every tool. Only ``roles is None`` (no auth context at all, e.g. the
+    REQUIRE_GOOGLE_AUTH=false developer path) skips the ACL.
     """
-    if roles is None or not roles:
-        return True, None
     required = TOOL_REQUIRED_ROLES.get(tool_name)
-    if not required or "*" in required:
+    unrestricted = not required or "*" in required
+    if roles is None:
+        return True, None
+    if not roles:
+        if unrestricted:
+            return True, None
+        return (
+            False,
+            f"Tool authorization error: Tool '{tool_name}' requires one of {required}. "
+            "Caller token resolved to no application roles.",
+        )
+    if unrestricted:
         return True, None
     if any(r in required for r in roles):
         return True, None

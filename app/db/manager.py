@@ -6,7 +6,9 @@ import json
 from typing import Optional, List, Dict, Any, Tuple
 from dotenv import load_dotenv, find_dotenv
 
-load_dotenv(find_dotenv(), override=True)
+# Real process environment must win over `.env` (12-factor): this keeps test and
+# container overrides authoritative instead of being clobbered by the dotenv file.
+load_dotenv(find_dotenv(), override=False)
 
 
 def get_db_url():
@@ -88,11 +90,12 @@ class DatabaseManager:
         # Streamlit may run each script rerun on a different event loop.
         # asyncpg binds connections to the loop they were created on, so a
         # cached pool from a previous (now-closed/different) loop is unusable.
-        try:
-            current_loop = asyncio.get_event_loop()
-        except RuntimeError:
-            current_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(current_loop)
+        # Bind the cached pool to the loop that is actually running the coroutine.
+        # `get_pool()` is always awaited from within a live loop, so
+        # `get_running_loop()` is the correct (and non-deprecated) accessor; it
+        # also guarantees the pool is re-created after a Streamlit rerun or a new
+        # FastAPI worker loop replaces the previous one.
+        current_loop = asyncio.get_running_loop()
 
         needs_recreate = (
             cls._pool is None

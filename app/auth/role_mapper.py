@@ -314,6 +314,11 @@ def extract_roles(token_payload: Dict[str, Any]) -> List[str]:
         claim_candidates.append(token_payload["groups"])
     if "cognito:groups" in token_payload:
         claim_candidates.append(token_payload["cognito:groups"])
+    # Auth0 / custom-namespace roles claim (e.g. `custom:roles`).
+    if "custom:roles" in token_payload:
+        claim_candidates.append(token_payload["custom:roles"])
+    if "custom_roles" in token_payload:
+        claim_candidates.append(token_payload["custom_roles"])
     if isinstance(token_payload.get("realm_access"), dict) and "roles" in token_payload["realm_access"]:
         claim_candidates.append(token_payload["realm_access"]["roles"])
 

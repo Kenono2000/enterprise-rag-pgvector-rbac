@@ -10,7 +10,7 @@ import os
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv, find_dotenv
 
-load_dotenv(find_dotenv(), override=True)
+load_dotenv(find_dotenv(), override=False)
 
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents.aio import SearchClient

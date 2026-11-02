@@ -5,7 +5,7 @@ import os
 from openai import AsyncAzureOpenAI, AsyncOpenAI, OpenAI, AzureOpenAI
 from dotenv import load_dotenv, find_dotenv
 
-load_dotenv(find_dotenv(), override=True)
+load_dotenv(find_dotenv(), override=False)
 
 openai_api_key = os.getenv("OPENAI_API_KEY")
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")

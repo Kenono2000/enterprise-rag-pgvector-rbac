@@ -40,7 +40,7 @@ import urllib.parse
 from typing import Optional
 from dotenv import load_dotenv, find_dotenv
 
-load_dotenv(find_dotenv(), override=True)
+load_dotenv(find_dotenv(), override=False)
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -869,6 +869,40 @@ def _render_user_header() -> None:
                 run_async(DatabaseManager.reset_token_usage(caller_key))
                 st.success("Token usage reset to 0.")
                 st.rerun()
+
+        # Real-time token ledger audit: every recorded consumption event for this
+        # caller, straight from `token_consumption_ledger` (surfaced so operators
+        # can audit spend without leaving the UI or querying the API).
+        with st.expander("🧾 Token Ledger Audit (latest 20 events)", expanded=False):
+            try:
+                ledger_rows = run_async(
+                    DatabaseManager.get_token_usage_ledger(caller_id=caller_key, limit=20)
+                )
+            except Exception as exc:
+                ledger_rows = []
+                st.caption(f"Ledger unavailable: {exc}")
+            if ledger_rows:
+                st.dataframe(
+                    [
+                        {
+                            "time (UTC)": str(r.get("created_at", ""))[:19],
+                            "operation": r.get("operation_type", ""),
+                            "model": r.get("model", ""),
+                            "prompt": int(r.get("prompt_tokens") or 0),
+                            "completion": int(r.get("completion_tokens") or 0),
+                            "total": int(r.get("total_tokens") or 0),
+                        }
+                        for r in ledger_rows
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                _audited_total = sum(int(r.get("total_tokens") or 0) for r in ledger_rows)
+                st.caption(
+                    f"{len(ledger_rows)} audited events · {_audited_total:,} tokens in view"
+                )
+            else:
+                st.caption("No token consumption events recorded for this caller yet.")
 
         st.divider()
         if st.button("Sign out", use_container_width=True):

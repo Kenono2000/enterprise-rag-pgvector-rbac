@@ -478,6 +478,24 @@ class SDLCCrewOrchestrator:
             },
         ]
 
+        native_bundle: Dict[str, Any] = {
+            "runtime": "native_pydantic",
+            "crew": None,
+            "agents": [
+                cls.ARCHITECT.model_dump(),
+                cls.AUDITOR.model_dump(),
+                cls.TRIAGER.model_dump(),
+            ],
+            "tasks": task_defs,
+        }
+
+        # `crewai` is an optional, heavyweight dependency whose import performs
+        # platform config discovery (writing probe files under the user config
+        # directory) and other import-time side effects. It is therefore strictly
+        # opt-in so that default/offline execution stays fast and deterministic.
+        if os.getenv("USE_CREWAI_SDK", "false").lower() != "true":
+            return native_bundle
+
         try:
             from crewai import Agent, Crew, Process, Task  # type: ignore
 
@@ -516,16 +534,7 @@ class SDLCCrewOrchestrator:
                 "tasks": task_defs,
             }
         except Exception:
-            return {
-                "runtime": "native_pydantic",
-                "crew": None,
-                "agents": [
-                    cls.ARCHITECT.model_dump(),
-                    cls.AUDITOR.model_dump(),
-                    cls.TRIAGER.model_dump(),
-                ],
-                "tasks": task_defs,
-            }
+            return native_bundle
 
     @classmethod
     def build_crewai_flow(
@@ -545,6 +554,10 @@ class SDLCCrewOrchestrator:
             "parallel": ["audit_patches", "run_tests"],
             "join": "verify_join",
         }
+        # Same opt-in rule as `build_crewai_crew`: never import the CrewAI SDK
+        # implicitly (it has heavyweight import-time side effects).
+        if os.getenv("USE_CREWAI_SDK", "false").lower() != "true":
+            return {"runtime": "native_pydantic", "flow": None, "plan": plan}
         try:
             from crewai.flow.flow import Flow, and_, listen, start  # type: ignore
 

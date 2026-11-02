@@ -83,7 +83,7 @@ def _get_jwks_client(issuer: str) -> PyJWKClient:
         _jwks_clients[issuer] = PyJWKClient(
             jwks_uri,
             cache_jwk_set=True,
-            lifespan=3600,  # re-fetch keys after 1 hour
+            lifespan=86400,  # 24h cache TTL; key rotation is still handled by the miss-retry below
         )
         logger.info("Created JWKS client for issuer=%s uri=%s", issuer, jwks_uri)
 

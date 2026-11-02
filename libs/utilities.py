@@ -244,11 +244,14 @@ def split_chunks(
     Attaches page, chunk_index, source, document_id, doc_summary, and contextual_header to each chunk.
     """
     if separators is None:
+        # Markdown-table aware: keep `|---|` alignment rows and row separators
+        # intact so a single table row/header never straddles two chunks.
         separators = [
             "\n## ",
             "\n### ",
             "\n#### ",
             "\n\n",
+            "\n|---|",
             "\n|",
             "\n",
             " ",

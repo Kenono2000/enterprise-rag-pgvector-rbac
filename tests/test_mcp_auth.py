@@ -49,7 +49,8 @@ class TestMcpRoleResolution:
         assert err is None
         assert roles == ["engineer"]
 
-    def test_invalid_token_returns_error(self, monkeypatch):
+    @patch("app.mcp.gateway.verify_google_token", side_effect=Exception("invalid token"))
+    def test_invalid_token_returns_error(self, _mock_verify, monkeypatch):
         monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "true")
         roles, err = _resolve_tool_roles(auth_token="invalid.jwt.token")
         assert roles is None
@@ -82,6 +83,9 @@ class TestMcpToolsAuth:
     @patch("app.mcp.gateway.verify_google_token")
     async def test_propose_patch_succeeds_with_auth(self, mock_verify, monkeypatch):
         monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "true")
+        # The ACL fails closed when a verified token resolves to no application
+        # role, so map the caller's domain to a real role for this success path.
+        monkeypatch.setenv("ROLE_MAP_engineer", "@acme.com")
         mock_verify.return_value = {"email": "dev@acme.com"}
 
         result = await propose_patch(
@@ -94,6 +98,7 @@ class TestMcpToolsAuth:
     @patch("app.mcp.gateway.verify_google_token")
     async def test_run_sdlc_crew_and_recall_hermes_skills(self, mock_verify, monkeypatch):
         monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "true")
+        monkeypatch.setenv("ROLE_MAP_engineer", "@acme.com")
         blocked_crew = await run_sdlc_crew(issue_title="Test Crew")
         assert "⛔ Authorization required" in blocked_crew
         blocked_hermes = await recall_hermes_skills(query="PKCE auth")
@@ -178,6 +183,7 @@ class TestMcpStrictSchemasAndBlastRadius:
     @patch("app.mcp.gateway.verify_google_token")
     async def test_mcp_sliding_window_rate_limiter_trips(self, mock_verify, monkeypatch):
         monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "true")
+        monkeypatch.setenv("ROLE_MAP_engineer", "@acme.com")
         mock_verify.return_value = {"email": "rate-user@acme.com", "sub": "rate-user"}
         orig_max = mcp_rate_limiter.max_requests
         try:
@@ -195,6 +201,7 @@ class TestMcpStrictSchemasAndBlastRadius:
     @patch("app.mcp.gateway.verify_google_token")
     async def test_mcp_token_circuit_breaker_trips(self, mock_verify, monkeypatch):
         monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "true")
+        monkeypatch.setenv("ROLE_MAP_engineer", "@acme.com")
         mock_verify.return_value = {"email": "budget-user@acme.com", "sub": "budget-user"}
         orig_req_max = mcp_token_breaker.max_tokens_per_request
         try:

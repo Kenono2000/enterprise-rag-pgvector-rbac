@@ -28,7 +28,7 @@ import hmac
 import os
 import secrets
 import urllib.parse
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import httpx
 
@@ -73,6 +73,26 @@ def derive_code_challenge(code_verifier: str) -> str:
     """
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def generate_pkce_pair(length: int = 64) -> Tuple[str, str]:
+    """
+    Generate a complete PKCE code_verifier / code_challenge pair (RFC 7636 §4.1–4.2).
+
+    Parameters
+    ----------
+    length:
+        Verifier length in characters (43–128). Defaults to the RFC-recommended 64.
+
+    Returns
+    -------
+    tuple[str, str]
+        ``(code_verifier, code_challenge)`` using the ``S256`` challenge method.
+        Send the challenge on the authorization request and the verifier on the
+        token exchange — never mix them up or reuse a pair.
+    """
+    code_verifier = generate_code_verifier(length)
+    return code_verifier, derive_code_challenge(code_verifier)
 
 
 # ---------------------------------------------------------------------------

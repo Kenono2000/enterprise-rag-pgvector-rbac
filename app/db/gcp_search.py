@@ -17,14 +17,14 @@ from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 import httpx
 
-load_dotenv(find_dotenv(), override=True)
+load_dotenv(find_dotenv(), override=False)
 
 logger = logging.getLogger(__name__)
 
 
 def get_gcp_config() -> Dict[str, str]:
     """Retrieve Google Cloud configuration from environment variables."""
-    load_dotenv(find_dotenv(), override=True)
+    load_dotenv(find_dotenv(), override=False)
     project_id = os.getenv("GCP_PROJECT_ID") or os.getenv("PROJECT_ID", "")
     project_number = os.getenv("GCP_PROJECT_NUMBER", "226714713434")
     region = os.getenv("GCP_REGION", "us-central1")

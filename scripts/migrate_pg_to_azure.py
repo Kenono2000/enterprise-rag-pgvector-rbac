@@ -16,7 +16,7 @@ from dotenv import load_dotenv, find_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-load_dotenv(find_dotenv(), override=True)
+load_dotenv(find_dotenv(), override=False)
 
 from app.db import DatabaseManager
 from app.db.azure_search import get_search_client

@@ -14,6 +14,7 @@ from app.auth.pkce import (
     exchange_code_for_tokens,
     exchange_code_for_tokens_sync,
     generate_code_verifier,
+    generate_pkce_pair,
 )
 from app.auth.role_mapper import (
     KNOWN_ROLES,
@@ -32,6 +33,7 @@ __all__ = [
     "exchange_code_for_tokens",
     "exchange_code_for_tokens_sync",
     "generate_code_verifier",
+    "generate_pkce_pair",
     "verify_google_token",
     "verify_jwt_token",
     "get_allowed_issuers",

@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv, find_dotenv
 import httpx
 
-load_dotenv(find_dotenv(), override=True)
+load_dotenv(find_dotenv(), override=False)
 
 logger = logging.getLogger(__name__)
 
