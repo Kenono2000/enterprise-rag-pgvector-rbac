@@ -104,7 +104,7 @@ def test_prefix_caching_and_context_compaction():
     )
     assert len(bundle["prefix_hash"]) == 16
     assert bundle["static_prefix_tokens"] > 10
-    assert bundle["prompt"].startswith("You are a Zero-Trust Enterprise Knowledge Assistant.")
+    assert bundle["prompt"].startswith("You are an enterprise zero-trust AI assistant.")
 
     compacted = compact_agent_context(
         raw_trace="line1\n" * 1000 + "E   AssertionError: expected 200",

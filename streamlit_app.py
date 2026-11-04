@@ -101,7 +101,7 @@ import time as _time
 _pkce_store_lock = threading.Lock()
 # {state_token: {"verifier": str, "created_at": float}}
 _pkce_store: dict[str, dict] = {}
-_PKCE_TTL_SECONDS = 300  # discard dangling entries after 5 minutes
+_PKCE_TTL_SECONDS = 24 * 3600  # discard dangling entries after 24 hours (prevents idle sign-in page expiration)
 
 
 def _pkce_store_put(state: str, verifier: str) -> None:

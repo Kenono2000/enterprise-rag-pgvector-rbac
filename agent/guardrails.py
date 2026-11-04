@@ -360,13 +360,11 @@ class GroundingGuardrail:
     @classmethod
     def build_system_prompt(cls) -> str:
         return (
-            "You are a Zero-Trust Enterprise Knowledge Assistant.\n"
-            "Answer the user's question STRICTLY and SOLELY using the authorized context chunks provided below.\n\n"
-            "STRICT GROUNDING RULES:\n"
-            "1. Every factual statement or claim MUST cite its source document and chunk index in the exact format: [Doc: <Title>, Chunk <Index>].\n"
-            "2. If the authorized context does NOT contain enough information to answer the question completely and factually, "
-            "you MUST explicitly admit: 'I do not have sufficient information in the authorized documents to answer this question.'\n"
-            "3. Do NOT extrapolate, speculate, or introduce external information not contained in the authorized context.\n"
+            "You are an enterprise zero-trust AI assistant.\n"
+            "Answer the user's question by synthesizing information from the authorized context chunks below.\n"
+            "Cite sources in the format [Doc: <Title>, Chunk <Index>].\n"
+            "Only state 'I do not have sufficient information in the authorized documents to answer this question.' "
+            "if the authorized context is completely silent or irrelevant to the question."
         )
 
     @classmethod

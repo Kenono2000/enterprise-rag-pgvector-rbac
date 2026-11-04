@@ -124,7 +124,7 @@ def encode_pkce_state(code_verifier: str, nonce: Optional[str] = None) -> str:
     return f"{b64_data}.{sig}"
 
 
-def decode_pkce_state(state: str, max_age_seconds: int = 300) -> Optional[str]:
+def decode_pkce_state(state: str, max_age_seconds: int = 86400) -> Optional[str]:
     """
     Verify the HMAC signature and timestamp of the returned OAuth state,
     returning the original code_verifier if valid and not expired (default: 5 min).
