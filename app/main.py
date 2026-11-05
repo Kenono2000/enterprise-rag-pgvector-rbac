@@ -28,10 +28,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import settings
 from app.db import DatabaseManager, generate_embedding, chat_completion, chat_completion_stream
+from app.rag import ContextAssembler
 from app.auth import verify_google_token, extract_roles, KNOWN_ROLES
 from app.observability import tracer
 from agent.guardrails import (
-    GroundingGuardrail,
     SlidingWindowRateLimiter,
     TokenCircuitBreaker,
 )
@@ -401,12 +401,13 @@ async def query_rag(
 
     avg_confidence = round(sum(c.similarity_score for c in citations) / len(citations), 3)
 
-    context_chunks = "\n\n".join([f"[Doc: {r['title']}, Chunk {r.get('chunk_index', 0)}]:\n{r['content']}" for r in rows])
-    cached_prompt_bundle = GroundingGuardrail.build_prefix_cached_prompt(
-        context_chunks_text=context_chunks,
-        user_question=request.question,
+    # Context Engineering pipeline: assemble authorized context -> prefix-cache -> compact
+    assembly = ContextAssembler.assemble(
+        rows,
+        request.question,
+        max_context_tokens=ContextAssembler.DEFAULT_MAX_CONTEXT_TOKENS,
     )
-    prompt = cached_prompt_bundle["prompt"]
+    prompt = assembly.prompt
 
     gen_start = time.perf_counter()
     answer_text = await chat_completion(prompt)
@@ -537,12 +538,13 @@ async def query_rag_stream(
 
         yield f"data: {json.dumps({'event': 'citations', 'citations': citations})}\n\n"
 
-        context_chunks = "\n\n".join([f"[Doc: {r['title']}, Chunk {r.get('chunk_index', 0)}]:\n{r['content']}" for r in rows])
-        cached_prompt_bundle = GroundingGuardrail.build_prefix_cached_prompt(
-            context_chunks_text=context_chunks,
-            user_question=request.question,
+        # Context Engineering pipeline: assemble authorized context -> prefix-cache -> compact
+        assembly = ContextAssembler.assemble(
+            rows,
+            request.question,
+            max_context_tokens=ContextAssembler.DEFAULT_MAX_CONTEXT_TOKENS,
         )
-        prompt = cached_prompt_bundle["prompt"]
+        prompt = assembly.prompt
 
         full_answer = []
         gen_start = time.perf_counter()
