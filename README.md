@@ -37,7 +37,7 @@ flowchart LR
 | Topic | Architectural Pillar | Core Engineering Pattern | Primary Security & Performance Outcome |
 | :-: | :--- | :--- | :--- |
 | **1** | **In-DB RBAC & Storage** | Pre-filtered GIN + HNSW iterative scan (`relaxed_order`), 16-bit `halfvec(1536)` & Token Ledger | Zero recall starvation, zero overfiltering, **75% RAM savings**, in-DB token audit & managed shutoff. |
-| **2** | **Quickstart & Runtime** | Event-loop-scoped `asyncpg` pools, `SKIP LOCKED` outbox & `/readyz` | Prevents closed-loop crashes; durable worker queue; Kubernetes probe ready (161 tests). |
+| **2** | **Quickstart & Runtime** | Event-loop-scoped `asyncpg` pools, `SKIP LOCKED` outbox & `/readyz` | Prevents closed-loop crashes; durable worker queue; Kubernetes probe ready (165 tests). |
 | **3** | **Identity & Sessions** | Stateless OAuth 2.0 PKCE, HMAC state & encrypted cookies | Survives F5 reloads & multi-worker scale-out with **zero Redis**; SOC-2 15m/12h bounds. |
 | **4** | **Ingestion & Hybrid RAG** | Contextual Headers, 64KB SHA-256 de-dup, Adaptive Dense + Sparse RRF (`dense_weight` / `sparse_weight`) | **>0.90 Context Precision**; `O(1)` skip for unchanged files; domain-adaptive fusion. |
 | **5** | **Gateways, OTel, SDLC & Consolidated Deep-Dive** | 1) Zero‑Trust FastMCP Gateway (RFC 9728 / RFC 8707) • 2) Managed Token Budget & Admin Shut‑off (policy://sdlc‑budget) • 3) Full‑Stack OpenTelemetry (OTLP → Jaeger Badger LSM / Azure App Insights) • 4) Tri‑Paradigm SDLC Workflow (LangGraph + CrewAI + Hermes Agent) | Gateways enforce rate limits, JWT/TLS auth, and per‑caller token budgets; observability spans to Jaeger and Azure; SDLC workflow auto‑generates patches, audits, tests, repairs, and distills reusable SKILL.md artifacts.), `PostgresSaver`, Managed Quota API + Consolidated SDLC Deep-Dive, Terminology Source-Code Map & Interview Cheat Sheet + 5-Layer Defense-in-Depth AI Guardrails & LangChain/LangGraph State Management | Crash-resilient resume; token consumption kill-switch (`enforce_limit`/`is_blocked`); 60 req/min limits; LangGraph HITL checkpoints; CrewAI/Hermes subagents; MCP fail-closed ACL; token budget; observability ring buffer; 5-layer defense-in-depth; deterministic AST/secret gating; RAG triad enforcement. |
@@ -93,7 +93,7 @@ flowchart LR
 ```powershell
 git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
 python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run full test suite (161 tests; the Docker-gated integration test auto-skips when no daemon)
+python -m pytest -v                                                     # 1. Run full test suite (165 tests; the Docker-gated integration test auto-skips when no daemon)
 docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
@@ -243,5 +243,21 @@ flowchart LR
 | **`azure`** (Microsoft Azure) | Azure AI Search + Semantic Ranker | OData `allowed_roles/any(r: ...)` | Azure OpenAI `gpt-4o` + App Insights |
 | **`gcp`** (Google Cloud) | Vertex AI ScaNN + Ranking API | ScaNN `restricts` (`allowList`) | Gemini 1.5 Pro + Cloud Trace |
 | **`databricks`** (Databricks) | Mosaic AI Vector Search (Delta Sync) | Unity Catalog `filters_json` (`OR`) | Llama 3.1 70B + MLflow Tables |
-
+## 7. AI Trend Research & Extended Thinking Budget
+### 7.1 Frontier Reasoning Model Trends
+**Claude 3.7 Sonnet** (Anthropic, 2026) — First hybrid reasoning model on the market. Unifies standard and extended thinking in a single model with API-controlled thinking budget (up to 128K tokens). Achieves SWE-bench Verified SOTA (70.3% with scaffold, 63.7% vanilla) and TAU-bench SOTA for agentic workflows. Introduces Claude Code agentic coding tool for terminal-based software engineering delegation.
+**OpenAI o3-mini** (2025) — Cost-effective reasoning model optimized for STEM; now deprecated in the API in favor of newer reasoning variants.
+**Model Context Protocol (MCP)** (v2026-07-28) — Open standard for connecting AI applications to external systems, tools, and data sources. Growing ecosystem with official SDK, registry, and security extensions. This project's FastMCP gateway implements RFC 9728 Protected Resource Metadata and RFC 8707 tool-level RBAC.
+### 7.2 Extended Thinking / Reasoning Budget (RAG Pipeline)
+Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional integer 0–128000 tokens controlling reasoning depth for complex queries.
+- **`thinking_budget=0`** (default): Fast mode, default 4K context token budget.
+- **`thinking_budget>0`**: Extended reasoning mode scales context budget linearly (`4000 + budget/4`, capped at 32K tokens) so the Context Assembler retains more high-similarity chunks for deep reasoning.
+- **Observability**: Thinking budget is recorded in OpenTelemetry/Jaeger spans as `mode=<mode>:thinking-<budget>` and retrieval span queries are tagged with `[thinking_budget=N]`.
+### 7.3 Actionable Innovations for This Project
+| Innovation | Relevance | Implementation Status |
+| :--- | :--- | :--- |
+| Hybrid reasoning with thinking budget | Complex multi-hop RAG queries benefit from extended reasoning | ✅ Implemented in `app/main.py` + `app/rag/context.py` |
+| MCP server exposure | External AI agents (Claude Code, etc.) can query the RAG pipeline via MCP | ✅ FastMCP gateway already exposes `search_sdlc_context`, `list_documents`, etc. |
+| RAG Triad observability (context relevance, faithfulness, answer relevance) | Detects hallucinations and retrieval drift | ⬜ Planned — integrate with `app/observability.py` tracer |
+| Agentic SDLC coding (Claude Code pattern) | Autonomous patch proposal, test, and repair | ✅ LangGraph + CrewAI + Hermes workflow in `agent/workflow.py` |
 

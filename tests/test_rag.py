@@ -124,3 +124,83 @@ def test_query_with_verified_google_token(monkeypatch):
         assert data["answer"] == "Q3 margins were 24%."
         assert data["confidence_score"] == 0.95
         assert data["authorized_roles_evaluated"] == ["finance_executive"]
+
+
+def test_query_with_thinking_budget_zero(monkeypatch):
+    """thinking_budget=0 uses default context budget (fast mode)."""
+    monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "false")
+    with patch("app.main.generate_embedding", new_callable=AsyncMock) as mock_emb, \
+         patch("app.main.DatabaseManager.secure_search", new_callable=AsyncMock) as mock_search, \
+         patch("app.main.chat_completion", new_callable=AsyncMock) as mock_llm:
+
+        mock_emb.return_value = [0.1] * 1536
+        mock_search.return_value = [
+            {
+                "document_id": "doc1",
+                "title": "Engineering Standards",
+                "content": "Standard guidelines",
+                "allowed_roles": ["engineer"],
+                "similarity": 0.88,
+            }
+        ]
+        mock_llm.return_value = "Follow the standards."
+
+        response = client.post(
+            "/api/v1/query",
+            json={"question": "What are the standards?", "thinking_budget": 0},
+            headers={"X-User-Roles": '["engineer"]'},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["answer"] == "Follow the standards."
+
+
+def test_query_with_thinking_budget_high(monkeypatch):
+    """thinking_budget > 0 scales context token budget for deeper reasoning."""
+    monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "false")
+    with patch("app.main.generate_embedding", new_callable=AsyncMock) as mock_emb, \
+         patch("app.main.DatabaseManager.secure_search", new_callable=AsyncMock) as mock_search, \
+         patch("app.main.chat_completion", new_callable=AsyncMock) as mock_llm:
+
+        mock_emb.return_value = [0.1] * 1536
+        mock_search.return_value = [
+            {
+                "document_id": "doc1",
+                "title": "Engineering Standards",
+                "content": "Standard guidelines",
+                "allowed_roles": ["engineer"],
+                "similarity": 0.88,
+            }
+        ]
+        mock_llm.return_value = "Follow the standards."
+
+        response = client.post(
+            "/api/v1/query",
+            json={"question": "What are the standards?", "thinking_budget": 32000},
+            headers={"X-User-Roles": '["engineer"]'},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["answer"] == "Follow the standards."
+
+
+def test_query_thinking_budget_rejected_above_max(monkeypatch):
+    """thinking_budget above 128000 is rejected with 422."""
+    monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "false")
+    response = client.post(
+        "/api/v1/query",
+        json={"question": "What are the standards?", "thinking_budget": 200000},
+        headers={"X-User-Roles": '["engineer"]'},
+    )
+    assert response.status_code == 422
+
+
+def test_query_thinking_budget_negative_rejected(monkeypatch):
+    """Negative thinking_budget is rejected with 422."""
+    monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "false")
+    response = client.post(
+        "/api/v1/query",
+        json={"question": "What are the standards?", "thinking_budget": -1},
+        headers={"X-User-Roles": '["engineer"]'},
+    )
+    assert response.status_code == 422

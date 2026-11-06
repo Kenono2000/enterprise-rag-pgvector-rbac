@@ -73,6 +73,12 @@ class RAGQueryRequest(BaseModel):
 
     question: str = Field(..., min_length=1, json_schema_extra={"example": "What does the Mindstream report say about AI agents?"})
     mode: str = Field(default="hybrid", description="Retrieval mode: 'hybrid' (vector + full-text RRF) or 'dense'")
+    thinking_budget: Optional[int] = Field(
+        default=0,
+        ge=0,
+        le=128000,
+        description="Extended reasoning token budget (0=fast mode, >0=enables deeper reasoning for complex queries)",
+    )
 
 
 class RAGResponse(BaseModel):
@@ -350,7 +356,7 @@ async def query_rag(
     except Exception as exc:
         logger.debug("Database token limit check bypassed (deferred/pool offline): %s", exc)
 
-    logger.info("RAG query: user=%s roles=%s mode=%s query=%r", caller_key, user.roles, request.mode, request.question[:60])
+    logger.info("RAG query: user=%s roles=%s mode=%s thinking_budget=%d query=%r", caller_key, user.roles, request.mode, request.thinking_budget, request.question[:60])
 
     t_start = time.perf_counter()
     query_vector = await generate_embedding(request.question)
@@ -381,6 +387,14 @@ async def query_rag(
         mode=request.mode,
     )
 
+    # Extended thinking budget: scale context token budget with reasoning depth
+    # Higher thinking budgets retrieve and assemble more context for complex reasoning
+    thinking_budget = int(request.thinking_budget or 0)
+    context_max_tokens = ContextAssembler.DEFAULT_MAX_CONTEXT_TOKENS
+    if thinking_budget > 0:
+        # Scale context budget linearly with thinking budget, capped at 32K tokens
+        context_max_tokens = min(32000, ContextAssembler.DEFAULT_MAX_CONTEXT_TOKENS + thinking_budget // 4)
+
     if not rows:
         return RAGResponse(
             answer="No authorized documentation found for your verified role claims.",
@@ -405,7 +419,7 @@ async def query_rag(
     assembly = ContextAssembler.assemble(
         rows,
         request.question,
-        max_context_tokens=ContextAssembler.DEFAULT_MAX_CONTEXT_TOKENS,
+        max_context_tokens=context_max_tokens,
     )
     prompt = assembly.prompt
 
@@ -426,6 +440,15 @@ async def query_rag(
         roles=user.roles,
         duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
         model="gpt-4o",
+    )
+
+    # Record extended thinking budget usage in observability
+    tracer.record_retrieval(
+        query=f"[thinking_budget={thinking_budget}] {request.question}",
+        roles=user.roles,
+        result_count=len(rows) if rows else 0,
+        duration_ms=retrieval_ms,
+        mode=f"{request.mode}:thinking-{thinking_budget}",
     )
 
     # Persist token consumption ledger to database and update managed limits
@@ -519,6 +542,12 @@ async def query_rag_stream(
         mode=request.mode,
     )
 
+    # Extended thinking budget: scale context token budget with reasoning depth
+    thinking_budget = int(request.thinking_budget or 0)
+    context_max_tokens = ContextAssembler.DEFAULT_MAX_CONTEXT_TOKENS
+    if thinking_budget > 0:
+        context_max_tokens = min(32000, ContextAssembler.DEFAULT_MAX_CONTEXT_TOKENS + thinking_budget // 4)
+
     async def event_generator():
         if not rows:
             yield f"data: {json.dumps({'event': 'refusal', 'answer': 'No authorized documentation found for your verified role claims.', 'citations': []})}\n\n"
@@ -542,7 +571,7 @@ async def query_rag_stream(
         assembly = ContextAssembler.assemble(
             rows,
             request.question,
-            max_context_tokens=ContextAssembler.DEFAULT_MAX_CONTEXT_TOKENS,
+            max_context_tokens=context_max_tokens,
         )
         prompt = assembly.prompt
 
@@ -584,6 +613,15 @@ async def query_rag_stream(
             pass
 
         yield f"data: {json.dumps({'event': 'done', 'confidence_score': avg_confidence})}\n\n"
+
+        # Record extended thinking budget usage in observability
+        tracer.record_retrieval(
+            query=f"[thinking_budget={thinking_budget}] {request.question}",
+            roles=user.roles,
+            result_count=len(rows) if rows else 0,
+            duration_ms=retrieval_ms,
+            mode=f"{request.mode}:thinking-{thinking_budget}",
+        )
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
