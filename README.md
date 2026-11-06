@@ -40,7 +40,7 @@ flowchart LR
 | **2** | **Quickstart & Runtime** | Event-loop-scoped `asyncpg` pools, `SKIP LOCKED` outbox & `/readyz` | Prevents closed-loop crashes; durable worker queue; Kubernetes probe ready (161 tests). |
 | **3** | **Identity & Sessions** | Stateless OAuth 2.0 PKCE, HMAC state & encrypted cookies | Survives F5 reloads & multi-worker scale-out with **zero Redis**; SOC-2 15m/12h bounds. |
 | **4** | **Ingestion & Hybrid RAG** | Contextual Headers, 64KB SHA-256 de-dup, Adaptive Dense + Sparse RRF (`dense_weight` / `sparse_weight`) | **>0.90 Context Precision**; `O(1)` skip for unchanged files; domain-adaptive fusion. |
-| **5** | **Gateways, OTel, SDLC & Consolidated Deep-Dive** | Zero-Trust FastMCP (RFC 9728 & RFC 8707 Tool ACLs), `PostgresSaver`, Managed Quota API + Consolidated SDLC Deep-Dive, Terminology Source-Code Map & Interview Cheat Sheet + 5-Layer Defense-in-Depth AI Guardrails & LangChain/LangGraph State Management | Crash-resilient resume; token consumption kill-switch (`enforce_limit`/`is_blocked`); 60 req/min limits; LangGraph HITL checkpoints; CrewAI/Hermes subagents; MCP fail-closed ACL; token budget; observability ring buffer; 5-layer defense-in-depth; deterministic AST/secret gating; RAG triad enforcement. |
+| **5** | **Gateways, OTel, SDLC & Consolidated Deep-Dive** | 1) Zero‑Trust FastMCP Gateway (RFC 9728 / RFC 8707) • 2) Managed Token Budget & Admin Shut‑off (policy://sdlc‑budget) • 3) Full‑Stack OpenTelemetry (OTLP → Jaeger Badger LSM / Azure App Insights) • 4) Tri‑Paradigm SDLC Workflow (LangGraph + CrewAI + Hermes Agent) | Gateways enforce rate limits, JWT/TLS auth, and per‑caller token budgets; observability spans to Jaeger and Azure; SDLC workflow auto‑generates patches, audits, tests, repairs, and distills reusable SKILL.md artifacts.), `PostgresSaver`, Managed Quota API + Consolidated SDLC Deep-Dive, Terminology Source-Code Map & Interview Cheat Sheet + 5-Layer Defense-in-Depth AI Guardrails & LangChain/LangGraph State Management | Crash-resilient resume; token consumption kill-switch (`enforce_limit`/`is_blocked`); 60 req/min limits; LangGraph HITL checkpoints; CrewAI/Hermes subagents; MCP fail-closed ACL; token budget; observability ring buffer; 5-layer defense-in-depth; deterministic AST/secret gating; RAG triad enforcement. |
 | **6** | **Multi-Cloud & Runbook** | Quad-mode strategy (`pgvector`, `azure`, `gcp`, `databricks`) | Zero-downtime `.env` switching with native pre-filtering across all 4 engines. |
 ## 1. In-Database RBAC and Vector Storage (`schema.sql`, `app/db/`)
 ```mermaid
@@ -186,6 +186,34 @@ flowchart LR
 * **Managed Token Budget & Administrative Shutoff API (`app/main.py`)**: Provides endpoints [/api/v1/tokens/usage](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac/blob/main/app/main.py#L728), [/api/v1/tokens/limit](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac/blob/main/app/main.py#L781), [/api/v1/tokens/reset](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac/blob/main/app/main.py#L823), and [/api/v1/tokens/ledger](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac/blob/main/app/main.py#L838) backed by PostgreSQL [token_consumption_ledger](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac/blob/main/schema.sql#L165) and [token_managed_limits](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac/blob/main/schema.sql#L183), enabling administrators and callers to monitor token velocity, toggle enforcement (`enforce_limit`), or trigger emergency kill-switches (`is_blocked`) to immediately turn off token consumption.
 * **Full-Stack OpenTelemetry (`app/observability.py`)**: Streams OTLP gRPC spans (`:4317`) to **Jaeger** (persistent Badger LSM disk store, 7-day TTL) and **Azure Application Insights**, backed by a 1,000-event ring buffer (`GET /api/v1/metrics/observability`) and non-root `Dockerfile` (`UID 10001`).
 * **Tri-Paradigm SDLC Workflow & `PostgresSaver` (`agent/workflow.py`)**: Unites **LangChain/LangGraph** (`LangGraphSDLCWorkflow` cyclic state machine + native `interrupt()` / `Command(resume=...)` HITL approval gating + PostgreSQL checkpoint persistence via `PostgresSaver`/`sdlc_workflow_checkpoints` + `resume_from_checkpoint` multi-worker recovery + `get_execution_history` time-travel lineage auditing + atomic `rollback_patches`), **CrewAI** (`SDLCCrewOrchestrator` role-based crew: `Principal SDLC Architect` [`inherit`], `Lead Security & AST Auditor` [`pro`], and `Site Reliability & Pytest Triager` [`flash`] — upstream SDK adapter enabled with `USE_CREWAI_SDK=true`, otherwise the deterministic `native_pydantic` adapter is used), and **Hermes Agent** (`HermesSkillSynthesizer` closed-loop `recall_relevant_skills`, portable `SKILL.md` distillation, and Atropos GRPO ShareGPT RL trajectory export with step reward rubrics) guarded by `PolicyEngine`.
+
+---
+
+### Deep-Dive: Code Breakdown & Architecture Insights
+
+#### 1. Zero-Trust FastMCP Gateway (`app/mcp/gateway.py`)
+- **Blast Radius Controls**: Configures module-level `SlidingWindowRateLimiter` (default 60 req/min per caller) and `TokenCircuitBreaker` (8,000 tokens/request, 50,000 tokens/issue) to protect downstream LLMs.
+- **Strict Pydantic Schemas (`extra="forbid"`)**: Every tool request (`MCPSearchRequest`, `MCPPatchRequest`, `MCPSDLCCrewRequest`, `MCPHermesSkillRequest`, `MCPListDocumentsRequest`) explicitly rejects unknown fields.
+- **Fail-Closed RBAC (`check_tool_permission`)**: Maps tools to required roles (`TOOL_REQUIRED_ROLES`). If a token is authenticated but has zero claims, it is **denied** for restricted tools, preventing confused deputy attacks.
+- **RFC 9728 & RFC 8707**: Exposes Protected Resource Metadata discovery and OAuth scope bindings directly within the MCP gateway layer.
+
+#### 2. Managed Token Budget & Administrative Shutoff API (`app/main.py`)
+- **Database-Backed Ledgers**: Tracks every token consumption event via `token_consumption_ledger` and enforces limits through `token_managed_limits`.
+- **Kill-Switching**: Allows administrators or authorized engineers to toggle `enforce_limit` or trip the emergency `is_blocked` kill-switch instantly via REST endpoints (`/api/v1/tokens/limit`) or the MCP `policy://sdlc-budget` resource.
+
+#### 3. Full-Stack OpenTelemetry (`app/observability.py`)
+- **Dual Exporters**: Integrates with Azure Application Insights (`APPLICATIONINSIGHTS_CONNECTION_STRING`) and OTLP gRPC (`http://localhost:4317`) for Jaeger Badger LSM storage.
+- **Ring Buffer Fallback**: Maintains a thread-safe 1,000-event in-memory ring buffer for metrics and traces, ensuring observability telemetry works even when external exporters are offline.
+
+#### 4. Tri-Paradigm SDLC Workflow (`agent/workflow.py`)
+- **LangGraph Checkpointing**: `PostgresCheckpointSaver` extends LangGraph state persistence, committing graph steps to PostgreSQL (`sdlc_workflow_checkpoints`) with time-travel inspection and multi-worker resume support.
+- **CrewAI Role Specialization**: Orchestrates specialized agents (`arch-synthesizer`, `cross-model-judge`, `test-triager`) with tiered model routing (`inherit`, `pro`, `flash`).
+- **Hermes Agent Lifelong Learning**: Automatically distills verified successful patches into portable `SKILL.md` files in `.agent/skills/` and exports ShareGPT-formatted RL trajectories weighted by Atropos GRPO step rewards.
+
+#### 5. Defense-in-Depth Guardrails (`agent/guardrails.py`)
+- **PolicyEngine AST Scanning**: Detects dangerous Python constructs (`exec`, `eval`, `__import__`, `subprocess` with `shell=True`, unauthorized path traversals) before code application.
+- **Secret Regex Filtering**: Automatically catches exposed API keys, private keys, and credential patterns.
+- **GroundingGuardrail**: Enforces the RAG Triad by requiring explicit source citations (`[Doc: <Title>, Chunk <Index>]`) and verifying that cited chunks exist in authorized context.
 ## 6. Multi-Cloud Strategy and Runbook
 * **Zero-Downtime Cutover & Failover**: Switch `RETRIEVAL_BACKEND` in `.env` (`pgvector` | `azure` | `gcp` | `databricks`) or run `python scripts/migrate_multicloud.py --target all`.
 * **Incident Runbook**: On DB latency alerts in Jaeger (`http://localhost:16686`), fail over `RETRIEVAL_BACKEND` in `.env`; on JWKS key rotation, restart the auth worker to flush `JWKSClient`; verify Badger LSM persistence via `docker compose restart jaeger`.
