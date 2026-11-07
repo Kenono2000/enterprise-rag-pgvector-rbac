@@ -12,4 +12,5 @@
   - `content-brief-and-calendar-generator`: Must govern technical documentation briefs, guides, and dissemination.
   - `viral-animation-prompting`: Must govern any generative video/motion prompting requests.
   - `skill-creator`: Must govern authoring or updating any new skills.
+  - `minimal-markdown`: Must govern markdown file creation and spacing.
   - `getting-started-with-muse-skills`: Must govern skill maintenance and Agent Skills formatting adherence.

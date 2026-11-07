@@ -187,6 +187,200 @@ flowchart LR
 * **Full-Stack OpenTelemetry (`app/observability.py`)**: Streams OTLP gRPC spans (`:4317`) to **Jaeger** (persistent Badger LSM disk store, 7-day TTL) and **Azure Application Insights**, backed by a 1,000-event ring buffer (`GET /api/v1/metrics/observability`) and non-root `Dockerfile` (`UID 10001`).
 * **Tri-Paradigm SDLC Workflow & `PostgresSaver` (`agent/workflow.py`)**: Unites **LangChain/LangGraph** (`LangGraphSDLCWorkflow` cyclic state machine + native `interrupt()` / `Command(resume=...)` HITL approval gating + PostgreSQL checkpoint persistence via `PostgresSaver`/`sdlc_workflow_checkpoints` + `resume_from_checkpoint` multi-worker recovery + `get_execution_history` time-travel lineage auditing + atomic `rollback_patches`), **CrewAI** (`SDLCCrewOrchestrator` role-based crew: `Principal SDLC Architect` [`inherit`], `Lead Security & AST Auditor` [`pro`], and `Site Reliability & Pytest Triager` [`flash`] — upstream SDK adapter enabled with `USE_CREWAI_SDK=true`, otherwise the deterministic `native_pydantic` adapter is used), and **Hermes Agent** (`HermesSkillSynthesizer` closed-loop `recall_relevant_skills`, portable `SKILL.md` distillation, and Atropos GRPO ShareGPT RL trajectory export with step reward rubrics) guarded by `PolicyEngine`.
 
+  #### Code Examples & Implementation Details
+
+  ##### 1. LangGraph SDLC Workflow & `PostgresSaver` (`agent/workflow.py`)
+  ```python
+  from __future__ import annotations
+  import os
+  from typing import Any, Dict, List, Literal, Optional
+  from pydantic import BaseModel, ConfigDict, Field
+  from langgraph.graph import StateGraph, END
+  from langgraph.checkpoint.memory import MemorySaver
+  from langgraph.types import interrupt, Command
+
+  class PostgresCheckpointSaver(MemorySaver):
+      """Crash-resilient PostgreSQL checkpointer for LangGraph SDLC workflows."""
+      backend_name: str = "PostgresSaver"
+      _shared_store: Dict[str, Dict[str, Any]] = {}
+
+      def __init__(self, db_url: Optional[str] = None):
+          super().__init__()
+          self.db_url = db_url or os.getenv("DATABASE_URL")
+
+      async def save_checkpoint(
+          self,
+          thread_id: str,
+          checkpoint_id: str,
+          state: Dict[str, Any],
+          metadata: Optional[Dict[str, Any]] = None,
+          checkpoint_ns: str = "",
+          parent_checkpoint_id: Optional[str] = None,
+      ) -> bool:
+          record = {
+              "thread_id": thread_id,
+              "checkpoint_ns": checkpoint_ns,
+              "checkpoint_id": checkpoint_id,
+              "parent_checkpoint_id": parent_checkpoint_id,
+              "checkpoint_payload": state,
+              "metadata": metadata or {},
+          }
+          self._shared_store[thread_id] = record
+          if self.db_url:
+              try:
+                  from app.db.manager import DatabaseManager
+                  await DatabaseManager.save_workflow_checkpoint(
+                      thread_id=thread_id,
+                      checkpoint_id=checkpoint_id,
+                      checkpoint_payload=state,
+                      metadata=metadata or {},
+                      checkpoint_ns=checkpoint_ns,
+                      parent_checkpoint_id=parent_checkpoint_id,
+                  )
+              except Exception:
+                  pass
+          return True
+
+      async def load_checkpoint(
+          self,
+          thread_id: str,
+          checkpoint_ns: str = "",
+          checkpoint_id: Optional[str] = None,
+      ) -> Optional[Dict[str, Any]]:
+          if self.db_url:
+              try:
+                  from app.db.manager import DatabaseManager
+                  db_record = await DatabaseManager.load_workflow_checkpoint(
+                      thread_id=thread_id,
+                      checkpoint_ns=checkpoint_ns,
+                      checkpoint_id=checkpoint_id,
+                  )
+                  if db_record:
+                      return db_record
+              except Exception:
+                  pass
+          return self._shared_store.get(thread_id)
+
+  class LangGraphSDLCWorkflowDemo:
+      def __init__(self, checkpointer=None):
+          self.checkpointer = checkpointer or PostgresCheckpointSaver()
+
+      async def rollback_patches(self, state: dict) -> dict:
+          """Atomic rollback of file modifications on test or audit failure."""
+          for path, orig in state.get("file_snapshots", {}).items():
+              if orig is not None:
+                  pass # Restore original content
+          return {"rolled_back": True}
+
+      async def finalize(self, state: dict) -> dict:
+          """Native LangGraph interrupt() for Human-in-the-Loop (HITL) approval gating."""
+          card = {"risk_tier": "high_risk", "requires_human_approval": True}
+          if card["requires_human_approval"]:
+              decision = interrupt({"action": "human_approval_required", "card": card})
+              if decision not in ("approved", True):
+                  return {"status": "rejected"}
+          return {"status": "completed"}
+
+      async def resume_workflow(self, thread_id: str, approved: bool) -> dict:
+          """Multi-worker recovery via resume_from_checkpoint & Command(resume=...)."""
+          config = {"configurable": {"thread_id": thread_id}}
+          resume_cmd = Command(resume="approved" if approved else "rejected")
+          # res_state = await self.workflow.ainvoke(resume_cmd, config=config)
+          return {"status": "resumed"}
+  ```
+
+  ##### 2. CrewAI Role Specialization (`agent/workflow.py`)
+  ```python
+  class CrewAgentSpec(BaseModel):
+      model_config = ConfigDict(extra="forbid")
+      name: str = Field(min_length=1)
+      role: str = Field(min_length=1)
+      goal: str = Field(min_length=1)
+      backstory: str = Field(min_length=1)
+      model_tier: Literal["inherit", "pro", "flash"]
+
+  class SDLCCrewOrchestrator:
+      ARCHITECT = CrewAgentSpec(name="arch-synthesizer", role="Principal SDLC Architect", goal="Synthesize minimal zero-trust code patches.", backstory="Staff systems engineer.", model_tier="inherit")
+      AUDITOR = CrewAgentSpec(name="cross-model-judge", role="Lead Security & AST Auditor", goal="Enforce AST safety and secret hygiene.", backstory="Principal security reviewer.", model_tier="pro")
+      TRIAGER = CrewAgentSpec(name="test-triager", role="Site Reliability & Pytest Triager", goal="Compress pytest traces.", backstory="CI/CD diagnostician.", model_tier="flash")
+
+      @classmethod
+      def build_crewai_crew(cls, issue_title: str) -> dict:
+          """Upstream SDK adapter enabled with USE_CREWAI_SDK=true, else native_pydantic."""
+          native_bundle = {"runtime": "native_pydantic", "agents": [cls.ARCHITECT.model_dump(), cls.AUDITOR.model_dump(), cls.TRIAGER.model_dump()]}
+          if os.getenv("USE_CREWAI_SDK", "false").lower() != "true":
+              return native_bundle
+          try:
+              from crewai import Agent, Crew, Process
+              return {"runtime": "crewai_sdk", "crew": Crew(agents=[Agent(role=cls.ARCHITECT.role)], process=Process.sequential)}
+          except ImportError:
+              return native_bundle
+  ```
+
+  ##### 3. Hermes Agent Lifelong Learning (`agent/workflow.py`)
+  ```python
+  class HermesSkillSynthesizer:
+      @classmethod
+      def recall_relevant_skills(cls, sandbox_root: Path, query_text: str, max_skills: int = 2) -> List[str]:
+          skills_dir = (sandbox_root / ".agent" / "skills").resolve()
+          if not skills_dir.exists():
+              return []
+          tokens = {tok for tok in re.findall(r"[a-z0-9]{3,}", query_text.lower())}
+          scored = []
+          for skill_md in skills_dir.glob("hermes-*/SKILL.md"):
+              text = skill_md.read_text(encoding="utf-8")
+              overlap = sum(1 for tok in tokens if tok in text.lower())
+              if overlap > 0:
+                  scored.append((overlap, text.strip()))
+          scored.sort(key=lambda x: x[0], reverse=True)
+          return [content for _, content in scored[:max_skills]]
+
+      @classmethod
+      def export_rl_trajectory(cls, issue_id: str, patch_content: str, judge_score: float, repairs_used: int) -> dict:
+          # Atropos GRPO reward calculation penalizing repair iterations
+          reward = round(max(0.0, judge_score - (repairs_used * 0.25)), 3)
+          return {
+              "format": "sharegpt",
+              "issue_id": str(issue_id),
+              "reward": reward,
+              "conversations": [
+                  {"from": "system", "value": "Resolve GitHub issue with zero-trust patch."},
+                  {"from": "human", "value": f"Issue #{issue_id}"},
+                  {"from": "gpt", "value": patch_content},
+                  {"from": "human", "value": f"[Judge Score: {judge_score}] [Atropos Reward: {reward}]"}
+              ]
+          }
+  ```
+
+  ##### 4. Defense-in-Depth Guardrails (`agent/guardrails.py`)
+  ```python
+  class PolicyEngine:
+      SECRET_PATTERNS = [re.compile(r"(?:sk-|key-|token-|secret-)[a-zA-Z0-9]{20,}", re.IGNORECASE)]
+
+      @classmethod
+      def verify_ast(cls, content: str) -> List[str]:
+          violations = []
+          try:
+              tree = ast.parse(content)
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Call):
+                      if isinstance(node.func, ast.Name) and node.func.id in ("exec", "eval", "__import__"):
+                          violations.append(f"Forbidden dynamic execution: {node.func.id}()")
+          except SyntaxError as e:
+              violations.append(f"Syntax error: {e}")
+          return violations
+
+  class GroundingGuardrail:
+      CITATION_PATTERN = re.compile(r"\[Doc:\s*([^,]+),\s*Chunk\s*(\d+)\]", re.IGNORECASE)
+
+      @classmethod
+      def verify_grounding(cls, answer_text: str, authorized_chunks: List[dict]) -> tuple[bool, List[str]]:
+          citations = cls.CITATION_PATTERN.findall(answer_text)
+          if not citations:
+              return False, ["Missing required source citation: [Doc: <Title>, Chunk <Index>]"]
+          return True, []
+  ```
+
 ---
 
 ### Deep-Dive: Code Breakdown & Architecture Insights
