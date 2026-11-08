@@ -236,6 +236,64 @@ class ObservabilityTracer:
             except Exception as exc:
                 logger.debug("Failed exporting MCP tool execution to OTel: %s", exc)
 
+    def record_rag_triad(
+        self,
+        question: str,
+        answer: str,
+        triad_score: Any,
+        roles: Optional[List[str]] = None,
+        duration_ms: float = 0.0,
+    ) -> None:
+        """Capture quantitative RAG Triad evaluation metrics in telemetry ring buffer and OTel spans."""
+        if hasattr(triad_score, "model_dump"):
+            score_dict = triad_score.model_dump()
+        elif isinstance(triad_score, dict):
+            score_dict = triad_score
+        else:
+            score_dict = {}
+
+        data = {
+            "event": "rag_triad_evaluation",
+            "question_preview": (question or "")[:60],
+            "context_relevance": float(score_dict.get("context_relevance", 0.0)),
+            "faithfulness": float(score_dict.get("faithfulness", 0.0)),
+            "answer_relevance": float(score_dict.get("answer_relevance", 0.0)),
+            "composite_score": float(score_dict.get("composite_score", 0.0)),
+            "status": str(score_dict.get("status", "UNKNOWN")),
+            "diagnostics": score_dict.get("diagnostics", []),
+            "roles": roles or [],
+            "duration_ms": duration_ms,
+            "timestamp": time.time(),
+        }
+        self._metrics.append(data)
+        logger.info(
+            "RAG TRIAD EVALUATION status=%s composite=%.2f context_rel=%.2f faith=%.2f ans_rel=%.2f",
+            data["status"],
+            data["composite_score"],
+            data["context_relevance"],
+            data["faithfulness"],
+            data["answer_relevance"],
+        )
+
+        if self._otel_tracer:
+            try:
+                with self._otel_tracer.start_span("rag_triad_evaluation") as span:
+                    span.set_attribute("rag.triad.status", data["status"])
+                    span.set_attribute("rag.triad.composite", data["composite_score"])
+                    span.set_attribute("rag.triad.context_relevance", data["context_relevance"])
+                    span.set_attribute("rag.triad.faithfulness", data["faithfulness"])
+                    span.set_attribute("rag.triad.answer_relevance", data["answer_relevance"])
+                    span.set_attribute("rag.roles", ",".join(roles) if roles else "none")
+                    span.add_event(
+                        "triad_scorecard",
+                        {
+                            "composite": str(data["composite_score"]),
+                            "faithfulness": str(data["faithfulness"]),
+                            "diagnostics": json.dumps(data["diagnostics"]),
+                        },
+                    )
+            except Exception as exc:
+                logger.debug("Failed exporting RAG triad evaluation to OTel: %s", exc)
 
     def get_recent_metrics(self, limit: int = 50) -> List[Dict[str, Any]]:
         return self._metrics[-limit:]
@@ -246,7 +304,20 @@ class ObservabilityTracer:
         generations = [m for m in self._metrics if m.get("event") == "generation"]
         interactions = [m for m in self._metrics if m.get("event") == "chat_interaction"]
         mcp_tools = [m for m in self._metrics if m.get("event") == "mcp_tool_execution"]
+        triad_evals = [m for m in self._metrics if m.get("event") == "rag_triad_evaluation"]
         error_spans = [m for m in self._metrics if m.get("status") == "error"]
+
+        avg_composite = (
+            round(sum(m["composite_score"] for m in triad_evals) / len(triad_evals), 3)
+            if triad_evals
+            else 0.0
+        )
+        avg_faithfulness = (
+            round(sum(m["faithfulness"] for m in triad_evals) / len(triad_evals), 3)
+            if triad_evals
+            else 0.0
+        )
+
         return {
             "service_name": self.service_name,
             "otel_active": self._otel_tracer is not None,
@@ -255,6 +326,9 @@ class ObservabilityTracer:
             "generation_events": len(generations),
             "chat_interactions": len(interactions),
             "mcp_tool_executions": len(mcp_tools),
+            "rag_triad_evaluations": len(triad_evals),
+            "avg_triad_composite": avg_composite,
+            "avg_triad_faithfulness": avg_faithfulness,
             "error_spans": len(error_spans),
         }
 
