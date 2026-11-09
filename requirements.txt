@@ -10,7 +10,6 @@ fastmcp>=3.4.11,<4.0.0
 firebase_admin==7.7.0
 google-auth>=2.30.0
 google-cloud-aiplatform>=1.60.0
-hermes-agent @ git+https://github.com/NousResearch/hermes-agent.git ; python_version >= "3.14"
 httpx==0.28.1
 langchain_community==0.4.2
 langchain_core>=1.6.3
