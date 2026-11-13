@@ -30,7 +30,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth.jwks import verify_google_token
 from app.auth.role_mapper import extract_roles, KNOWN_ROLES
@@ -49,21 +49,27 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 
 # ---------------------------------------------------------------------------
-# Pydantic models
+# Pydantic models (Strict Deterministic Schemas)
 # ---------------------------------------------------------------------------
 
 
 class Citation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     document_id: str
     title: str
     similarity_score: float
 
 
 class RAGQueryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     question: str = Field(..., example="What does the Mindstream report say about AI agents?")
 
 
 class RAGResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     answer: str
     citations: List[Citation]
     confidence_score: float
@@ -71,6 +77,8 @@ class RAGResponse(BaseModel):
 
 
 class UserIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     sub: str
     email: Optional[str] = None
     roles: List[str]
