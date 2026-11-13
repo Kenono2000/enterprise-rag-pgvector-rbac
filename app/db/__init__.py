@@ -8,6 +8,14 @@ from app.db.llm import generate_embedding, chat_completion, chat_completion_stre
 from app.db.azure_search import azure_hybrid_search, get_search_client
 from app.db.gcp_search import gcp_hybrid_search, get_gcp_vector_client
 from app.db.databricks_search import databricks_hybrid_search, get_databricks_vector_client
+from app.db.protocols import VectorSearchProvider
+from app.db.adapters import (
+    PgvectorSearchAdapter,
+    AzureSearchAdapter,
+    GCPSearchAdapter,
+    DatabricksSearchAdapter,
+    get_vector_search_adapter,
+)
 
 __all__ = [
     "DatabaseManager",
@@ -22,5 +30,11 @@ __all__ = [
     "get_gcp_vector_client",
     "databricks_hybrid_search",
     "get_databricks_vector_client",
+    "VectorSearchProvider",
+    "PgvectorSearchAdapter",
+    "AzureSearchAdapter",
+    "GCPSearchAdapter",
+    "DatabricksSearchAdapter",
+    "get_vector_search_adapter",
 ]
 

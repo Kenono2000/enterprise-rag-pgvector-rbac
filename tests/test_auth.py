@@ -224,10 +224,10 @@ class TestJwksTokenValidation:
         from app.auth.jwks import verify_jwt_token
 
         monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
-        # Token with unauthorized evil issuer
+        # Token with unauthorized evil issuer (using 32-byte secret for RFC 7518 compliance)
         fake_token = pyjwt.encode(
             {"iss": "https://evil-attacker.com", "sub": "attacker", "aud": "test-client-id"},
-            "secret",
+            "a" * 32,
             algorithm="HS256",
         )
         with pytest.raises(pyjwt.InvalidTokenError, match="Unexpected token issuer"):

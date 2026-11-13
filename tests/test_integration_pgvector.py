@@ -13,7 +13,10 @@ import pytest
 _HAS_TESTCONTAINERS = False
 try:
     import docker
-    from testcontainers.postgres import PostgresContainer
+    try:
+        from testcontainers.community.postgres import PostgresContainer
+    except ImportError:
+        from testcontainers.postgres import PostgresContainer
     docker.from_env().ping()
     _HAS_TESTCONTAINERS = True
 except Exception:
