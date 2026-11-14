@@ -46,12 +46,15 @@ import numpy as np
 import openai
 import psycopg2
 from dotenv import load_dotenv
-from langchain_community.document_loaders import (
-    Docx2txtLoader,
-    PyMuPDFLoader,
-    PyPDFLoader,
-    TextLoader,
-)
+import warnings
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=DeprecationWarning, message=r".*langchain-community.*")
+    from langchain_community.document_loaders import (
+        Docx2txtLoader,
+        PyMuPDFLoader,
+        PyPDFLoader,
+        TextLoader,
+    )
 from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
