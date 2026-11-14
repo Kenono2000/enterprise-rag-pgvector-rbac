@@ -504,3 +504,23 @@ def test_crewai_flow_builder_plan():
     )
     assert bundle["plan"]["parallel"] == ["audit_patches", "run_tests"]
     assert bundle["runtime"] in ("crewai_flow", "native_pydantic")
+
+
+def test_stride_threat_modeling():
+    # Test Elevation of Privilege detection via AST
+    unsafe_shell_code = "import subprocess\nsubprocess.run('ls', shell=True)"
+    threats = PolicyEngine.evaluate_stride_threats("app/runner.py", unsafe_shell_code)
+    categories = [t["category"] for t in threats]
+    assert "Elevation of Privilege" in categories
+
+    # Test Spoofing detection via Secret
+    spoof_code = "AWS_SECRET = 'AKIA1234567890123456'"
+    threats_spoof = PolicyEngine.evaluate_stride_threats("app/aws.py", spoof_code)
+    assert any(t["category"] == "Spoofing" for t in threats_spoof)
+
+
+def test_autonomy_maturity_evaluator(tmp_path):
+    from agent import AutonomyMaturityEvaluator
+    report = AutonomyMaturityEvaluator.evaluate_repository(tmp_path)
+    assert report.maturity_level in ("L1", "L2", "L3", "L4", "L5")
+    assert "style_and_validation" in report.pillar_scores

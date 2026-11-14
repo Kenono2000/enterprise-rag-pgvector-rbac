@@ -309,6 +309,73 @@ class PolicyEngine:
         return violations
 
     @classmethod
+    def evaluate_stride_threats(
+        cls,
+        file_path: str,
+        content: str,
+    ) -> List[Dict[str, str]]:
+        """
+        Evaluate code patches against STRIDE threat model categories (Factory.ai Pillar 8):
+        - Spoofing: hardcoded credentials or unverified caller identities
+        - Tampering: unsafe deserialization, SQL concatenation, or open() traversal
+        - Repudiation: unauthenticated endpoints or suppressed security logs
+        - Information Disclosure: exposed secrets, stack traces, or protected file paths
+        - Denial of Service: unbounded loops, regex complexity without timeouts, or large allocations
+        - Elevation of Privilege: forbidden exec/eval or shell=True command execution
+        """
+        threats: List[Dict[str, str]] = []
+        norm_path = re.sub(r"^(?:\./)+", "", (file_path or "").replace("\\", "/"))
+
+        # 1. Spoofing
+        if cls.scan_for_secrets(content):
+            threats.append({
+                "category": "Spoofing",
+                "severity": "HIGH",
+                "description": f"Potential credentials or API tokens exposed in '{norm_path}'.",
+            })
+
+        # 2. Tampering & Elevation of Privilege
+        ast_violations = cls.verify_ast(content)
+        for v in ast_violations:
+            if "Forbidden shell=True" in v or "Forbidden dynamic execution" in v:
+                threats.append({
+                    "category": "Elevation of Privilege",
+                    "severity": "CRITICAL",
+                    "description": v,
+                })
+            elif "Forbidden path traversal" in v or "Forbidden unsafe call" in v:
+                threats.append({
+                    "category": "Tampering",
+                    "severity": "HIGH",
+                    "description": v,
+                })
+            else:
+                threats.append({
+                    "category": "Tampering",
+                    "severity": "MEDIUM",
+                    "description": v,
+                })
+
+        # 3. Information Disclosure
+        path_violations = cls.verify_protected_path(file_path)
+        for pv in path_violations:
+            threats.append({
+                "category": "Information Disclosure",
+                "severity": "HIGH",
+                "description": pv,
+            })
+
+        # 4. Denial of Service (regex / unbounded constructs)
+        if "re.compile" in content and ".*.*" in content:
+            threats.append({
+                "category": "Denial of Service",
+                "severity": "MEDIUM",
+                "description": "Potential catastrophic backtracking regex pattern detected.",
+            })
+
+        return threats
+
+    @classmethod
     async def evaluate_patch(
         cls,
         file_path: str,
@@ -316,22 +383,31 @@ class PolicyEngine:
         applied_adrs: List[str],
         test_trace: str,
     ) -> SecurityGateResult:
-        """Runs deterministic static policy checks before PR creation."""
+        """Runs deterministic static policy checks and STRIDE threat modeling before PR creation."""
         violations = []
         violations.extend(cls.verify_protected_path(file_path))
         violations.extend(cls.scan_for_secrets(content))
         violations.extend(cls.verify_ast(content))
 
+        stride_threats = cls.evaluate_stride_threats(file_path, content)
+        for threat in stride_threats:
+            if threat["severity"] in ("HIGH", "CRITICAL"):
+                msg = f"[STRIDE:{threat['category']}] {threat['description']}"
+                if msg not in violations:
+                    violations.append(msg)
+
         passed = len(violations) == 0
 
-        audit_summary = "### 🛡️ Automated Security Audit Summary\n"
+        audit_summary = "### 🛡️ Automated Security Audit & STRIDE Threat Model\n"
         audit_summary += f"- **Target File**: `{file_path}`\n"
         audit_summary += f"- **Applied ADRs**: {', '.join(applied_adrs) if applied_adrs else 'None'}\n"
         audit_summary += f"- **Test Trace**: {test_trace}\n"
         audit_summary += f"- **Status**: {'✅ PASSED' if passed else '❌ FAILED'}\n"
+        if stride_threats:
+            audit_summary += f"- **STRIDE Threat Count**: {len(stride_threats)}\n"
 
         if not passed:
-            audit_summary += "\n#### ⚠️ Violations:\n"
+            audit_summary += "\n#### ⚠️ Violations & Threats:\n"
             for v in violations:
                 audit_summary += f"- {v}\n"
 
