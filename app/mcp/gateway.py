@@ -43,6 +43,7 @@ TOOL_REQUIRED_ROLES: Dict[str, List[str]] = {
     "propose_patch": ["engineer", "admin"],
     "run_sdlc_crew": ["engineer", "admin"],
     "recall_hermes_skills": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+    "evaluate_autonomy_maturity": ["engineer", "compliance_auditor", "admin", "executive"],
     "get_gateway_metadata": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
 }
 
@@ -87,6 +88,14 @@ class MCPListDocumentsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     limit: int = Field(default=20, ge=1, le=100, description="Maximum number of documents to return.")
+    auth_token: Optional[str] = Field(default=None, description="Google OAuth ID token.")
+    user_roles: Optional[List[str]] = Field(default=None, description="Fallback roles when REQUIRE_GOOGLE_AUTH=false.")
+
+
+class MCPAutonomyMaturityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_path: Optional[str] = Field(default=None, description="Relative or absolute directory path to evaluate.")
     auth_token: Optional[str] = Field(default=None, description="Google OAuth ID token.")
     user_roles: Optional[List[str]] = Field(default=None, description="Fallback roles when REQUIRE_GOOGLE_AUTH=false.")
 
@@ -712,6 +721,101 @@ async def list_documents(
 
 
 @mcp.tool()
+async def evaluate_autonomy_maturity(
+    workspace_path: Optional[str] = None,
+    auth_token: Optional[str] = None,
+    user_roles: Optional[List[str]] = None,
+) -> str:
+    """
+    Evaluate repository or workspace against Factory.ai Autonomy Maturity Model (AMM) Eight Technical Pillars:
+    Style & Validation, Build System, Testing, Documentation, Dev Environment, Code Quality, Observability,
+    and Security & Governance. Returns deterministic L1-L5 maturity level, scores, and signals.
+    """
+    t_start = time.perf_counter()
+    try:
+        tool_req = MCPAutonomyMaturityRequest(
+            workspace_path=workspace_path,
+            auth_token=auth_token,
+            user_roles=user_roles,
+        )
+    except Exception as exc:
+        err_msg = f"Schema validation error: {str(exc)}"
+        tracer.record_mcp_tool_execution(
+            tool_name="evaluate_autonomy_maturity",
+            parameters={"workspace_path": workspace_path},
+            result=err_msg,
+            roles=user_roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=err_msg,
+        )
+        return f"⛔ {err_msg}"
+
+    roles, auth_err = _resolve_tool_roles(tool_req.auth_token, tool_req.user_roles)
+    if auth_err:
+        tracer.record_mcp_tool_execution(
+            tool_name="evaluate_autonomy_maturity",
+            parameters={"workspace_path": tool_req.workspace_path},
+            result=auth_err,
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=auth_err,
+        )
+        return f"⛔ {auth_err}"
+
+    allowed_perm, perm_err = check_tool_permission("evaluate_autonomy_maturity", roles)
+    if not allowed_perm:
+        tracer.record_mcp_tool_execution(
+            tool_name="evaluate_autonomy_maturity",
+            parameters={"workspace_path": tool_req.workspace_path},
+            result=perm_err,
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=perm_err,
+        )
+        return f"⛔ {perm_err}"
+
+    attribution = _resolve_caller_attribution(tool_req.auth_token)
+    caller_key = attribution.get("caller_sub") or "anonymous"
+    allowed_rate, _rem_reqs, retry_after = mcp_rate_limiter.allow_request(caller_key)
+    if not allowed_rate:
+        err_msg = f"Rate limit exceeded: caller '{caller_key}' hit threshold. Retry after {retry_after}s."
+        tracer.record_mcp_tool_execution(
+            tool_name="evaluate_autonomy_maturity",
+            parameters={"workspace_path": tool_req.workspace_path},
+            result=err_msg,
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=err_msg,
+        )
+        return f"⛔ {err_msg}"
+
+    try:
+        from agent import AutonomyMaturityEvaluator
+        target_path = Path(tool_req.workspace_path or ".").resolve()
+        report = AutonomyMaturityEvaluator.evaluate_repository(target_path)
+        payload = json.dumps(report.model_dump(), indent=2)
+        tracer.record_mcp_tool_execution(
+            tool_name="evaluate_autonomy_maturity",
+            parameters={"workspace_path": str(target_path)},
+            result=f"Evaluated: {report.maturity_level} ({report.total_score} pts)",
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+        )
+        return payload
+    except Exception as exc:
+        err_msg = f"Failed to evaluate autonomy maturity: {str(exc)}"
+        tracer.record_mcp_tool_execution(
+            tool_name="evaluate_autonomy_maturity",
+            parameters={"workspace_path": tool_req.workspace_path},
+            result=err_msg,
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=err_msg,
+        )
+        return f"⛔ {err_msg}"
+
+
+@mcp.tool()
 async def get_gateway_metadata(
     auth_token: Optional[str] = None,
 ) -> str:
@@ -759,6 +863,12 @@ async def get_gateway_metadata(
                 "rate_limit": f"{mcp_rate_limiter.max_requests} req / {mcp_rate_limiter.window_seconds}s",
             },
             {
+                "name": "evaluate_autonomy_maturity",
+                "risk_tier": "read_only_evaluator",
+                "required_roles": ["engineer", "compliance_auditor", "admin", "executive"],
+                "rate_limit": f"{mcp_rate_limiter.max_requests} req / {mcp_rate_limiter.window_seconds}s",
+            },
+            {
                 "name": "get_gateway_metadata",
                 "risk_tier": "discovery",
                 "required_roles": ["*"],
@@ -801,6 +911,7 @@ def get_budget_policy() -> str:
             "propose_patch",
             "run_sdlc_crew",
             "recall_hermes_skills",
+            "evaluate_autonomy_maturity",
             "get_gateway_metadata",
         ],
     })

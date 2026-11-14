@@ -282,3 +282,21 @@ def test_scaled_scan_tuples_by_role_selectivity():
     assert DatabaseManager.scaled_scan_tuples(['engineer']) == base * 2
     assert DatabaseManager.scaled_scan_tuples(['engineer', 'hr_manager']) == base
     assert DatabaseManager.scaled_scan_tuples(['a', 'b', 'c']) == max(5000, base // 2)
+
+
+@pytest.mark.asyncio
+async def test_mcp_evaluate_autonomy_maturity():
+    from app.mcp.gateway import evaluate_autonomy_maturity, MCPAutonomyMaturityRequest
+    import json
+
+    # Test schema validation
+    req = MCPAutonomyMaturityRequest(workspace_path=".")
+    assert req.workspace_path == "."
+    with pytest.raises(ValidationError):
+        MCPAutonomyMaturityRequest(workspace_path=".", unexpected_extra=123)
+
+    # Test tool execution with authorized role
+    res = await evaluate_autonomy_maturity(workspace_path=".", user_roles=["engineer"])
+    data = json.loads(res)
+    assert data["maturity_level"] in ("L1", "L2", "L3", "L4", "L5")
+    assert "pillar_scores" in data
