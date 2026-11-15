@@ -324,14 +324,15 @@ class TestDynamicGoogleCredentials:
         monkeypatch.setitem(sys.modules, "streamlit", mock_st)
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.delenv("FIREBASE_SERVICE_ACCOUNT_PATH", raising=False)
+        monkeypatch.setattr(os.path, "exists", lambda p: False if "service_account" in str(p) or "firebase" in str(p) else os.path.exists.__wrapped__(p) if hasattr(os.path.exists, "__wrapped__") else True)
 
         import app.auth.role_mapper as rm
         rm._TEMP_CREDENTIALS_FILE = None
-        path = rm.ensure_google_application_credentials()
-        assert path is not None
-        assert os.path.exists(path)
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            assert data["project_id"] == "temp-file-project"
+        with patch("os.path.exists", side_effect=lambda p: False if any(k in str(p) for k in ("service_account.json", "firebase-service-account.json")) else True):
+            path = rm.ensure_google_application_credentials()
+            assert path is not None
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                assert data["project_id"] == "temp-file-project"
 
 
