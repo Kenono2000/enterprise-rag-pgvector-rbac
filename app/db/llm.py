@@ -94,21 +94,21 @@ def get_openai_client() -> AsyncOpenAI | AsyncAzureOpenAI | None:
 
 def _get_embedding_model_or_deployment() -> str:
     if is_azure_backend():
-        return os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
+        return os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
     if is_databricks_backend():
         return os.getenv("DATABRICKS_EMBEDDING_ENDPOINT", "databricks-bge-large-en")
     if is_gcp_backend():
-        return os.getenv("GCP_EMBEDDING_MODEL", "text-embedding-004")
-    return "text-embedding-3-large"
+        return os.getenv("GCP_EMBEDDING_MODEL", "text-embedding-3-small")
+    return "text-embedding-3-small"
 
 
 def _get_chat_model_or_deployment(default_model: str = "gpt-4o") -> str:
     if is_azure_backend():
-        return os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT", default_model)
+        return os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT", "gpt-4o-mini")
     if is_databricks_backend():
-        return os.getenv("DATABRICKS_CHAT_ENDPOINT", "databricks-meta-llama-3-1-70b-instruct")
+        return os.getenv("DATABRICKS_CHAT_ENDPOINT", "databricks-meta-llama-3-1-8b-instruct")
     if is_gcp_backend():
-        return os.getenv("GCP_CHAT_MODEL", "gemini-1.5-pro")
+        return os.getenv("GCP_CHAT_MODEL", "gemini-1.5-flash")
     return default_model
 
 
@@ -116,7 +116,7 @@ async def generate_embedding(text: str, dimensions: int = 1536) -> list[float]:
     client = get_openai_client()
     if client:
         model = _get_embedding_model_or_deployment()
-        # For standard OpenAI text-embedding-3-large, dimensions can be customized.
+        # For standard OpenAI text-embedding-3-small, dimensions can be customized.
         # For Azure OpenAI, pass dimensions if supported or default to deployment behavior.
         kwargs = {"model": model, "input": text}
         if dimensions:

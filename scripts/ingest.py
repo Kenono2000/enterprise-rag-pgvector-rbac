@@ -205,7 +205,7 @@ def ingest_data(
                             text,
                             len(text.split()),
                             str(quantize_to_halfvec(emb)),
-                            "text-embedding-3-large",
+                            "text-embedding-3-small",
                         )
                         for idx, (_, text, emb, chunk) in enumerate(items)
                     ]

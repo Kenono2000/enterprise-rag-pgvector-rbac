@@ -288,7 +288,7 @@ def split_chunks(
     if use_tokens:
         try:
             text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-                model_name="text-embedding-3-large",
+                model_name="text-embedding-3-small",
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 separators=separators,
@@ -407,7 +407,7 @@ def embed_chunks_with_retry(
 
 def get_embedding_model(api_key: str) -> OpenAIEmbeddings:
     return OpenAIEmbeddings(
-        model="text-embedding-3-large",
+        model="text-embedding-3-small",
         dimensions=1536,
         openai_api_key=api_key
     )
