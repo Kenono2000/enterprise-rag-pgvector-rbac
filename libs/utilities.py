@@ -221,7 +221,7 @@ def get_documents(file_paths: list[str]) -> list[Document]:
                                 content_parts.append(row_text)
                     text = "\n\n".join(content_parts)
                     documents.append(Document(page_content=text, metadata={"source": file_path}))
-                        elif suffix == ".json":
+            elif suffix == ".json":
                 try:
                     import json
                     data = json.loads(Path(file_path).read_text(encoding="utf-8"))
