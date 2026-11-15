@@ -21,12 +21,12 @@ def test_schema_sql_contains_normalized_tables_and_indexes():
     sql_text = schema_path.read_text(encoding="utf-8")
 
     # 1. Master documents table
-    assert "CREATE TABLE IF NOT EXISTS documents" in sql_text
+    assert "CREATE TABLE documents" in sql_text
     assert "file_hash CHAR(64) UNIQUE" in sql_text
     assert "allowed_roles JSONB" in sql_text
 
     # 2. Document chunks table with foreign key, ON DELETE CASCADE, and 16-bit halfvec(1536) column
-    assert "CREATE TABLE IF NOT EXISTS document_chunks" in sql_text
+    assert "CREATE TABLE document_chunks" in sql_text
     assert "REFERENCES documents(id) ON DELETE CASCADE" in sql_text
     assert "embedding vector(1536)" in sql_text
     assert "embedding_halfvec halfvec(1536)" in sql_text
@@ -53,37 +53,30 @@ def test_schema_sql_contains_normalized_tables_and_indexes():
     assert "USING gin (tsv)" in sql_text
 
     # 7. Transactional Outbox & LangGraph PostgreSQL Checkpoint Persistence
-    assert "CREATE TABLE IF NOT EXISTS sdlc_outbox_events" in sql_text
+    assert "CREATE TABLE sdlc_outbox_events" in sql_text
     assert "idx_sdlc_outbox_pending" in sql_text
-    assert "CREATE TABLE IF NOT EXISTS sdlc_workflow_checkpoints" in sql_text
+    assert "CREATE TABLE sdlc_workflow_checkpoints" in sql_text
     assert "idx_sdlc_checkpoints_thread" in sql_text
 
-    # 8. Consolidated legacy migration and cleanup logic in schema.sql
-    assert "DROP TABLE enterprise_documents CASCADE;" in sql_text
-    assert "DROP VIEW IF EXISTS enterprise_documents CASCADE;" in sql_text
-    assert "DROP FUNCTION IF EXISTS trg_enterprise_documents_upsert CASCADE;" in sql_text
-
-    # 9. Token Consumption Ledger & Managed Budget Limits
-    assert "CREATE TABLE IF NOT EXISTS token_consumption_ledger" in sql_text
+    # 8. Token Consumption Ledger & Managed Budget Limits
+    assert "CREATE TABLE token_consumption_ledger" in sql_text
     assert "idx_token_ledger_caller_time" in sql_text
-    assert "CREATE TABLE IF NOT EXISTS token_managed_limits" in sql_text
+    assert "CREATE TABLE token_managed_limits" in sql_text
     assert "idx_token_limits_caller" in sql_text
     assert "INSERT INTO token_managed_limits" in sql_text
 
 
 def test_consolidated_schema_migration_integrity():
-    """Verify schema.sql consolidates complete initialization, migration, and seed logic."""
+    """Verify schema.sql consolidates complete initialization and seed logic."""
     schema_path = Path(__file__).resolve().parent.parent / "schema.sql"
     assert schema_path.exists(), "schema.sql must exist"
 
     sql = schema_path.read_text(encoding="utf-8")
     assert "CREATE EXTENSION IF NOT EXISTS vector;" in sql
     assert "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";" in sql
-    assert "CREATE TABLE IF NOT EXISTS documents" in sql
-    assert "CREATE TABLE IF NOT EXISTS document_chunks" in sql
+    assert "CREATE TABLE documents" in sql
+    assert "CREATE TABLE document_chunks" in sql
     assert "ON DELETE CASCADE" in sql
-    assert "DROP TABLE enterprise_documents CASCADE;" in sql
-    assert "DROP VIEW IF EXISTS enterprise_documents CASCADE;" in sql
     assert "INSERT INTO documents" in sql
     assert "INSERT INTO document_chunks" in sql
 

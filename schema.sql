@@ -1,15 +1,36 @@
 -- ============================================================================
 -- schema.sql
 -- PostgreSQL 16 + pgvector Normalized Architecture with Dual Indexing
--- Consolidated Database Initialization & Migration Script
+-- Consolidated Database Initialization, Migration & Seed Script
 -- ============================================================================
+
+-- Set strict search path and error handling
+SET client_min_messages = warning;
 
 -- 1. Create Required Extensions (Idempotent)
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+-- ============================================================================
+-- Helper Functions & Triggers for Automatic Timestamp Updates
+-- ============================================================================
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 -- 2. Master Documents Table (Metadata, Governance, De-duplication)
-CREATE TABLE IF NOT EXISTS documents (
+DROP TABLE IF EXISTS document_chunks CASCADE;
+DROP TABLE IF EXISTS documents CASCADE;
+DROP TABLE IF EXISTS sdlc_outbox_events CASCADE;
+DROP TABLE IF EXISTS sdlc_workflow_checkpoints CASCADE;
+DROP TABLE IF EXISTS token_consumption_ledger CASCADE;
+DROP TABLE IF EXISTS token_managed_limits CASCADE;
+
+CREATE TABLE documents (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     document_id VARCHAR(100) NOT NULL UNIQUE,
     title VARCHAR(255) NOT NULL,
@@ -22,8 +43,15 @@ CREATE TABLE IF NOT EXISTS documents (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Trigger for documents updated_at
+DROP TRIGGER IF EXISTS trg_documents_updated_at ON documents;
+CREATE TRIGGER trg_documents_updated_at
+    BEFORE UPDATE ON documents
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
 -- 3. Document Chunks Table (Vector Embeddings, 16-bit halfvec Compaction, Content, Chunk Sequence)
-CREATE TABLE IF NOT EXISTS document_chunks (
+CREATE TABLE document_chunks (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     chunk_id VARCHAR(128) NOT NULL UNIQUE,
@@ -36,50 +64,6 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
-
--- 4. Clean up / Migrate legacy enterprise_documents table or views if present
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.tables 
-        WHERE table_schema = CURRENT_SCHEMA() 
-          AND table_name = 'enterprise_documents' 
-          AND table_type = 'BASE TABLE'
-    ) THEN
-        -- Migrate master documents
-        INSERT INTO documents (document_id, title, allowed_roles, created_at)
-        SELECT 
-            document_id,
-            title,
-            allowed_roles,
-            created_at
-        FROM enterprise_documents
-        ON CONFLICT (document_id) DO UPDATE
-        SET title = EXCLUDED.title, allowed_roles = EXCLUDED.allowed_roles;
-
-        -- Migrate chunks
-        INSERT INTO document_chunks (document_id, chunk_id, chunk_index, content, embedding, embedding_model, created_at)
-        SELECT 
-            d.id,
-            ed.document_id,
-            0,
-            ed.content,
-            ed.embedding,
-            COALESCE(ed.embedding_model, 'text-embedding-3-large'),
-            ed.created_at
-        FROM enterprise_documents ed
-        JOIN documents d ON ed.document_id = d.document_id
-        ON CONFLICT (chunk_id) DO UPDATE
-        SET content = EXCLUDED.content, embedding = EXCLUDED.embedding;
-
-        DROP TABLE enterprise_documents CASCADE;
-    END IF;
-END $$;
-
--- Drop any legacy views or triggers if they exist
-DROP TRIGGER IF EXISTS trg_enterprise_docs_io_insert ON enterprise_documents;
-DROP VIEW IF EXISTS enterprise_documents CASCADE;
-DROP FUNCTION IF EXISTS trg_enterprise_documents_upsert CASCADE;
 
 -- ============================================================================
 -- 5. High-Performance Dual Indexing & Lookup Indexes
@@ -129,7 +113,7 @@ ON document_chunks
 USING gin (tsv);
 
 -- 5.7 Transactional Outbox & Distributed Worker Queue (FOR UPDATE SKIP LOCKED)
-CREATE TABLE IF NOT EXISTS sdlc_outbox_events (
+CREATE TABLE sdlc_outbox_events (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     event_key VARCHAR(128) NOT NULL UNIQUE,
     aggregate_type VARCHAR(64) NOT NULL DEFAULT 'sdlc_webhook',
@@ -147,7 +131,7 @@ ON sdlc_outbox_events (created_at ASC)
 WHERE status = 'PENDING';
 
 -- 5.8 LangGraph PostgreSQL Checkpoint Persistence (PostgresSaver Crash-Resilient Resume)
-CREATE TABLE IF NOT EXISTS sdlc_workflow_checkpoints (
+CREATE TABLE sdlc_workflow_checkpoints (
     thread_id VARCHAR(255) NOT NULL,
     checkpoint_ns VARCHAR(255) NOT NULL DEFAULT '',
     checkpoint_id VARCHAR(255) NOT NULL,
@@ -162,7 +146,7 @@ CREATE INDEX IF NOT EXISTS idx_sdlc_checkpoints_thread
 ON sdlc_workflow_checkpoints (thread_id, created_at DESC);
 
 -- 5.9 Token Consumption Ledger & Managed Budget Limits
-CREATE TABLE IF NOT EXISTS token_consumption_ledger (
+CREATE TABLE token_consumption_ledger (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     caller_id VARCHAR(128) NOT NULL,
     model VARCHAR(100) NOT NULL DEFAULT 'gpt-4o',
@@ -180,7 +164,7 @@ ON token_consumption_ledger (caller_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_token_ledger_created_at
 ON token_consumption_ledger (created_at DESC);
 
-CREATE TABLE IF NOT EXISTS token_managed_limits (
+CREATE TABLE token_managed_limits (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     caller_id VARCHAR(128) NOT NULL UNIQUE,
     max_budget_tokens BIGINT NOT NULL DEFAULT 50000,
@@ -193,6 +177,13 @@ CREATE TABLE IF NOT EXISTS token_managed_limits (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Trigger for token_managed_limits updated_at
+DROP TRIGGER IF EXISTS trg_token_managed_limits_updated_at ON token_managed_limits;
+CREATE TRIGGER trg_token_managed_limits_updated_at
+    BEFORE UPDATE ON token_managed_limits
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
 
 CREATE INDEX IF NOT EXISTS idx_token_limits_caller
 ON token_managed_limits (caller_id);
