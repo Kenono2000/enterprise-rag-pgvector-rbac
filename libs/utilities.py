@@ -221,6 +221,31 @@ def get_documents(file_paths: list[str]) -> list[Document]:
                                 content_parts.append(row_text)
                     text = "\n\n".join(content_parts)
                     documents.append(Document(page_content=text, metadata={"source": file_path}))
+                        elif suffix == ".json":
+                try:
+                    import json
+                    data = json.loads(Path(file_path).read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        body = data.get("body", "")
+                        metadata = {
+                            "source": data.get("url", file_path),
+                            "title": data.get("title", ""),
+                            "author": data.get("author", ""),
+                        }
+                        documents.append(Document(page_content=body, metadata=metadata))
+                    elif isinstance(data, list):
+                        for item in data:
+                            body = item.get("body", "")
+                            metadata = {
+                                "source": item.get("url", file_path),
+                                "title": item.get("title", ""),
+                                "author": item.get("author", ""),
+                            }
+                            documents.append(Document(page_content=body, metadata=metadata))
+                except Exception as e:
+                    print(f"⚠️ Failed to load JSON {file_path}: {e}")
+                else:
+                    print(f"  [✓] Loaded {file_path}")
             else:
                 print(f"⚠️ Skipping unsupported file: {file_path}")
                 continue

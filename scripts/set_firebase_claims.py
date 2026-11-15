@@ -1,23 +1,23 @@
 """
-scripts/set_firebase_claims.py
+set_firebase_claims.py
 ------------------------------
 One-shot CLI tool to set (or clear) app_roles custom claims on a Firebase user.
 
 Usage
 -----
 # Assign roles to a user by UID
-python scripts/set_firebase_claims.py --uid zblopHzxXgVkCE6e9mlRFWHeklt1 --roles finance_executive
+python set_firebase_claims.py --uid zblopHzxXgVkCE6e9mlRFWHeklt1 --roles finance_executive
 # Assign roles by email (looks up the UID automatically)
-python scripts/set_firebase_claims.py --email kenono2000@gmail.com --roles finance_executive
+python set_firebase_claims.py --email kenono2000@gmail.com --roles engineer disciple
 
 # Show current claims for a user
-python scripts/set_firebase_claims.py --email kenono2000@gmail.com --show
+python set_firebase_claims.py --email kenono2000@gmail.com --show
 
 # Clear all app_roles claims for a user
-python scripts/set_firebase_claims.py --uid zblopHzxXgVkCE6e9mlRFWHeklt1 --clear
+python set_firebase_claims.py --uid zblopHzxXgVkCE6e9mlRFWHeklt1 --clear
 
-# Bulk-assign from a CSV file (see scripts/sample_roles.csv)
-python scripts/set_firebase_claims.py --csv scripts/sample_roles.csv
+# Bulk-assign from a CSV file (see sample_roles.csv)
+python set_firebase_claims.py --csv sample_roles.csv
 
 Prerequisites
 -------------
@@ -28,7 +28,7 @@ Prerequisites
 2. Set the path in your environment (or pass via --creds):
       $env:GOOGLE_APPLICATION_CREDENTIALS = "C:\\path\\to\\firebase-service-account.json"
    OR pass directly:
-      python scripts/set_firebase_claims.py --creds firebase-service-account.json ...
+      python set_firebase_claims.py --creds firebase-service-account.json ...
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ KNOWN_ROLES = {
     "hr_manager",
     "executive",
     "engineer",
+    "disciple"
 }
 
 

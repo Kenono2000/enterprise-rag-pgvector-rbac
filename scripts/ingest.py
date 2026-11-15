@@ -4,12 +4,13 @@ scripts/ingest.py
 Document ingestion pipeline for PostgreSQL 16 + pgvector.
 Supports normalized schema (documents + document_chunks) with dual indexing (HNSW halfvec + GIN),
 Contextual Chunk Headers, cryptographic SHA-256 de-duplication, batched embeddings, and backward-compatible fallbacks.
+Supported file types: .pdf, .md, .markdown, .docx, .txt, .json
 
 Usage:
     python scripts/ingest.py <path_to_file_or_directory> [path2 ...] [options]
 
 Parameters:
-    paths                  One or more file paths or directory paths to ingest (.pdf, .md, .docx, .txt).
+    paths                  One or more file paths or directory paths to ingest (.pdf, .md, .markdown, .docx, .txt, .json).
     --roles                Allowed RBAC roles for ingested documents (default: engineer).
                            Example: --roles engineer manager admin
     --force                Force re-ingestion of already existing documents.
@@ -246,7 +247,7 @@ def main():
 
     file_paths: list[str] = []
     ignored_dir_names = {".git", ".venv", ".pytest_cache", "__pycache__", "node_modules", ".vscode", ".devcontainer"}
-    valid_suffixes = {".pdf", ".md", ".markdown", ".docx", ".txt"}
+    valid_suffixes = {".pdf", ".md", ".markdown", ".docx", ".txt", ".json"}
     for path in args.paths:
         p = Path(path)
         if p.is_dir():
