@@ -4,6 +4,26 @@ scripts/ingest.py
 Document ingestion pipeline for PostgreSQL 16 + pgvector.
 Supports normalized schema (documents + document_chunks) with dual indexing (HNSW halfvec + GIN),
 Contextual Chunk Headers, cryptographic SHA-256 de-duplication, batched embeddings, and backward-compatible fallbacks.
+
+Usage:
+    python scripts/ingest.py <path_to_file_or_directory> [path2 ...] [options]
+
+Parameters:
+    paths                  One or more file paths or directory paths to ingest (.pdf, .md, .docx, .txt).
+    --roles                Allowed RBAC roles for ingested documents (default: engineer).
+                           Example: --roles engineer manager admin
+    --force                Force re-ingestion of already existing documents.
+    --batch-size           Embedding generation batch size (default: 64).
+
+Examples:
+    # Ingest a directory of documents with default role (engineer):
+    python scripts/ingest.py ./data
+
+    # Ingest a specific file with custom roles:
+    python scripts/ingest.py ./docs/architecture.pdf --roles engineer manager
+
+    # Force re-ingestion with custom batch size:
+    python scripts/ingest.py ./data --force --batch-size 128
 """
 
 from __future__ import annotations
