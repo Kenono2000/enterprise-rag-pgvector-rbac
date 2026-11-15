@@ -58,6 +58,7 @@ class AzureSearchAdapter:
         limit: int = 3,
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
+        from app.db.azure_search import azure_hybrid_search
         return await azure_hybrid_search(
             query_text=query_text,
             query_vector=query_vector,
@@ -77,6 +78,7 @@ class GCPSearchAdapter:
         limit: int = 3,
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
+        from app.db.gcp_search import gcp_hybrid_search
         return await gcp_hybrid_search(
             query_text=query_text,
             query_vector=query_vector,
@@ -96,6 +98,7 @@ class DatabricksSearchAdapter:
         limit: int = 3,
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
+        from app.db.databricks_search import databricks_hybrid_search
         return await databricks_hybrid_search(
             query_text=query_text,
             query_vector=query_vector,

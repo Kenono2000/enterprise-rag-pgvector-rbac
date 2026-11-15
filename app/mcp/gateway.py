@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from fastmcp import FastMCP
 from app.db.manager import DatabaseManager
 from app.db.llm import generate_embedding, chat_completion
+from app.db.adapters import get_vector_search_adapter
 from app.auth.jwks import verify_google_token
 from app.auth.role_mapper import extract_roles
 from app.observability import tracer
@@ -251,16 +252,10 @@ async def search_sdlc_context(
 
     query_vector = await generate_embedding(validated.question)
 
-    backend = os.getenv("RETRIEVAL_BACKEND", "").lower()
-    if backend == "azure":
-        from app.db.azure_search import azure_hybrid_search
-        rows = await azure_hybrid_search(validated.question, query_vector, roles, limit=3)
-    elif backend in ("gcp", "google_cloud", "vertex"):
-        from app.db.gcp_search import gcp_hybrid_search
-        rows = await gcp_hybrid_search(validated.question, query_vector, roles, limit=3)
-    elif backend in ("databricks", "databrick"):
-        from app.db.databricks_search import databricks_hybrid_search
-        rows = await databricks_hybrid_search(validated.question, query_vector, roles, limit=3)
+    backend = os.getenv("RETRIEVAL_BACKEND", "pgvector").lower()
+    if backend in ("azure", "gcp", "google_cloud", "vertex", "databricks", "databrick"):
+        adapter = get_vector_search_adapter(backend)
+        rows = await adapter.search(validated.question, query_vector, roles, limit=3)
     else:
         rows = await DatabaseManager.secure_search(query_vector, roles)
 
@@ -732,7 +727,10 @@ async def get_gateway_metadata(
         "bearer_methods_supported": ["header", "body"],
         "transports_supported": ["http", "streamable-http", "stdio", "sse"],
         "preferred_network_transport": "http",
-        "rfc_compliance": ["RFC 9728", "RFC 8707", "OAuth 2.1"],
+        "streamable_http_transport": "streamable-http",
+        "transport_headers_supported": ["Mcp-Method", "Mcp-Name"],
+        "stateless_mode_supported": True,
+        "rfc_compliance": ["RFC 9728", "RFC 8707", "OAuth 2.1", "MCP 2026-07-28"],
         "tool_catalog": [
             {
                 "name": "search_sdlc_context",

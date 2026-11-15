@@ -1051,6 +1051,8 @@ class PostgresCheckpointSaver(MemorySaver):
 
 
 PostgresSaver = PostgresCheckpointSaver
+BadgerSaver = PostgresCheckpointSaver
+BadgerLSMCheckpointSaver = PostgresCheckpointSaver
 
 
 # ---------------------------------------------------------------------------

@@ -27,7 +27,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import settings
-from app.db import DatabaseManager, generate_embedding, chat_completion, chat_completion_stream
+from app.db import DatabaseManager, generate_embedding, chat_completion, chat_completion_stream, get_vector_search_adapter
 from app.rag import ContextAssembler
 from app.auth import verify_google_token, extract_roles, KNOWN_ROLES
 from app.observability import tracer
@@ -268,6 +268,13 @@ async def trace_http_requests(request: Request, call_next):
             elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
             span_data["attributes"]["http.status_code"] = response.status_code
             span_data["attributes"]["http.duration_ms"] = elapsed_ms
+            # Mirror RFC 2026/Streamable HTTP transport headers when present for zero-DPI gateway routing
+            mcp_method = request.headers.get("Mcp-Method")
+            mcp_name = request.headers.get("Mcp-Name")
+            if mcp_method:
+                response.headers["Mcp-Method"] = mcp_method
+            if mcp_name:
+                response.headers["Mcp-Name"] = mcp_name
             return response
         except Exception as exc:
             elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
@@ -364,15 +371,9 @@ async def query_rag(
     backend = os.getenv("RETRIEVAL_BACKEND", "pgvector").lower()
     if isinstance(DatabaseManager.secure_search, (AsyncMock, MagicMock)) and not isinstance(DatabaseManager.hybrid_search, (AsyncMock, MagicMock)):
         rows = await DatabaseManager.secure_search(query_vector, user.roles)
-    elif backend == "azure":
-        from app.db.azure_search import azure_hybrid_search
-        rows = await azure_hybrid_search(request.question, query_vector, user.roles, limit=3)
-    elif backend in ("gcp", "google_cloud", "vertex"):
-        from app.db.gcp_search import gcp_hybrid_search
-        rows = await gcp_hybrid_search(request.question, query_vector, user.roles, limit=3)
-    elif backend in ("databricks", "databrick"):
-        from app.db.databricks_search import databricks_hybrid_search
-        rows = await databricks_hybrid_search(request.question, query_vector, user.roles, limit=3)
+    elif backend in ("azure", "gcp", "google_cloud", "vertex", "databricks", "databrick"):
+        adapter = get_vector_search_adapter(backend)
+        rows = await adapter.search(request.question, query_vector, user.roles, limit=3)
     elif request.mode == "dense":
         rows = await DatabaseManager.secure_search(query_vector, user.roles)
     else:
@@ -519,15 +520,9 @@ async def query_rag_stream(
     backend = os.getenv("RETRIEVAL_BACKEND", "pgvector").lower()
     if isinstance(DatabaseManager.secure_search, (AsyncMock, MagicMock)) and not isinstance(DatabaseManager.hybrid_search, (AsyncMock, MagicMock)):
         rows = await DatabaseManager.secure_search(query_vector, user.roles)
-    elif backend == "azure":
-        from app.db.azure_search import azure_hybrid_search
-        rows = await azure_hybrid_search(request.question, query_vector, user.roles, limit=3)
-    elif backend in ("gcp", "google_cloud", "vertex"):
-        from app.db.gcp_search import gcp_hybrid_search
-        rows = await gcp_hybrid_search(request.question, query_vector, user.roles, limit=3)
-    elif backend in ("databricks", "databrick"):
-        from app.db.databricks_search import databricks_hybrid_search
-        rows = await databricks_hybrid_search(request.question, query_vector, user.roles, limit=3)
+    elif backend in ("azure", "gcp", "google_cloud", "vertex", "databricks", "databrick"):
+        adapter = get_vector_search_adapter(backend)
+        rows = await adapter.search(request.question, query_vector, user.roles, limit=3)
     elif request.mode == "dense":
         rows = await DatabaseManager.secure_search(query_vector, user.roles)
     else:

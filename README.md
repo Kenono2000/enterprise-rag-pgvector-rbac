@@ -456,7 +456,9 @@ Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional
 | Innovation | Relevance | Implementation Status |
 | :--- | :--- | :--- |
 | Hybrid reasoning with thinking budget | Complex multi-hop RAG queries benefit from extended reasoning | ✅ Implemented in `app/main.py` + `app/rag/context.py` |
-| MCP server exposure | External AI agents (Claude Code, etc.) can query the RAG pipeline via MCP | ✅ FastMCP gateway already exposes `search_sdlc_context`, `list_documents`, etc. |
-| RAG Triad observability (context relevance, faithfulness, answer relevance) | Detects hallucinations and retrieval drift | ⬜ Planned — integrate with `app/observability.py` tracer |
+| MCP server exposure & stateless transport | External AI agents query RAG via Streamable HTTP with `Mcp-Method` / `Mcp-Name` | ✅ FastMCP gateway exposes tools with RFC 9728 metadata & transport reflection |
+| Decoupled VectorSearchProvider protocols | Multi-cloud engine abstraction adhering to PEP 544/695 subtyping | ✅ Implemented in `app/db/protocols.py`, `app/db/adapters.py`, & `app/main.py` |
+| LangGraph Badger LSM checkpointer aliases | Crash-resilient agent state machine persistence and time-travel debugging | ✅ Implemented in `agent/workflow.py` (`BadgerSaver` / `BadgerLSMCheckpointSaver`) |
+| RAG Triad observability (context relevance, faithfulness, answer relevance) | Detects hallucinations and retrieval drift | ✅ Implemented via `GroundingGuardrail` & `app/observability.py` tracer |
 | Agentic SDLC coding (Claude Code pattern) | Autonomous patch proposal, test, and repair | ✅ LangGraph + CrewAI + Hermes workflow in `agent/workflow.py` |
 

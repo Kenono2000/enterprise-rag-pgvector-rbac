@@ -85,3 +85,15 @@ async def test_pgvector_adapter_delegation():
         assert res[0]["document_id"] == "doc-1"
         assert res[0]["similarity"] == 0.89
         mock_search.assert_awaited_once()
+
+
+def test_badger_lsm_checkpointer_aliases():
+    """Verify BadgerSaver and BadgerLSMCheckpointSaver alias LangGraph crash-resilient checkpointers."""
+    from agent.workflow import BadgerSaver, BadgerLSMCheckpointSaver, PostgresCheckpointSaver
+    from agent import BadgerSaver as BSaver, BadgerLSMCheckpointSaver as BLSMSaver
+
+    assert BadgerSaver is PostgresCheckpointSaver
+    assert BadgerLSMCheckpointSaver is PostgresCheckpointSaver
+    assert BSaver is PostgresCheckpointSaver
+    assert BLSMSaver is PostgresCheckpointSaver
+
