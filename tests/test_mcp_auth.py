@@ -282,3 +282,10 @@ def test_scaled_scan_tuples_by_role_selectivity():
     assert DatabaseManager.scaled_scan_tuples(['engineer']) == base * 2
     assert DatabaseManager.scaled_scan_tuples(['engineer', 'hr_manager']) == base
     assert DatabaseManager.scaled_scan_tuples(['a', 'b', 'c']) == max(5000, base // 2)
+
+
+def test_fastmcp_streamable_http_mounted_on_fastapi():
+    """Verify FastMCP 4 Streamable HTTP application is mounted at /mcp on FastAPI."""
+    from app.main import app
+    route_paths = [getattr(r, "path", None) for r in app.routes]
+    assert "/mcp" in route_paths

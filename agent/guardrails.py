@@ -254,14 +254,22 @@ class PolicyEngine:
                     if isinstance(node.func, ast.Name):
                         if node.func.id in ("exec", "eval", "__import__", "compile"):
                             violations.append(f"Forbidden dynamic execution: {node.func.id}()")
+                        elif node.func.id == "getattr":
+                            if (
+                                len(node.args) >= 2
+                                and isinstance(node.args[1], ast.Constant)
+                                and isinstance(node.args[1].value, str)
+                                and node.args[1].value in ("system", "popen", "loads", "load", "eval", "exec", "__import__")
+                            ):
+                                violations.append(f"Forbidden dynamic getattr resolution: getattr(..., '{node.args[1].value}')")
                         elif node.func.id == "open":
                             if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
                                 path_val = node.args[0].value.replace("\\", "/")
                                 if ".." in path_val.split("/") or path_val.startswith("../") or "/../" in path_val:
                                     violations.append(f"Forbidden path traversal in open(): '{node.args[0].value}'")
                     elif isinstance(node.func, ast.Attribute):
-                        if node.func.attr == "__import__":
-                            violations.append("Forbidden dunder import: __import__()")
+                        if node.func.attr in ("exec", "eval", "__import__", "compile"):
+                            violations.append(f"Forbidden dynamic execution: {node.func.attr}()")
                         elif isinstance(node.func.value, ast.Name):
                             pair = (node.func.value.id, node.func.attr)
                             if pair in cls.FORBIDDEN_ATTR_CALLS:

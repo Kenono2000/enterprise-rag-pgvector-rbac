@@ -1,4 +1,5 @@
 import os
+import math
 import struct
 import asyncio
 import asyncpg
@@ -31,6 +32,7 @@ class DatabaseManager:
     _loop: Optional[asyncio.AbstractEventLoop] = None
     HNSW_ITERATIVE_SCAN_MODE: str = os.getenv("PGVECTOR_ITERATIVE_SCAN", "relaxed_order")
     HNSW_MAX_SCAN_TUPLES: int = int(os.getenv("PGVECTOR_MAX_SCAN_TUPLES", "20000"))
+    HNSW_EF_SEARCH: int = int(os.getenv("PGVECTOR_EF_SEARCH", "40"))
     USE_HALFVEC_INDEX: bool = os.getenv("PGVECTOR_USE_HALFVEC", "true").lower() == "true"
 
     @classmethod
@@ -38,12 +40,20 @@ class DatabaseManager:
         """
         Quantize float vector values to IEEE 754 16-bit half-precision (`halfvec(1536)`)
         and serialize into a pgvector literal string `[v1,v2,...]` for 50% RAM compaction.
+        Sanitizes NaN and Infinity to zero to prevent malformed SQL literals.
         """
         quantized: List[str] = []
         for val in query_vector[:dimensions]:
             try:
-                f16 = struct.unpack("e", struct.pack("e", float(val)))[0]
-                quantized.append(str(round(f16, 6)))
+                fval = float(val)
+                if math.isnan(fval) or math.isinf(fval):
+                    quantized.append("0.0")
+                    continue
+                f16 = struct.unpack("e", struct.pack("e", fval))[0]
+                if math.isnan(f16) or math.isinf(f16):
+                    quantized.append("0.0")
+                else:
+                    quantized.append(str(round(f16, 6)))
             except (OverflowError, ValueError):
                 quantized.append("0.0")
         return f"[{','.join(quantized)}]"
@@ -54,11 +64,12 @@ class DatabaseManager:
         conn: Any,
         mode: Optional[str] = None,
         max_scan_tuples: Optional[int] = None,
+        ef_search: Optional[int] = None,
     ) -> bool:
         """
         Configure pgvector 0.8+ HNSW iterative index scans on a connection so selective
         RBAC WHERE clauses (`allowed_roles ?| $2::text[]`) never suffer from ANN overfiltering.
-        Gracefully returns False on pgvector < 0.8.0.
+        Optionally sets `hnsw.ef_search` when provided. Gracefully returns False on pgvector < 0.8.0.
         """
         scan_mode = (mode or cls.HNSW_ITERATIVE_SCAN_MODE or "relaxed_order").strip()
         if scan_mode not in ("off", "strict_order", "relaxed_order"):
@@ -67,6 +78,8 @@ class DatabaseManager:
         try:
             await conn.execute(f"SET hnsw.iterative_scan = '{scan_mode}'")
             await conn.execute(f"SET hnsw.max_scan_tuples = {tuples_limit}")
+            if ef_search is not None:
+                await conn.execute(f"SET hnsw.ef_search = {int(ef_search)}")
             return True
         except Exception:
             return False
@@ -84,6 +97,22 @@ class DatabaseManager:
         if count == 2:
             return base
         return max(5000, base // 2)
+
+    @classmethod
+    def scaled_ef_search(cls, roles: List[str]) -> int:
+        """
+        Scale `hnsw.ef_search` dynamically by role cardinality:
+        - Narrow callers (<= 1 role): Deeper candidate exploration (2x base = 80)
+        - Moderate callers (2 roles): Base candidate exploration (40)
+        - Broad callers (>= 3 roles): Fast candidate exploration (floor 20, base // 2)
+        """
+        base = int(cls.HNSW_EF_SEARCH or 40)
+        count = len({r for r in roles if r})
+        if count <= 1:
+            return base * 2
+        if count == 2:
+            return base
+        return max(20, base // 2)
 
     @classmethod
     async def get_pool(cls) -> asyncpg.Pool:
@@ -177,7 +206,11 @@ class DatabaseManager:
             LIMIT $3
         """
         async with pool.acquire() as conn:
-            await cls.configure_iterative_scan(conn, max_scan_tuples=cls.scaled_scan_tuples(sanitized_roles))
+            await cls.configure_iterative_scan(
+                conn,
+                max_scan_tuples=cls.scaled_scan_tuples(sanitized_roles),
+                ef_search=cls.scaled_ef_search(sanitized_roles),
+            )
             return await conn.fetch(sql, vector_str, sanitized_roles, limit)
 
     @classmethod
@@ -304,7 +337,11 @@ class DatabaseManager:
         """
         try:
             async with pool.acquire() as conn:
-                await cls.configure_iterative_scan(conn, max_scan_tuples=cls.scaled_scan_tuples(sanitized_roles))
+                await cls.configure_iterative_scan(
+                    conn,
+                    max_scan_tuples=cls.scaled_scan_tuples(sanitized_roles),
+                    ef_search=cls.scaled_ef_search(sanitized_roles),
+                )
                 fused_rows = await conn.fetch(
                     fused_sql, vector_str, query_text, sanitized_roles, fetch_limit,
                     float(dense_weight), float(sparse_weight), int(rrf_k), limit,
@@ -329,7 +366,11 @@ class DatabaseManager:
             pass  # Fall back to dual-query Python RRF (e.g. missing tsv column or older Postgres)
 
         async with pool.acquire() as conn:
-            await cls.configure_iterative_scan(conn, max_scan_tuples=cls.scaled_scan_tuples(sanitized_roles))
+            await cls.configure_iterative_scan(
+                conn,
+                max_scan_tuples=cls.scaled_scan_tuples(sanitized_roles),
+                ef_search=cls.scaled_ef_search(sanitized_roles),
+            )
             dense_rows = await conn.fetch(dense_sql, vector_str, sanitized_roles, fetch_limit)
             try:
                 sparse_rows = await conn.fetch(sparse_sql, query_text, vector_str, sanitized_roles, fetch_limit)

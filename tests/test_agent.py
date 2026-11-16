@@ -74,6 +74,14 @@ def test_ast_verification():
     violations = PolicyEngine.verify_ast(pickle_code)
     assert any("pickle.loads" in v for v in violations)
 
+    dynamic_getattr = "getattr(os, 'system')('ls')"
+    violations = PolicyEngine.verify_ast(dynamic_getattr)
+    assert any("Forbidden dynamic getattr" in v for v in violations)
+
+    dynamic_attr_eval = "builtins.eval('1+1')"
+    violations = PolicyEngine.verify_ast(dynamic_attr_eval)
+    assert any("Forbidden dynamic execution: eval()" in v for v in violations)
+
     assert PolicyEngine.verify_protected_path("agent/guardrails.py") != []
     assert PolicyEngine.verify_protected_path(".env") != []
     assert PolicyEngine.verify_protected_path("app/main.py") == []

@@ -249,6 +249,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Mount FastMCP 4 Streamable HTTP MCP Sub-Application at /mcp
+try:
+    from app.mcp.gateway import mcp as mcp_gateway
+    app.mount("/mcp", mcp_gateway.http_app())
+    logger.info("Mounted FastMCP 4 Streamable HTTP application at /mcp")
+except Exception as _mcp_mount_err:
+    logger.warning("FastMCP HTTP app mount deferred: %s", _mcp_mount_err)
+
 
 @app.middleware("http")
 async def trace_http_requests(request: Request, call_next):

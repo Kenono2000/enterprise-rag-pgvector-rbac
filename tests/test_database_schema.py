@@ -325,3 +325,40 @@ async def test_database_manager_halfvec_and_workflow_checkpoints():
         assert loaded["checkpoint_id"] == "ckpt-99-0"
         assert loaded["checkpoint_payload"]["branch"] == "feature/AGENT-99-fix"
         assert loaded["metadata"]["status"] == "pending_approval"
+
+
+def test_format_halfvec_nan_inf_sanitization():
+    """Verify NaN and Infinity float values in input vectors serialize to safe '0.0' literals."""
+    import math
+    vector_with_anomalies = [0.5, float("nan"), float("inf"), float("-inf"), -0.25]
+    result = DatabaseManager.format_halfvec(vector_with_anomalies, dimensions=5)
+    elements = result.strip("[]").split(",")
+    assert len(elements) == 5
+    assert elements[0] == "0.5"
+    assert elements[1] == "0.0"
+    assert elements[2] == "0.0"
+    assert elements[3] == "0.0"
+    assert elements[4] == "-0.25"
+
+
+def test_scaled_ef_search_by_role_cardinality():
+    """Verify DatabaseManager.scaled_ef_search adapts dynamically to caller role cardinality."""
+    base = DatabaseManager.HNSW_EF_SEARCH
+    assert DatabaseManager.scaled_ef_search(["engineer"]) == base * 2
+    assert DatabaseManager.scaled_ef_search(["engineer", "finance_executive"]) == base
+    assert DatabaseManager.scaled_ef_search(["engineer", "finance_executive", "compliance_auditor"]) == max(20, base // 2)
+
+
+@pytest.mark.asyncio
+async def test_pgvector_08_iterative_scan_with_dynamic_ef_search():
+    """Verify DatabaseManager.configure_iterative_scan sets hnsw.ef_search when provided."""
+    mock_conn = AsyncMock()
+    ok = await DatabaseManager.configure_iterative_scan(
+        mock_conn, mode="relaxed_order", max_scan_tuples=15000, ef_search=80
+    )
+    assert ok is True
+    assert mock_conn.execute.call_count == 3
+    calls = [c.args[0] for c in mock_conn.execute.call_args_list]
+    assert "SET hnsw.iterative_scan = 'relaxed_order'" in calls
+    assert "SET hnsw.max_scan_tuples = 15000" in calls
+    assert "SET hnsw.ef_search = 80" in calls
