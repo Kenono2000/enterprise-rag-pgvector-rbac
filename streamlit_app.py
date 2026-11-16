@@ -605,8 +605,8 @@ def _render_sign_in_page() -> None:
         st.markdown(
             """
             <div style="text-align:center;padding:2rem 0">
-                <h1>🛡️ Zero-Trust Enterprise RAG</h1>
-                <p style="color:gray">Sign in with your Google account to access the secured knowledge base.</p>
+                <h1>🕊️ Christian Faith & Knowledge Advisory RAG</h1>
+                <p style="color:gray">Secure biblical and spiritual knowledge guidance powered by Zero-Trust RBAC. Sign in with your Google account.</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -647,12 +647,12 @@ def _render_sign_in_page() -> None:
         st.markdown(
             """
             <div style="text-align:center;padding:1.5rem 0">
-                <h1>🛡️ Zero-Trust Enterprise RAG</h1>
+                <h1>🕊️ Christian Faith & Knowledge Advisory RAG</h1>
                 <span style="background-color:#ffeeba;color:#856404;padding:4px 10px;border-radius:12px;font-size:0.85rem;font-weight:600;">
-                    DEVELOPMENT RBAC SIMULATOR (REQUIRE_GOOGLE_AUTH=false)
+                    DEVELOPMENT ADVISORY SIMULATOR (REQUIRE_GOOGLE_AUTH=false)
                 </span>
                 <p style="color:gray;margin-top:0.5rem">
-                    Google OAuth is disabled for this environment. Select or enter test user roles below to evaluate zero-trust retrieval policies.
+                    Google OAuth is disabled for this environment. Select user ministry and application roles below to evaluate zero-trust spiritual knowledge advisory retrieval.
                 </p>
             </div>
             """,
@@ -715,10 +715,13 @@ def _render_sign_in_page() -> None:
                     st.rerun()
 
     st.divider()
-    st.caption(
-        "Architected by **Ken Wong** | "
-        "[LinkedIn](https://linkedin.com/in/kenwong-architect) | "
-        "[GitHub](https://github.com/Kenono2000/enterprise-rag-pgvector-rbac)"
+    st.markdown(
+        """
+        <div style="text-align: center; color: #888888; font-size: 0.85rem; padding-top: 0.5rem;">
+            Architected by <b>Ken Wong</b> | <a href="https://linkedin.com/in/kenwong-architect" target="_blank" style="color: inherit; text-decoration: underline;">LinkedIn</a> | <a href="https://github.com/Kenono2000/enterprise-rag-pgvector-rbac" target="_blank" style="color: inherit; text-decoration: underline;">GitHub</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 
@@ -920,69 +923,254 @@ def _render_rag_interface() -> None:
         st.session_state["app_roles"] = roles
 
 
-    st.title("🛡️ Zero-Trust Enterprise RAG")
+    # Inject mobile-responsive and minimal-whitespace styles
+    st.markdown(
+        """
+        <style>
+        /* Ensure sidebar collapse and expand toggle button is always prominently visible */
+        [data-testid="stSidebarCollapseButton"] button,
+        [data-testid="collapsedControl"] button,
+        button[kind="header"] {
+            visibility: visible !important;
+            opacity: 1 !important;
+            display: inline-flex !important;
+            color: #31333F !important;
+            background-color: rgba(240, 242, 246, 0.8) !important;
+            border-radius: 6px !important;
+            border: 1px solid rgba(0, 0, 0, 0.15) !important;
+            z-index: 999999 !important;
+        }
+        [data-testid="stSidebarCollapseButton"] svg,
+        [data-testid="collapsedControl"] svg,
+        button[kind="header"] svg {
+            fill: #31333F !important;
+            color: #31333F !important;
+            stroke: #31333F !important;
+        }
+        [data-testid="stSidebarCollapseButton"] {
+            display: block !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            z-index: 999999 !important;
+        }
+        .block-container {
+            max-width: 800px;
+            padding-top: 3.5rem !important;
+            padding-bottom: 2rem !important;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        /* Reasonable gap between Streamlit blocks */
+        div[data-testid="stVerticalBlock"] > div {
+            gap: 0.6rem !important;
+        }
+        div[data-testid="stVerticalBlock"] {
+            gap: 0.6rem !important;
+        }
+        /* Headers and title with clean, balanced breathing room */
+        h1 {
+            margin-top: 1rem !important;
+            margin-bottom: 1rem !important;
+            padding-top: 0 !important;
+            padding-bottom: 0 !important;
+            font-size: 1.65rem !important;
+            line-height: 1.35 !important;
+            word-break: break-word;
+        }
+        /* Top-level section subheaders only; don't add massive margin to headings inside chat messages */
+        div.block-container > div[data-testid="stVerticalBlock"] > div > h2,
+        div.block-container > div[data-testid="stVerticalBlock"] > div > h3,
+        div.block-container > div[data-testid="stVerticalBlock"] > div > [data-testid="stHeading"] {
+            margin-top: 1.25rem !important;
+            margin-bottom: 1.25rem !important;
+            padding-top: 0 !important;
+            padding-bottom: 0 !important;
+            font-size: 1.25rem !important;
+        }
+        /* Align chat message avatar and content cleanly and flush to the left */
+        .stChatMessage {
+            padding-top: 0.6rem !important;
+            padding-bottom: 0.6rem !important;
+            padding-left: 0 !important;
+            margin-left: 0 !important;
+            margin-bottom: 0.35rem !important;
+            align-items: flex-start !important;
+        }
+        .stChatMessage [data-testid="stChatMessageAvatarCustom"],
+        .stChatMessage [data-testid="stChatMessageAvatar"] {
+            margin-top: 0.15rem !important;
+            margin-left: 0 !important;
+        }
+        .stChatMessage [data-testid="stChatMessageContent"] {
+            padding-left: 0.5rem !important;
+            margin-left: 0 !important;
+        }
+        /* Remove oversized top margin on first headings or paragraphs inside chat bubbles */
+        .stChatMessage [data-testid="stChatMessageContent"] > div:first-child > :first-child {
+            margin-top: 0 !important;
+            padding-top: 0 !important;
+        }
+        .stChatMessage [data-testid="stChatMessageContent"] h1,
+        .stChatMessage [data-testid="stChatMessageContent"] h2,
+        .stChatMessage [data-testid="stChatMessageContent"] h3,
+        .stChatMessage [data-testid="stChatMessageContent"] h4 {
+            margin-top: 0.2rem !important;
+            margin-bottom: 0.4rem !important;
+            font-size: 1.15rem !important;
+            line-height: 1.3 !important;
+        }
+        /* Question input and clear action styling */
+        .chat-input-controls {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 0.2rem;
+            margin-top: 0.5rem;
+        }
+        .chat-input-controls button {
+            background-color: transparent !important;
+            border: 1px solid rgba(128, 128, 128, 0.25) !important;
+            padding: 2px 10px !important;
+            font-size: 0.8rem !important;
+            border-radius: 6px !important;
+            color: #888 !important;
+        }
+        .chat-input-controls button:hover {
+            color: #e53e3e !important;
+            border-color: #e53e3e !important;
+        }
+        p {
+            margin-bottom: 0.5rem !important;
+            line-height: 1.5 !important;
+        }
+        hr {
+            margin-top: 0.75rem !important;
+            margin-bottom: 0.75rem !important;
+        }
+        @media (max-width: 768px) {
+            .block-container {
+                padding-left: 1rem !important;
+                padding-right: 1rem !important;
+                padding-top: 3.5rem !important;
+            }
+            h1, h2, h3, h4, [data-testid="stHeading"], [data-testid="stMarkdownContainer"] > h1, [data-testid="stMarkdownContainer"] > h2, [data-testid="stMarkdownContainer"] > h3 {
+                text-align: left !important;
+                display: block !important;
+                width: 100% !important;
+            }
+            h1 {
+                font-size: 1.35rem !important;
+                line-height: 1.35 !important;
+                margin-top: 0.85rem !important;
+                margin-bottom: 0.85rem !important;
+                text-align: left !important;
+            }
+            h2, h3 {
+                font-size: 1.2rem !important;
+                line-height: 1.3 !important;
+                margin-top: 1.1rem !important;
+                margin-bottom: 1.1rem !important;
+                text-align: left !important;
+            }
+            .stChatMessage {
+                padding-left: 0 !important;
+                margin-left: 0 !important;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.title("🕊️ Christian Faith & Knowledge Advisory RAG")
     google_auth_required = _is_google_auth_required()
     if google_auth_required:
-        st.markdown(
-            "Authenticated via Google OAuth 2.0 PKCE. "
-            "Your role claims are enforced **inside the SQL query** — the LLM never sees "
-            "documents outside your access domain."
-        )
-        st.subheader("1. Identity & Access")
-        st.info(
-            f"🔑 **Verified Google Identity:** `{st.session_state.get('user_email', 'unknown')}`  \n"
-            f"📋 **Active JWT Role Claims:** `{roles}`"
-        )
+        with st.expander("🔐 1. Identity & Pastoral Access", expanded=False):
+            st.markdown(
+                "Welcome to the **Christian Faith & Knowledge Advisory System**. "
+                "Authenticated via Google OAuth 2.0 PKCE. Your role claims (e.g. `disciple`, `engineer`) "
+                "are enforced **inside the SQL query** — the advisory AI only accesses documents within your authorized domain."
+            )
+            st.info(
+                f"🔑 **Verified Identity:** `{st.session_state.get('user_email', 'unknown')}`  \n"
+                f"📋 **Active Role Claims:** `{roles}`"
+            )
     else:
-        st.markdown(
-            "Running in **Development RBAC Simulation Mode** (`REQUIRE_GOOGLE_AUTH=false`). "
-            "Your simulated role claims are enforced **inside the SQL query** — the LLM never sees "
-            "documents outside your active role domain."
-        )
-        st.subheader("1. Identity & Access")
-        st.info(
-            f"👤 **Simulated User Identity:** `{st.session_state.get('user_email', 'dev-user')}`  \n"
-            f"📋 **Active Evaluated Roles:** `{roles}`"
-        )
+        with st.expander("👤 1. Identity & Pastoral Access", expanded=False):
+            st.markdown(
+                "Running in **Development Advisory Simulation Mode** (`REQUIRE_GOOGLE_AUTH=false`). "
+                "Your simulated role claims are enforced **inside the SQL query** — the advisory AI only retrieves "
+                "authorized doctrinal and spiritual knowledge within your active role domain."
+            )
+            st.info(
+                f"👤 **Simulated User Identity:** `{st.session_state.get('user_email', 'dev-user')}`  \n"
+                f"📋 **Active Evaluated Roles:** `{roles}`"
+            )
 
 
     # -------------------------------------------------------------
     # 2. Interactive Conversational Chat Interface
     # -------------------------------------------------------------
-    st.subheader("💬 Enterprise Knowledge Chat")
+    caller_key = st.session_state.get("user_email") or st.session_state.get("user_sub") or "anonymous"
+    thread_id = f"chat_history:{caller_key}"
+
+    # Load persistent conversation history from database checkpoint on initial load
     if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {
-                "role": "assistant",
-                "content": "👋 Hello! Ask me any questions about enterprise documentation. Access is automatically governed by your verified roles.",
-                "citations": [],
-                "sql": None,
-            }
-        ]
+        try:
+            checkpoint = run_async(
+                DatabaseManager.load_workflow_checkpoint(
+                    thread_id=thread_id,
+                    checkpoint_ns="advisory_chat",
+                )
+            )
+            if checkpoint and isinstance(checkpoint.get("checkpoint_payload"), dict):
+                st.session_state.messages = checkpoint["checkpoint_payload"].get("messages", [])
+            else:
+                st.session_state.messages = []
+        except Exception as exc:
+            logger.warning("Could not load persisted chat history: %s", exc)
+            st.session_state.messages = []
+
+    st.subheader("📖 Faith & Knowledge Advisory Consultation")
+    st.markdown(
+        """
+        <div style="margin-bottom: 1.5rem;">
+            I am your <b>Christian Knowledge Advisor</b>. I am here to provide thoughtful, well-researched, 
+            and spiritually grounded insights drawn from authorized scriptures, theological documents, and discipleship teachings.<br/><br/>
+            How may I assist you in your journey of faith, purpose, or study today?
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     with st.sidebar:
-        if st.button("🗑️ Clear Chat History", use_container_width=True):
-            st.session_state.messages = [
-                {
-                    "role": "assistant",
-                    "content": "👋 Chat history cleared. How can I help you?",
-                    "citations": [],
-                    "sql": None,
-                }
-            ]
+        if st.button("🗑️ Clear Chat History", key="clear_chat_sidebar_btn", use_container_width=True):
+            st.session_state.messages = []
+            try:
+                run_async(
+                    DatabaseManager.save_workflow_checkpoint(
+                        thread_id=thread_id,
+                        checkpoint_id="latest",
+                        checkpoint_payload={"messages": []},
+                        metadata={"caller_id": caller_key, "action": "cleared"},
+                        checkpoint_ns="advisory_chat",
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Could not clear persistent chat history in DB: %s", exc)
             st.rerun()
 
     # Render chat history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            if msg.get("citations"):
-                with st.expander("📚 Sources & Citations", expanded=False):
-                    for cit in msg["citations"]:
-                        st.markdown(f"- **{cit.get('title', 'Document')}** (Confidence: `{float(cit.get('similarity', 0.0)):.2f}`)")
-                        st.caption(cit.get("content", "")[:250] + "...")
-            if msg.get("sql"):
-                with st.expander("🔍 Executed RBAC Query", expanded=False):
-                    st.code(msg["sql"], language="sql")
+        if msg.get("citations"):
+            with st.expander("📚 Sources & Citations", expanded=False):
+                for cit in msg["citations"]:
+                    st.markdown(f"- **{cit.get('title', 'Document')}** (Confidence: `{float(cit.get('similarity', 0.0)):.2f}`)")
+                    st.caption(cit.get("content", "")[:250] + "...")
+        if msg.get("sql"):
+            with st.expander("🔍 Executed RBAC Query", expanded=False):
+                st.code(msg["sql"], language="sql")
 
     # Check token limits and emergency kill-switch state before rendering chat input
     caller_key = st.session_state.get("user_email") or st.session_state.get("user_sub") or "anonymous"
@@ -1004,11 +1192,52 @@ def _render_rag_interface() -> None:
             "Further questions are disabled. Disengage the Emergency Kill-Switch or reset token usage in the sidebar to re-enable chat."
         )
 
+    # Educational Architectural Deep Dive
+    with st.expander("🎓 Cryptographic Token & Session Architecture (Deep Dive)", expanded=False):
+        st.markdown(
+            """
+            ### 🛡️ Enterprise Token Architecture & Session Security
+            
+            This application implements the standard three-tier cryptographic security model:
+
+            | Token Type | Purpose | Standard Lifetime | Storage Location |
+            | :--- | :--- | :--- | :--- |
+            | **ID Token (OIDC)** | Cryptographic user identity & verified `app_roles` | 15–60 min | Streamlit Session State (In-Memory) |
+            | **Access Token (OAuth 2.0)** | Scoped authorization bearer token for APIs | 15–60 min | Ephemeral client memory |
+            | **Refresh Token (OAuth 2.0)** | Silent minting of new tokens without credentials | 30 days | Identity Provider DB / Server Session |
+
+            #### ⏱️ SessionIdleManager & Regulatory Compliance (SOC-2 / HIPAA)
+            1. **15-Minute Inactivity Timeout**: Monitors keyboard, mouse, and touch events in the browser. If 15 minutes of zero interaction elapse, the session is terminated and client credentials are wiped.
+            2. **12-Hour Absolute Session Ceiling**: Regardless of user activity, sessions cannot exceed 12 hours without re-authentication.
+            3. **Silent Token Refresh**: When the short-lived ID token approaches expiration, the client silently contacts Google's `/token` endpoint with the refresh token to extend access without interrupting the user.
+            4. **In-Database RBAC Defense**: Even with a valid cryptographic token, users can only access documents where `allowed_roles ?| $user_roles`.
+            """
+        )
+
+    # Clear button right above question textbox (below the architectural deep dive)
+    _, col_clear = st.columns([5, 1])
+    with col_clear:
+        if st.button("🗑️ Clear", key="clear_chat_above_input", help="Reset and clear consultation conversation", use_container_width=True):
+            st.session_state.messages = []
+            try:
+                run_async(
+                    DatabaseManager.save_workflow_checkpoint(
+                        thread_id=thread_id,
+                        checkpoint_id="latest",
+                        checkpoint_payload={"messages": []},
+                        metadata={"caller_id": caller_key, "action": "cleared"},
+                        checkpoint_ns="advisory_chat",
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Could not clear persistent chat history in DB: %s", exc)
+            st.rerun()
+
     # Chat input - dynamically disabled when kill-switch is active or quota exceeded
     chat_placeholder = (
-        "⛔ Token consumption turned OFF — chat disabled"
+        "⛔ Token consumption turned OFF — consultation disabled"
         if token_is_blocked
-        else "What does the Mindstream report say about AI agents?"
+        else "Ask about life purpose, biblical wisdom, discipleship, or theological topics..."
     )
     if prompt_input := st.chat_input(chat_placeholder, disabled=token_is_blocked):
         if token_is_blocked:
@@ -1020,11 +1249,14 @@ def _render_rag_interface() -> None:
         with st.chat_message("user"):
             st.markdown(prompt_input)
 
+        # Snapshot messages and caller identity on the main Streamlit thread before launching worker thread
+        current_messages_snapshot = list(st.session_state.get("messages", []))
+        caller_id_curr = st.session_state.get("user_email") or st.session_state.get("user_sub") or "anonymous"
 
         with st.chat_message("assistant"):
             with st.status("Querying knowledge base...", expanded=True) as status:
                 async def perform_search():
-                    caller_id = st.session_state.get("user_email") or st.session_state.get("user_sub") or "anonymous"
+                    caller_id = caller_id_curr
                     est_tokens = max(len(prompt_input.split()), (len(prompt_input) + 3) // 4)
                     try:
                         allowed, cur_tok, max_tok, enforce, err_reason = await DatabaseManager.check_token_limit(caller_id, est_tokens)
@@ -1040,22 +1272,39 @@ def _render_rag_interface() -> None:
                             "reason": f"Token verification error: {exc}. Token consumption turned off for security.",
                         }
 
+                    # Incorporate prior conversational context for multi-turn inquiry awareness (from thread-safe snapshot)
+                    prior_msgs = [m for m in current_messages_snapshot[:-1] if m.get("content")]
+                    recent_history_chunks = []
+                    search_query = prompt_input
+                    if prior_msgs:
+                        last_few = prior_msgs[-6:]  # Up to last 3 user/assistant conversational turns
+                        conv_history_text = "\n".join(
+                            f"{'User' if m['role'] == 'user' else 'Advisor'}: {m['content']}"
+                            for m in last_few
+                        )
+                        # If user asks a follow-up ("tell me more", "how about that second point?"), augment search query with recent user queries
+                        prior_user_queries = [m["content"] for m in last_few if m["role"] == "user"]
+                        if prior_user_queries:
+                            search_query = f"{' '.join(prior_user_queries[-2:])} {prompt_input}"
+                    else:
+                        conv_history_text = "None (first turn)"
+
                     backend = os.getenv("RETRIEVAL_BACKEND", "").lower()
-                    emb = await generate_embedding(prompt_input)
+                    emb = await generate_embedding(search_query)
                     if backend == "azure":
                         from app.db.azure_search import azure_hybrid_search
-                        rows = await azure_hybrid_search(prompt_input, emb, roles, limit=3)
+                        rows = await azure_hybrid_search(search_query, emb, roles, limit=5)
                     elif backend in ("gcp", "google_cloud", "vertex"):
                         from app.db.gcp_search import gcp_hybrid_search
-                        rows = await gcp_hybrid_search(prompt_input, emb, roles, limit=3)
+                        rows = await gcp_hybrid_search(search_query, emb, roles, limit=5)
                     elif backend in ("databricks", "databrick"):
                         from app.db.databricks_search import databricks_hybrid_search
-                        rows = await databricks_hybrid_search(prompt_input, emb, roles, limit=3)
+                        rows = await databricks_hybrid_search(search_query, emb, roles, limit=5)
                     else:
                         await DatabaseManager.get_pool()
-                        rows = await DatabaseManager.hybrid_search(prompt_input, emb, roles, limit=3)
+                        rows = await DatabaseManager.hybrid_search(search_query, emb, roles, limit=5)
                         if not rows:
-                            rows = await DatabaseManager.secure_search(emb, roles, limit=3)
+                            rows = await DatabaseManager.secure_search(emb, roles, limit=5)
 
                     if not rows:
                         return None
@@ -1064,13 +1313,23 @@ def _render_rag_interface() -> None:
                         for r in rows
                     )
                     system_prompt = (
-                        "You are an enterprise zero-trust AI assistant.\n"
-                        "Answer the user's question by synthesizing information from the authorized context chunks below.\n"
-                        "Cite sources in the format [Doc: <Title>, Chunk <Index>].\n"
-                        "Only state 'I do not have sufficient information in the authorized documents to answer this question.' "
-                        "if the authorized context is completely silent or irrelevant to the question."
+                        "You are a wise, compassionate Christian Knowledge Advisor and pastoral scholar.\n"
+                        "Your mission is to provide deeply thoughtful, well-reasoned, and thorough answers to spiritual, theological, "
+                        "and life-purpose inquiries by synthesizing insights from the authorized knowledge context below.\n\n"
+                        "Guidelines for your response:\n"
+                        "1. Conversational Continuity: Maintain seamless conversational memory. The prior dialogue history is provided below; reference previous answers, questions, or themes naturally when the user asks follow-ups or uses pronouns (e.g., 'that second point', 'his life purpose', 'elaborate on Campbell').\n"
+                        "2. Pastoral & Thoughtful Tone: Speak with warmth, grace, wisdom, and pastoral depth while maintaining rigorous intellectual clarity.\n"
+                        "3. Comprehensive Breakdown: Structure your answer thoughtfully with clear conceptual sections or themes (e.g., Theological Foundation, Biblical & Practical Perspectives, Practical Living/Reflection).\n"
+                        "4. Faithful Synthesis & Direct Citations: Synthesize the provided context chunks thoroughly. Always cite supporting documents and chunks in the format [Doc: <Title>, Chunk <Index>].\n"
+                        "5. Practical & Spiritual Reflection: Provide reflective guidance or questions for personal prayer, contemplation, and application.\n"
+                        "6. Honesty & Boundaries: If the authorized context is completely silent or irrelevant to the query, state: 'I do not have sufficient information in the authorized documents to answer this question.'"
                     )
-                    prompt = f"{system_prompt}\n\nContext:\n{context}\n\nQuestion: {prompt_input}\nAnswer:"
+                    prompt = (
+                        f"{system_prompt}\n\n"
+                        f"Recent Conversation History:\n{conv_history_text}\n\n"
+                        f"Authorized Context:\n{context}\n\n"
+                        f"Current Question: {prompt_input}\nAnswer:"
+                    )
                     return {
                         "prompt": prompt,
                         "rows": rows,
@@ -1191,30 +1450,30 @@ def _render_rag_interface() -> None:
             "citations": citations,
             "sql": sql_query,
         })
+        # Persist updated conversation to database so it survives page reloads
+        try:
+            run_async(
+                DatabaseManager.save_workflow_checkpoint(
+                    thread_id=thread_id,
+                    checkpoint_id="latest",
+                    checkpoint_payload={"messages": st.session_state.messages},
+                    metadata={"caller_id": caller_key, "messages_count": len(st.session_state.messages)},
+                    checkpoint_ns="advisory_chat",
+                )
+            )
+        except Exception as exc:
+            logger.warning("Could not persist conversation history: %s", exc)
         st.rerun()
 
-    # Educational Architectural Deep Dive
-    st.divider()
-    with st.expander("🎓 Cryptographic Token & Session Architecture (Deep Dive)", expanded=False):
-        st.markdown(
-            """
-            ### 🛡️ Enterprise Token Architecture & Session Security
-            
-            This application implements the standard three-tier cryptographic security model:
-
-            | Token Type | Purpose | Standard Lifetime | Storage Location |
-            | :--- | :--- | :--- | :--- |
-            | **ID Token (OIDC)** | Cryptographic user identity & verified `app_roles` | 15–60 min | Streamlit Session State (In-Memory) |
-            | **Access Token (OAuth 2.0)** | Scoped authorization bearer token for APIs | 15–60 min | Ephemeral client memory |
-            | **Refresh Token (OAuth 2.0)** | Silent minting of new tokens without credentials | 30 days | Identity Provider DB / Server Session |
-
-            #### ⏱️ SessionIdleManager & Regulatory Compliance (SOC-2 / HIPAA)
-            1. **15-Minute Inactivity Timeout**: Monitors keyboard, mouse, and touch events in the browser. If 15 minutes of zero interaction elapse, the session is terminated and client credentials are wiped.
-            2. **12-Hour Absolute Session Ceiling**: Regardless of user activity, sessions cannot exceed 12 hours without re-authentication.
-            3. **Silent Token Refresh**: When the short-lived ID token approaches expiration, the client silently contacts Google's `/token` endpoint with the refresh token to extend access without interrupting the user.
-            4. **In-Database RBAC Defense**: Even with a valid cryptographic token, users can only access documents where `allowed_roles ?| $user_roles`.
-            """
-        )
+    # Centered Page Footer placed cleanly at the bottom
+    st.markdown(
+        """
+        <div style="text-align: center; color: #888888; font-size: 0.85rem; padding-top: 1.5rem; padding-bottom: 2rem;">
+            Architected by <b>Ken Wong</b> | <a href="https://linkedin.com/in/kenwong-architect" target="_blank" style="color: inherit; text-decoration: underline;">LinkedIn</a> | <a href="https://github.com/Kenono2000/enterprise-rag-pgvector-rbac" target="_blank" style="color: inherit; text-decoration: underline;">GitHub</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1224,9 +1483,10 @@ def _render_rag_interface() -> None:
 
 def main():
     st.set_page_config(
-        page_title="Zero-Trust RAG | Ken Wong",
-        page_icon="🛡️",
+        page_title="Christian Knowledge Advisory RAG | Ken Wong",
+        page_icon="🕊️",
         layout="centered",
+        initial_sidebar_state="collapsed",
     )
 
     # 1. Handle the OAuth callback if ?code= is in URL params

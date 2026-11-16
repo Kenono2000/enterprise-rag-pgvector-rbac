@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 KNOWN_ROLES = frozenset(
-    ["finance_executive", "compliance_auditor", "hr_manager", "executive", "engineer"]
+    ["finance_executive", "compliance_auditor", "hr_manager", "executive", "engineer", "disciple"]
 )
 
 # ---------------------------------------------------------------------------

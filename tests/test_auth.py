@@ -214,7 +214,7 @@ class TestExtractRoles:
 
     def test_all_known_roles_are_valid(self):
         """Sanity check: all KNOWN_ROLES match the DB schema values."""
-        expected = {"finance_executive", "compliance_auditor", "hr_manager", "executive", "engineer"}
+        expected = {"finance_executive", "compliance_auditor", "hr_manager", "executive", "engineer", "disciple"}
         assert KNOWN_ROLES == expected
 
 
