@@ -62,12 +62,12 @@ flowchart LR
 SELECT d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
        1 - (c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)) AS similarity
 FROM document_chunks c JOIN documents d ON c.document_id = d.id
-WHERE d.allowed_roles ?| $2::text[] AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)
+WHERE d.allowed_roles ?| $2::text[] AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
 ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 ```
 * **No Recall Starvation & pgvector 0.8+ Iterative Scans**: PostgreSQL evaluates `WHERE d.allowed_roles ?| $2::text[]` via the **GIN Index** and automatically configures `SET hnsw.iterative_scan = 'relaxed_order'` per pooled connection—eliminating ANN overfiltering on selective roles. Tuples limits and dynamic candidate depth adaptively scale with caller role cardinality (`scaled_scan_tuples` and `scaled_ef_search`: 80 for single role, 40 for dual, 20 for broad) ensuring unauthorized rows never enter Python RAM.
 * **SQL Injection & Empty-Role Guards**: Binds roles strictly as a parameterized `$2::text[]` array and returns `[]` immediately before DB execution if `user_roles` is empty.
-* **Matryoshka 1536-d + 16-Bit `halfvec(1536)` Compaction**: Truncates `text-embedding-3-large` from `3072` to `1536` dims and quantizes to IEEE 754 16-bit floats (`embedding_halfvec halfvec(1536)`, `idx_chunks_embedding_halfvec_hnsw` with `halfvec_cosine_ops`) for **50% additional HNSW RAM savings** (**75% cumulative reduction**, **>98% recall**) with IEEE 754 NaN/Infinity sanitization across normalized `documents` + `document_chunks` (`ON DELETE CASCADE`) tables (see [`schema.sql`](file:///c:/src/enterprise-rag-pgvector-rbac/schema.sql)).
+* **Matryoshka 1536-d + 16-Bit `halfvec(1536)` Compaction**: Standardizes on 1536-dimensional embeddings with `text-embedding-3-small` (and compatible 1536-d truncated embeddings) quantized to IEEE 754 16-bit floats (`embedding_halfvec halfvec(1536)`, `idx_chunks_embedding_halfvec_hnsw` with `halfvec_cosine_ops`) for **50% additional HNSW RAM savings** (**75% cumulative reduction**, **>98% recall**) with IEEE 754 NaN/Infinity sanitization across normalized `documents` + `document_chunks` (`ON DELETE CASCADE`) tables (see [`schema.sql`](file:///c:/src/enterprise-rag-pgvector-rbac/schema.sql)).
 * **Persistent Token Consumption Ledger & Managed Budget Controls**: `token_consumption_ledger` records atomic prompt and completion token counts per caller and model, while `token_managed_limits` enforces caller quotas (`max_budget_tokens`), provides administrative toggles to disable enforcement (`enforce_limit`), and trips an emergency kill-switch (`is_blocked`) to turn off token consumption once limits are exceeded.
 ## 2. 5-Minute Quickstart and Runtime Stack
 ```mermaid
@@ -75,7 +75,7 @@ ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 flowchart LR
     subgraph DevBootstrap ["1. Bootstrap & Verify"]
         direction TB
-        Venv["Install .venv & Deps"] --> Pytest["Run 161 Pytest Tests"]
+        Venv["Install .venv & Deps"] --> Pytest["Run 178 Pytest Tests"]
     end
     subgraph Containers ["2. Docker Infrastructure"]
         direction TB
@@ -151,7 +151,7 @@ flowchart LR
 * **Skip Unchanged Files (SHA-256 Hashing)**: Hashes files in 64KB blocks (`O(1)` lookup) to skip unchanged documents with zero API calls, and automatically replaces old chunks when a file is updated.
 * **Contextual Chunk Headers & Table-Safe Splitting**: `split_chunks()` (`libs/utilities.py`) extracts parent document summaries (`summarize_document_context`) and prepends `[Document Context: <id> | Section: <sec> | Summary: <summary>]` headers (`build_contextual_chunk_header`) to 800-token chunks without breaking Markdown tables—elevating **Context Precision > 0.90** while embedding in 64-chunk batches with exponential backoff (`tenacity`).
 * **Adaptive Hybrid Search (Semantic + Keyword RRF)**: Combines 16-bit `halfvec(1536)` cosine search with robust full-text search (`plainto_tsquery` + `websearch_to_tsquery` fallback) using parameterized Reciprocal Rank Fusion (`dense_weight / (k + rank) + sparse_weight / (k + rank)`, default `k=60`), pre-filtered by user role in PostgreSQL. Fusion runs as a **single-pass SQL CTE** (`ROW_NUMBER() OVER (...)` dense + sparse ranks, `FULL OUTER JOIN`, in-database RRF score) with automatic Python RRF fallback, and `hnsw.max_scan_tuples` auto-scales per caller via `DatabaseManager.scaled_scan_tuples` (1 role 2x, 2 roles 1x, 3+ roles 0.5x).
-* **Re-Ranking & Citation Guardrail (`GroundingGuardrail`)**: Re-ranks top results with a `CrossEncoder` and requires every answer to cite `[Doc: <Title>, Chunk <Index>]`—explicitly refusing to answer when context is missing.
+* **Embedding & Re-Ranking Models (`libs/utilities.py`)**: Uses OpenAI / Azure OpenAI `text-embedding-3-small` (1536-d) for chunk embeddings and optional `CrossEncoder` (`ms-marco-MiniLM-L-6-v2`) for secondary re-ranking; `GroundingGuardrail` verifies source citations (`[Doc: <Title>, Chunk <Index>]`) and gracefully refuses ungrounded responses.
 * **Context Engineering Pipeline (`app/rag/context.py`)**: Formalizes the retrieve → assemble → cache → compact context discipline: `ContextAssembler.assemble()` converts authorized chunks into citation-formatted context text, builds a deterministic static-prefix prompt (SHA-256 `prefix_hash`, `static_prefix_tokens`) for cross-turn KV prefix caching, and applies token-bounded deterministic compaction (`DEFAULT_MAX_CONTEXT_TOKENS=4000`) when the authorized context exceeds the budget, keeping highest-similarity chunks. `app/main.py` now routes both `/api/v1/query` and `/api/v1/query/stream` through this pipeline.
 ## 5. Gateways, Observability, and Autonomous SDLC Agent (`app/`, `agent/`)
 ```mermaid
@@ -401,7 +401,7 @@ flowchart LR
 
 #### 4. Tri-Paradigm SDLC Workflow (`agent/workflow.py`)
 - **LangGraph Checkpointing**: `PostgresCheckpointSaver` extends LangGraph state persistence, committing graph steps to PostgreSQL (`sdlc_workflow_checkpoints`) with time-travel inspection and multi-worker resume support.
-- **CrewAI Role Specialization**: Orchestrates specialized agents (`arch-synthesizer`, `cross-model-judge`, `test-triager`) with tiered model routing (`inherit`, `pro`, `flash`).
+- **CrewAI Role Specialization & Multi-Model Tiering**: Orchestrates specialized agents across tiered LLMs: `arch-synthesizer` (Staff Architect, `inherit` frontier reasoning model), `cross-model-judge` (Lead Security Auditor, Gemini Pro `pro`), and `test-triager` (SRE & Pytest Diagnostician, Gemini Flash `flash`).
 - **Hermes Agent Lifelong Learning**: Automatically distills verified successful patches into portable `SKILL.md` files in `.agent/skills/` and exports ShareGPT-formatted RL trajectories weighted by Atropos GRPO step rewards.
 
 #### 5. Defense-in-Depth Guardrails (`agent/guardrails.py`)

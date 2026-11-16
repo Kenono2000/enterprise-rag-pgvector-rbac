@@ -201,7 +201,7 @@ class DatabaseManager:
             FROM document_chunks c
             JOIN documents d ON c.document_id = d.id
             WHERE d.allowed_roles ?| $2::text[]
-              AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)
+              AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
             ORDER BY {distance_expr}
             LIMIT $3
         """
@@ -268,7 +268,7 @@ class DatabaseManager:
             FROM document_chunks c
             JOIN documents d ON c.document_id = d.id
             WHERE d.allowed_roles ?| $2::text[]
-              AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)
+              AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
             ORDER BY {dense_dist}
             LIMIT $3
         """
@@ -303,7 +303,7 @@ class DatabaseManager:
                 FROM document_chunks c
                 JOIN documents d ON c.document_id = d.id
                 WHERE d.allowed_roles ?| $3::text[]
-                  AND (c.embedding_model = 'text-embedding-3-large' OR c.embedding_model IS NULL)
+                  AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
                 ORDER BY {cte_dist}
                 LIMIT $4
             ),
@@ -506,7 +506,7 @@ class DatabaseManager:
                     content = chunk.get("content", "")
                     embedding = chunk.get("embedding", [])
                     vector_str = cls.format_halfvec(embedding)
-                    model = chunk.get("embedding_model", "text-embedding-3-large")
+                    model = chunk.get("embedding_model", "text-embedding-3-small")
                     tokens = chunk.get("token_count", len(content.split()))
 
                     await conn.execute(

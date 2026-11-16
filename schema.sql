@@ -60,7 +60,7 @@ CREATE TABLE document_chunks (
     token_count INT,
     embedding vector(1536) NOT NULL,
     embedding_halfvec halfvec(1536) GENERATED ALWAYS AS (embedding::halfvec(1536)) STORED,
-    embedding_model VARCHAR(100) DEFAULT 'text-embedding-3-large',
+    embedding_model VARCHAR(100) DEFAULT 'text-embedding-3-small',
     tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
