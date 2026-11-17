@@ -65,8 +65,9 @@ ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 ### 🔧 Technical Implementation
 * **🎯 Zero Recall Starvation**: GIN Index + `hnsw.iterative_scan = 'relaxed_order'` eliminates ANN overfiltering on selective roles. Dynamic candidate depth scales per role cardinality: **80** for single role, **40** for dual, **20** for broad roles.
 ### 🔧 Key RBAC & Storage Innovations
-* **🎯 Zero Recall Starvation**: GIN Index + `hnsw.iterative_scan = 'relaxed_order'` eliminates ANN overfiltering on selective roles. Dynamic candidate depth scales per role cardinality: **80** for single role, **40** for dual, **20** for broad roles.
+* **🎯 Zero Recall Starvation**: GIN Index + `hnsw.iterative_scan = 'relaxed_order'` eliminates ANN overfiltering on selective roles. pgvector 0.8+ iterative scans retain filtered-out HNSW candidates in a `discarded` pairing heap and resume traversal in `hnsw.ef_search` batches until `hnsw.max_scan_tuples` (20000) or memory limits stop the scan — so high-selectivity `WHERE d.allowed_roles ?| $2::text[]` clauses no longer exhaust the top-k candidate list. Dynamic candidate depth scales per role cardinality: **80** for single role, **40** for dual, **20** for broad roles.
 * **🔒 SQL Injection Protection**: Parameterized `$2::text[]` array with empty-role guard (returns `[]` before DB execution).
+* **🗂️ RBAC GIN Operator Class**: `idx_documents_allowed_roles_gin` uses the default `jsonb_ops` GIN class (not `jsonb_path_ops`), because the key-existence operator `?|` is only served by `jsonb_ops` (`jsonb_path_ops` accelerates `@>`, `@?`, `@@` exclusively). The index is therefore genuinely Bitmap-index-accelerated for the role pre-filter.
 * **📦 Matryoshka 1536-d + 16-Bit Compaction**: 75% cumulative RAM reduction with >98% recall. IEEE 754 sanitization across normalized tables.
 * **💰 Token Budget Controls**: `token_consumption_ledger` tracks usage; `token_managed_limits` provides emergency kill-switch (`is_blocked`).
 
@@ -284,9 +285,10 @@ class GroundingGuardrail:
 ### Deep-Dive: Code Breakdown & Architecture Insights
 #### 1. Zero-Trust FastMCP Gateway (`app/mcp/gateway.py`)
 - **Blast Radius Controls**: Configures module-level `SlidingWindowRateLimiter` (default 60 req/min per caller) and `TokenCircuitBreaker` (8,000 tokens/request, 50,000 tokens/issue) to protect downstream LLMs.
-- **Strict Pydantic Schemas (`extra="forbid"`)**: Every tool request (`MCPSearchRequest`, `MCPPatchRequest`, `MCPSDLCCrewRequest`, `MCPHermesSkillRequest`, `MCPListDocumentsRequest`) explicitly rejects unknown fields.
+- **Strict Pydantic Schemas (`extra="forbid"`)**: Every tool request (`MCPSearchRequest`, `MCPPatchRequest`, `MCPSDLCCrewRequest`, `MCPHermesSkillRequest`, `MCPListDocumentsRequest`, `MCPAutonomyMaturityRequest`) explicitly rejects unknown fields.
 - **Fail-Closed RBAC (`check_tool_permission`)**: Maps tools to required roles (`TOOL_REQUIRED_ROLES`). If a token is authenticated but has zero claims, it is **denied** for restricted tools, preventing confused deputy attacks.
-- **RFC 9728 & RFC 8707**: Exposes Protected Resource Metadata discovery and OAuth scope bindings directly within the MCP gateway layer.
+- **RFC 9728 & RFC 8707**: Exposes Protected Resource Metadata discovery (`get_gateway_metadata`) — including `streamable_http_transport`, `transport_headers_supported` (`Mcp-Method`, `Mcp-Name`), `stateless_mode_supported`, and `rfc_compliance` — and OAuth 2.1 / RFC 8707 tool-level RBAC scope bindings directly within the MCP gateway layer.
+- **Centralized Multi-Cloud Dispatch**: `search_sdlc_context` resolves `RETRIEVAL_BACKEND` through `get_vector_search_adapter()` (structural `VectorSearchProvider` subtyping) instead of duplicated per-provider conditional branches; Azure/GCP/Databricks adapters lazy-import their hybrid search functions inside `.search()` to preserve test-mock patching boundaries.
 
 #### 2. Managed Token Budget & Administrative Shutoff API (`app/main.py`)
 - **Database-Backed Ledgers**: Tracks every token consumption event via `token_consumption_ledger` and enforces limits through `token_managed_limits`.
@@ -310,9 +312,9 @@ class GroundingGuardrail:
 - **Eight Technical Pillars Scorecard**: Built-in automated evaluator (`AutonomyMaturityEvaluator.evaluate_repository`) assessing the repository against Style & Validation, Build System, Testing, Documentation, Dev Environment, Code Quality, Observability, and Security & Governance.
 - **Autonomous Maturity Level**: Measures repository status against Factory.ai thresholds (L1: Functional 5 pts, L2: Documented 19 pts, L3: Standardized 36 pts minimum production bar, L4: Optimized 60 pts, L5: Software Factory 100 pts). The repository scores **106/100 (Level 5 Software Factory)**, clearing the production floor and meeting agent-readiness standards.
 ## 7. Multi-Cloud Strategy & Runbook
-* **Unified `VectorSearchProvider` Protocol & Factory Pattern**: Decoupled multi-cloud retrieval implementations via structural subtyping protocols ([`app/db/protocols.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/protocols.py)) and concrete adapters ([`app/db/adapters.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/adapters.py): `PgvectorSearchAdapter`, `AzureSearchAdapter`, `GCPSearchAdapter`, `DatabricksSearchAdapter`). The unified `get_vector_search_adapter()` factory enforces the invariant that an empty `user_roles` list immediately short-circuits to an empty result set without executing downstream network or database calls.
+* **Unified `VectorSearchProvider` Protocol & Factory Pattern**: Decoupled multi-cloud retrieval implementations via structural subtyping protocols ([`app/db/protocols.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/protocols.py)) and concrete adapters ([`app/db/adapters.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/adapters.py): `PgvectorSearchAdapter`, `AzureSearchAdapter`, `GCPSearchAdapter`, `DatabricksSearchAdapter`). The unified `get_vector_search_adapter()` factory is the single resolution path for `RETRIEVAL_BACKEND` in `app/main.py` (`query_rag`, `query_rag_stream`), `app/mcp/gateway.py` (`search_sdlc_context`), and Streamlit — replacing duplicated per-provider if/elif branches — and enforces the invariant that an empty `user_roles` list immediately short-circuits to an empty result set without executing downstream network or database calls.
 * **Zero-Downtime Cutover & Failover**: Switch `RETRIEVAL_BACKEND` in `.env` (`pgvector` | `azure` | `gcp` | `databricks`) or run `python scripts/migrate_multicloud.py --target all`.
-* **Incident Runbook**: On DB latency alerts in Jaeger (`http://localhost:16686`), fail over `RETRIEVAL_BACKEND` in `.env`; on JWKS key rotation, restart the auth worker to flush `JWKSClient`; verify Badger LSM persistence via `docker compose restart jaeger`.
+* **Incident Runbook**: On DB latency alerts in Jaeger (`http://localhost:16686`), fail over `RETRIEVAL_BACKEND` in `.env`; on JWKS key rotation, restart the auth worker to flush `JWKSClient`; verify Badger LSM persistence via `docker compose restart jaeger`. If role-filtered queries regress, confirm `idx_documents_allowed_roles_gin` is a `jsonb_ops` GIN index (serves `?|`) and that EXPLAIN shows a Bitmap Index Scan rather than a sequential scan.
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
@@ -335,7 +337,7 @@ flowchart LR
 ```
 | Backend (`RETRIEVAL_BACKEND`) | Vector & Hybrid Engine | In-Database RBAC Pre-Filter | LLM & Observability |
 | :--- | :--- | :--- | :--- |
-| **`pgvector`** (Local) | PG16 `halfvec(1536)` HNSW + `tsvector` RRF | `WHERE allowed_roles ?| $2::text[]` | OpenAI `gpt-4o` + Jaeger Badger LSM |
+| **`pgvector`** (Local) | PG16 `halfvec(1536)` HNSW + `tsvector` RRF | `WHERE allowed_roles ?| $2::text[]` (`jsonb_ops` GIN) | OpenAI `gpt-4o` + Jaeger Badger LSM |
 | **`azure`** (Microsoft Azure) | Azure AI Search + Semantic Ranker | OData `allowed_roles/any(r: ...)` | Azure OpenAI `gpt-4o` + App Insights |
 | **`gcp`** (Google Cloud) | Vertex AI ScaNN + Ranking API | ScaNN `restricts` (`allowList`) | Gemini 1.5 Pro + Cloud Trace |
 | **`databricks`** (Databricks) | Mosaic AI Vector Search (Delta Sync) | Unity Catalog `filters_json` (`OR`) | Llama 3.1 70B + MLflow Tables |
@@ -343,7 +345,7 @@ flowchart LR
 ### 8.1 Frontier Reasoning Model Trends
 **Claude 3.7 Sonnet** (Anthropic, 2026) — First hybrid reasoning model on the market. Unifies standard and extended thinking in a single model with API-controlled thinking budget (up to 128K tokens). Achieves SWE-bench Verified SOTA (70.3% with scaffold, 63.7% vanilla) and TAU-bench SOTA for agentic workflows. Introduces Claude Code agentic coding tool for terminal-based software engineering delegation.
 **OpenAI o3-mini** (2025) — Cost-effective reasoning model optimized for STEM; now deprecated in the API in favor of newer reasoning variants.
-**Model Context Protocol (MCP)** (v2026-07-28) — Open standard for connecting AI applications to external systems, tools, and data sources. Growing ecosystem with official SDK, registry, and security extensions. This project's FastMCP gateway implements RFC 9728 Protected Resource Metadata and RFC 8707 tool-level RBAC.
+**Model Context Protocol (MCP)** — Open standard for connecting AI applications to external systems, tools, and data sources. The **Streamable HTTP transport** (spec revision 2025-03-26) replaced the legacy HTTP+SSE pairing: clients POST JSON-RPC to the endpoint and may open a GET SSE stream for server-initiated messages; the spec also defines a **stateless, sessionless mode** (no `Mcp-Session-Id` required) for serverless/proxy-friendly deployments. Reverse-proxy conventions (FastMCP 4/5 and gateway implementations) reflect `Mcp-Method` (JSON-RPC method) and `Mcp-Name` (tool name/URI) HTTP headers to enable zero-DPI routing, rate-limiting, and ACL inspection at the proxy layer. **RFC 9728** (OAuth 2.0 Protected Resource Metadata) and **RFC 8707** (Resource Indicators for OAuth 2.0) underpin dynamic client discovery and token-audience binding. This project's FastMCP gateway implements RFC 9728 Protected Resource Metadata, RFC 8707 tool-level RBAC, stateless Streamable HTTP transport, and `Mcp-Method`/`Mcp-Name` reflection in `app/main.py` middleware.
 ### 8.2 Extended Thinking / Reasoning Budget (RAG Pipeline)
 Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional integer 0–128000 tokens controlling reasoning depth for complex queries.
 - **`thinking_budget=0`** (default): Fast mode, default 4K context token budget.
@@ -352,10 +354,21 @@ Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional
 ### 8.3 Actionable Innovations for This Project
 | Innovation | Relevance | Implementation Status |
 | :--- | :--- | :--- |
+| pgvector 0.8+ iterative index scans (`hnsw.iterative_scan='relaxed_order'`, `hnsw.max_scan_tuples=20000`) | Eliminates top-k recall starvation / ANN overfiltering when selective RBAC GIN pre-filters shrink the HNSW candidate pool; resumed traversal from a discarded-candidate heap | ✅ `app/db/manager.py` `configure_iterative_scan()` (pool init + per-query, role-cardinality-scaled) + `schema.sql` HNSW indexes |
+| 16-bit halfvec(1536) quantization | ~50% vector RAM/storage savings (2 bytes/component vs 4), 75% cumulative with Matryoshka; HNSW max dim doubles to 4,000 | ✅ `embedding_halfvec` generated column + `idx_chunks_embedding_halfvec_hnsw` + `format_halfvec()` NaN/Inf sanitization |
 | Hybrid reasoning with thinking budget | Complex multi-hop RAG queries benefit from extended reasoning | ✅ Implemented in `app/main.py` + `app/rag/context.py` |
-| MCP server exposure & stateless transport | External AI agents query RAG via Streamable HTTP with `Mcp-Method` / `Mcp-Name` | ✅ FastMCP gateway exposes tools with RFC 9728 metadata & transport reflection |
+| MCP Streamable HTTP transport & stateless mode (MCP 2025-03-26 spec) | Sessionless proxy-friendly agent tool access; `Mcp-Method`/`Mcp-Name` reflection headers enable zero-DPI reverse-proxy routing, rate-limiting, ACL inspection | ✅ FastMCP 4 gateway at `/mcp`; header reflection in `trace_http_requests` middleware; RFC 9728 metadata declares `stateless_mode_supported` |
 | Decoupled VectorSearchProvider protocols | Multi-cloud engine abstraction adhering to PEP 544/695 subtyping | ✅ Implemented in `app/db/protocols.py`, `app/db/adapters.py`, & `app/main.py` |
-| LangGraph Badger LSM checkpointer aliases | Crash-resilient agent state machine persistence and time-travel debugging | ✅ Implemented in `agent/workflow.py` (`BadgerSaver` / `BadgerLSMCheckpointSaver`) |
+| LangGraph checkpointer resilience (UUIDv6 checkpoint chains, pending-write replay, `parent_checkpoint_id` time-travel) | Crash-resilient agent state-machine recovery and time-travel debugging | ✅ `PostgresCheckpointSaver` on `sdlc_workflow_checkpoints`; `PostgresSaver`/`BadgerSaver`/`BadgerLSMCheckpointSaver` aliases in `agent/workflow.py` (Badger names are compatibility aliases — no upstream LangGraph Badger checkpointer exists; Badger LSM is used for Jaeger OTel storage) |
 | RAG Triad observability (context relevance, faithfulness, answer relevance) | Detects hallucinations and retrieval drift | ✅ Implemented via `GroundingGuardrail` & `app/observability.py` tracer |
 | Agentic SDLC coding (Claude Code pattern) | Autonomous patch proposal, test, and repair | ✅ LangGraph + CrewAI + Hermes workflow in `agent/workflow.py` |
+
+### 8.4 Daily Automation (Unattended SDLC Refinement)
+A recurring DSH scheduled task runs the full refinement loop **daily at 6:00 AM America/Chicago** (host timezone), delivering the Principal AI Platform Architect prompt into a fresh session rooted at this repository:
+
+* **Task**: `Daily Enterprise RAG Refinement & R&D` — id `schedule-b4134923-9750-46d3-a3ec-5476b2b8e252`, status `active`.
+* **Timing**: `DTSTART;TZID=America/Chicago:20261117T060000` + `RRULE:FREQ=DAILY;BYHOUR=6;BYMINUTE=0` (first occurrence 2026-11-17 06:00 CDT). Equivalent five-field Cron: `0 6 * * *` with explicit `America/Chicago` zone.
+* **Delivery**: native DSH scheduler (`schedule_create`/`schedule_list`/`schedule_edit`/`schedule_view`); each occurrence opens a **new session** (target `new`) with working directory `C:\src\enterprise-rag-pgvector-rbac` and the standard agent preset. Restart preserves committed occurrences; the task ends after its final delivery if the rule is ever bounded.
+* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (178 tests, 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
+* **Manage**: view/edit/cancel from the DSH Automations dashboard or the `schedule_view` / `schedule_edit` / `schedule_list` tools.
 

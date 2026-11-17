@@ -82,18 +82,19 @@ USING hnsw ((embedding::halfvec(1536)) halfvec_cosine_ops)
 WITH (m = 16, ef_construction = 64);
 
 -- 5.1b pgvector 0.8+ Iterative Index Scan Tuning (prevents overfiltering on narrow RBAC roles)
-DO $$
-BEGIN
-    EXECUTE 'SET hnsw.iterative_scan = ''relaxed_order''';
-    EXECUTE 'SET hnsw.max_scan_tuples = 20000';
-EXCEPTION WHEN OTHERS THEN
-    NULL; -- Gracefully no-op on pgvector < 0.8.0
-END $$;
+-- NOTE: hnsw.iterative_scan = 'relaxed_order' and hnsw.max_scan_tuples = 20000 are
+-- PGC_USERSET session GUCs. They are applied per connection at runtime by
+-- DatabaseManager.configure_iterative_scan() (pool init hook + per-query SET) rather
+-- than persisted here, because SET inside a DO block only affects the current
+-- transaction and never survives into later sessions.
 
 -- 5.2 GIN Role Index: constant-time JSONB role membership pre-filter
+-- Uses the default jsonb_ops operator class because the RBAC queries use the
+-- key-existence operator ?| (allowed_roles ?| $2::text[]), which jsonb_path_ops
+-- does NOT support (path_ops accelerates only @>, @?, @@).
 CREATE INDEX IF NOT EXISTS idx_documents_allowed_roles_gin 
 ON documents 
-USING gin (allowed_roles jsonb_path_ops);
+USING gin (allowed_roles);
 
 -- 5.3 Unique / B-Tree Index on file_hash for cryptographic de-duplication
 CREATE INDEX IF NOT EXISTS idx_documents_file_hash 
