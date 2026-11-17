@@ -1,5 +1,5 @@
 # 🛡️ Enterprise Zero-Trust RAG & Autonomous SDLC
-**Navigation**: [1. Arch](#1-system-architecture-overview) | [2. In-DB RBAC](#2-in-database-rbac-vector-storage-schemasql-appdb) | [3. Quickstart](#3-5-minute-quickstart-runtime-stack) | [4. Identity](#4-identity-oauth-20-pkce-security-appauth) | [5. Ingestion & RAG](#5-ingestion-pipeline-and-hybrid-rag-quality-scriptsingestpy-libs) | [6. Gateways & SDLC](#6-gateways-observability-autonomous-sdlc-app-agent) | [7. Multi-Cloud](#7-multi-cloud-strategy-runbook) | [8. AI Trends](#8-ai-trend-research-extended-thinking-budget)
+**Navigation**: [1. Arch](#1-system-architecture-overview) | [Pillars](#architectural-pillars-overview) | [2. In-DB RBAC](#2-in-database-rbac-vector-storage-schemasql-appdb) | [3. Quickstart](#3-5-minute-quickstart-runtime-stack) | [4. Identity](#4-identity-oauth-20-pkce-security-appauth) | [5. Ingestion & RAG](#5-ingestion-pipeline-and-hybrid-rag-quality-scriptsingestpy-libs) | [6. Gateways & SDLC](#6-gateways-observability-autonomous-sdlc-app-agent) | [7. Multi-Cloud](#7-multi-cloud-strategy-runbook) | [8. AI Trends](#8-ai-trend-research-extended-thinking-budget)
 
 ## 1. System Architecture Overview
 ```mermaid
