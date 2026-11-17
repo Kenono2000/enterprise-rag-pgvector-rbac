@@ -33,7 +33,7 @@ flowchart LR
 | # | Pillar | Core Focus | Key Outcome |
 | :-: | :--- | :--- | :--- |
 | **1** | **In-DB RBAC & Storage** | Pre-filtered GIN + HNSW iterative scan | **75% RAM savings**, zero recall starvation, in-DB token audit |
-| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox | Kubernetes probe ready, 178 tests, 0 warnings |
+| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox | Kubernetes probe ready, 204 tests (203 pass + 1 Docker-gated skip), 0 warnings |
 | **3** | **Identity & Sessions** | Stateless OAuth 2.0 PKCE, HMAC state & encrypted cookies | F5 reload resilience, multi-worker scale-out, zero Redis, SOC-2 bounds |
 | **4** | **Ingestion & Hybrid RAG** | Contextual headers, 64KB SHA-256 de-dup, Adaptive RRF | **>0.90 Context Precision**, O(1) skip for unchanged files |
 | **5** | **Gateways, OTel, SDLC & Deep-Dive** | Zero-Trust FastMCP Gateway, token budgets, OpenTelemetry, SDLC workflow | Rate limits, JWT/TLS auth, token budgets, 60 req/min limits, defense-in-depth |
@@ -67,6 +67,7 @@ ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 ### 🔧 Key RBAC & Storage Innovations
 * **🎯 Zero Recall Starvation**: GIN Index + `hnsw.iterative_scan = 'relaxed_order'` eliminates ANN overfiltering on selective roles. pgvector 0.8+ iterative scans retain filtered-out HNSW candidates in a `discarded` pairing heap and resume traversal in `hnsw.ef_search` batches until `hnsw.max_scan_tuples` (20000) or memory limits stop the scan — so high-selectivity `WHERE d.allowed_roles ?| $2::text[]` clauses no longer exhaust the top-k candidate list. Dynamic candidate depth scales per role cardinality: **80** for single role, **40** for dual, **20** for broad roles.
 * **🔒 SQL Injection Protection**: Parameterized `$2::text[]` array with empty-role guard (returns `[]` before DB execution).
+* **🧹 Unified Role Sanitization**: All retrieval paths (`secure_search`, `hybrid_search`, `list_documents`) share one strict `DatabaseManager.sanitize_roles_for_query()` contract — only non-empty strings that are known application roles (`KNOWN_ROLES`) or valid identifiers survive; injection payloads, empty strings, and non-string claims are dropped and fail closed to `[]`.
 * **🗂️ RBAC GIN Operator Class**: `idx_documents_allowed_roles_gin` uses the default `jsonb_ops` GIN class (not `jsonb_path_ops`), because the key-existence operator `?|` is only served by `jsonb_ops` (`jsonb_path_ops` accelerates `@>`, `@?`, `@@` exclusively). The index is therefore genuinely Bitmap-index-accelerated for the role pre-filter.
 * **📦 Matryoshka 1536-d + 16-Bit Compaction**: 75% cumulative RAM reduction with >98% recall. IEEE 754 sanitization across normalized tables.
 * **💰 Token Budget Controls**: `token_consumption_ledger` tracks usage; `token_managed_limits` provides emergency kill-switch (`is_blocked`).
@@ -85,7 +86,7 @@ ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 flowchart LR
     subgraph DevBootstrap ["1. Bootstrap & Verify"]
         direction TB
-        Venv["Install .venv & Deps"] --> Pytest["Run 178 Pytest Tests"]
+        Venv["Install .venv & Deps"] --> Pytest["Run 204 Pytest Tests"]
     end
     subgraph Containers ["2. Docker Infrastructure"]
         direction TB
@@ -103,7 +104,7 @@ flowchart LR
 ```powershell
 git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
 python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run full test suite (178 tests; the Docker-gated integration test auto-skips when no daemon)
+python -m pytest -v                                                     # 1. Run full test suite (204 tests: 203 pass + 1 Docker-gated testcontainers integration test auto-skips when no daemon)
 docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
@@ -294,6 +295,15 @@ class GroundingGuardrail:
 - **Database-Backed Ledgers**: Tracks every token consumption event via `token_consumption_ledger` and enforces limits through `token_managed_limits`.
 - **Kill-Switching**: Allows administrators or authorized engineers to toggle `enforce_limit` or trip the emergency `is_blocked` kill-switch instantly via REST endpoints (`/api/v1/tokens/limit`) or the MCP `policy://sdlc-budget` resource.
 
+#### 2a. Architectural Invariant Regression Suite (`tests/test_architectural_invariants.py`)
+Pins the six platform invariants so silent regressions fail CI first:
+1. **In-DB RBAC pre-filter**: every retrieval SQL contains `allowed_roles ?| $N::text[]` with roles bound as parameters (never inlined); `schema.sql` GIN index uses default `jsonb_ops`.
+2. **Empty-role short-circuit**: `secure_search` / `hybrid_search` / `list_documents` / all four adapters return `[]` without touching the pool when roles resolve to nothing.
+3. **Structural subtyping**: all adapters satisfy the `runtime_checkable` `VectorSearchProvider` protocol (`isinstance` + coroutine-function contract).
+4. **Event-loop-scoped pools**: `DatabaseManager.get_pool()` caches per loop, reuses within a loop, closes stale pools and recreates across loop changes (Streamlit rerun / worker restart).
+5. **Strict Pydantic V2**: `extra='forbid'` on all REST request/response models and all five MCP tool request models (422 on unknown fields).
+6. **Zero AST dynamic execution**: no builtin `eval`/`exec`/`compile`/`__import__` call sites and no `os.system`/`pickle.loads` attribute calls across `app/`, `agent/`, `libs/`, `sdlc_harness/`.
+
 #### 3. Full-Stack OpenTelemetry (`app/observability.py`)
 - **Dual Exporters**: Integrates with Azure Application Insights (`APPLICATIONINSIGHTS_CONNECTION_STRING`) and OTLP gRPC (`http://localhost:4317`) for Jaeger Badger LSM storage.
 - **Ring Buffer Fallback**: Maintains a thread-safe 1,000-event in-memory ring buffer for metrics and traces, ensuring observability telemetry works even when external exporters are offline.
@@ -345,7 +355,9 @@ flowchart LR
 ### 8.1 Frontier Reasoning Model Trends
 **Claude 3.7 Sonnet** (Anthropic, 2026) — First hybrid reasoning model on the market. Unifies standard and extended thinking in a single model with API-controlled thinking budget (up to 128K tokens). Achieves SWE-bench Verified SOTA (70.3% with scaffold, 63.7% vanilla) and TAU-bench SOTA for agentic workflows. Introduces Claude Code agentic coding tool for terminal-based software engineering delegation.
 **OpenAI o3-mini** (2025) — Cost-effective reasoning model optimized for STEM; now deprecated in the API in favor of newer reasoning variants.
-**Model Context Protocol (MCP)** — Open standard for connecting AI applications to external systems, tools, and data sources. The **Streamable HTTP transport** (spec revision 2025-03-26) replaced the legacy HTTP+SSE pairing: clients POST JSON-RPC to the endpoint and may open a GET SSE stream for server-initiated messages; the spec also defines a **stateless, sessionless mode** (no `Mcp-Session-Id` required) for serverless/proxy-friendly deployments. Reverse-proxy conventions (FastMCP 4/5 and gateway implementations) reflect `Mcp-Method` (JSON-RPC method) and `Mcp-Name` (tool name/URI) HTTP headers to enable zero-DPI routing, rate-limiting, and ACL inspection at the proxy layer. **RFC 9728** (OAuth 2.0 Protected Resource Metadata) and **RFC 8707** (Resource Indicators for OAuth 2.0) underpin dynamic client discovery and token-audience binding. This project's FastMCP gateway implements RFC 9728 Protected Resource Metadata, RFC 8707 tool-level RBAC, stateless Streamable HTTP transport, and `Mcp-Method`/`Mcp-Name` reflection in `app/main.py` middleware.
+**pgvector 0.8+ Iterative Index Scans** — When a selective `WHERE` clause (e.g. the RBAC GIN pre-filter `allowed_roles ?| $2::text[]`) filters out ANN candidates, the HNSW scan no longer returns an under-filled top-k. Iterative scans retain filtered-out candidates in a discarded pairing heap and resume graph traversal in `hnsw.ef_search`-sized batches until `hnsw.max_scan_tuples` or memory limits stop the scan. Modes: `off` (legacy behavior), `strict_order` (preserve exact ANN ordering), `relaxed_order` (default; accept out-of-order candidates for recall). This project sets `relaxed_order` per connection via the pool `init` hook and per query, scaled by role cardinality (`hnsw.iterative_scan`/`hnsw.max_scan_tuples`/`hnsw.ef_search` are `PGC_USERSET` GUCs and must never be persisted in migration `DO` blocks).
+**halfvec 16-bit Quantization** — `halfvec(p)` stores IEEE 754 binary16 components (2 bytes each, `2*p + 8` bytes total) for ~50% RAM/storage savings over `vector(p)`; pgvector ≥ 0.7.0 supports it and HNSW accepts up to 4,000 half-precision dimensions (vs 2,000 float32), so 1536-d `text-embedding-3-small` indexes fit comfortably with headroom. Matryoshka 1536→768→256 truncation composes with it (cumulative ~75% footprint). NaN/Inf components must be sanitized before literal serialization (`DatabaseManager.format_halfvec`).
+**Model Context Protocol (MCP)** — Open standard for connecting AI applications to external systems, tools, and data sources. The **Streamable HTTP transport** (spec revision 2025-03-26) replaced the legacy HTTP+SSE pairing: clients POST JSON-RPC to the endpoint and may open a GET SSE stream for server-initiated messages; the spec also defines a **stateless, sessionless mode** (no `Mcp-Session-Id` required) for serverless/proxy-friendly deployments. Reverse-proxy conventions (FastMCP 4/5 and gateway implementations) reflect `Mcp-Method` (JSON-RPC method) and `Mcp-Name` (tool name/URI) HTTP headers to enable zero-DPI routing, rate-limiting, and ACL inspection at the proxy layer. **RFC 9728** (OAuth 2.0 Protected Resource Metadata) and **RFC 8707** (Resource Indicators for OAuth 2.0) underpin dynamic client discovery and token-audience binding. This project's FastMCP 4 gateway implements RFC 9728 Protected Resource Metadata, RFC 8707 tool-level RBAC, stateless Streamable HTTP transport, and `Mcp-Method`/`Mcp-Name` reflection in `app/main.py` middleware.
 ### 8.2 Extended Thinking / Reasoning Budget (RAG Pipeline)
 Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional integer 0–128000 tokens controlling reasoning depth for complex queries.
 - **`thinking_budget=0`** (default): Fast mode, default 4K context token budget.
@@ -359,6 +371,7 @@ Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional
 | Hybrid reasoning with thinking budget | Complex multi-hop RAG queries benefit from extended reasoning | ✅ Implemented in `app/main.py` + `app/rag/context.py` |
 | MCP Streamable HTTP transport & stateless mode (MCP 2025-03-26 spec) | Sessionless proxy-friendly agent tool access; `Mcp-Method`/`Mcp-Name` reflection headers enable zero-DPI reverse-proxy routing, rate-limiting, ACL inspection | ✅ FastMCP 4 gateway at `/mcp`; header reflection in `trace_http_requests` middleware; RFC 9728 metadata declares `stateless_mode_supported` |
 | Decoupled VectorSearchProvider protocols | Multi-cloud engine abstraction adhering to PEP 544/695 subtyping | ✅ Implemented in `app/db/protocols.py`, `app/db/adapters.py`, & `app/main.py` |
+| Shared fail-closed role sanitization | One strict `sanitize_roles_for_query()` contract (KNOWN_ROLES ∪ identifiers) across `secure_search` / `hybrid_search` / `list_documents`; kills the latent `re`-import NameError and the divergent per-path regexes | ✅ `app/db/manager.py`; regression-pinned in `tests/test_architectural_invariants.py` + `tests/test_database_schema.py` |
 | LangGraph checkpointer resilience (UUIDv6 checkpoint chains, pending-write replay, `parent_checkpoint_id` time-travel) | Crash-resilient agent state-machine recovery and time-travel debugging | ✅ `PostgresCheckpointSaver` on `sdlc_workflow_checkpoints`; `PostgresSaver`/`BadgerSaver`/`BadgerLSMCheckpointSaver` aliases in `agent/workflow.py` (Badger names are compatibility aliases — no upstream LangGraph Badger checkpointer exists; Badger LSM is used for Jaeger OTel storage) |
 | RAG Triad observability (context relevance, faithfulness, answer relevance) | Detects hallucinations and retrieval drift | ✅ Implemented via `GroundingGuardrail` & `app/observability.py` tracer |
 | Agentic SDLC coding (Claude Code pattern) | Autonomous patch proposal, test, and repair | ✅ LangGraph + CrewAI + Hermes workflow in `agent/workflow.py` |
@@ -369,6 +382,6 @@ A recurring DSH scheduled task runs the full refinement loop **daily at 6:00 AM 
 * **Task**: `Daily Enterprise RAG Refinement & R&D` — id `schedule-b4134923-9750-46d3-a3ec-5476b2b8e252`, status `active`.
 * **Timing**: `DTSTART;TZID=America/Chicago:20261117T060000` + `RRULE:FREQ=DAILY;BYHOUR=6;BYMINUTE=0` (first occurrence 2026-11-17 06:00 CDT). Equivalent five-field Cron: `0 6 * * *` with explicit `America/Chicago` zone.
 * **Delivery**: native DSH scheduler (`schedule_create`/`schedule_list`/`schedule_edit`/`schedule_view`); each occurrence opens a **new session** (target `new`) with working directory `C:\src\enterprise-rag-pgvector-rbac` and the standard agent preset. Restart preserves committed occurrences; the task ends after its final delivery if the rule is ever bounded.
-* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (178 tests, 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
+* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (204 tests: 203 pass + 1 Docker-gated skip, 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
 * **Manage**: view/edit/cancel from the DSH Automations dashboard or the `schedule_view` / `schedule_edit` / `schedule_list` tools.
 

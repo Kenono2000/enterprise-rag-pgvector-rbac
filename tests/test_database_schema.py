@@ -7,6 +7,7 @@ HNSW and GIN indexing configurations, cascading deletions, transactional outbox
 """
 
 from pathlib import Path
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
@@ -365,3 +366,72 @@ async def test_pgvector_08_iterative_scan_with_dynamic_ef_search():
     assert "SET hnsw.iterative_scan = 'relaxed_order'" in calls
     assert "SET hnsw.max_scan_tuples = 15000" in calls
     assert "SET hnsw.ef_search = 80" in calls
+
+
+@pytest.mark.asyncio
+async def test_list_documents_executes_parameterized_rbac_query():
+    """Regression: list_documents previously referenced an unimported `re` module
+    (latent NameError) and used a divergent role regex. It must now delegate to
+    the shared DatabaseManager.sanitize_roles_for_query() and bind roles via
+    `allowed_roles ?| $1::text[]`."""
+    mock_conn = AsyncMock()
+    mock_conn.fetch.return_value = [
+        {
+            "id": "uuid-1",
+            "document_id": "DOC-001",
+            "title": "Title",
+            "file_hash": "sha256hash",
+            "allowed_roles": '["engineer"]',
+            "chunk_count": 3,
+            "created_at": datetime(2026, 10, 7, 12, 0, 0, tzinfo=timezone.utc),
+        }
+    ]
+
+    class MockPoolAcquire:
+        async def __aenter__(self):
+            return mock_conn
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value = MockPoolAcquire()
+
+    with patch.object(DatabaseManager, "get_pool", new_callable=AsyncMock, return_value=mock_pool):
+        docs = await DatabaseManager.list_documents(user_roles=["engineer"], limit=10)
+        assert len(docs) == 1
+        assert docs[0]["document_id"] == "DOC-001"
+        sql_query = mock_conn.fetch.call_args[0][0]
+        assert "allowed_roles ?| $1::text[]" in sql_query
+        # Roles bound as parameter, not inlined.
+        assert mock_conn.fetch.call_args[0][1] == ["engineer"]
+
+
+@pytest.mark.asyncio
+async def test_list_documents_fails_closed_on_injection_roles():
+    """list_documents must return [] without querying when all roles are malicious."""
+    mock_pool = MagicMock()
+    with patch.object(DatabaseManager, "get_pool", new_callable=AsyncMock, return_value=mock_pool):
+        docs = await DatabaseManager.list_documents(
+            user_roles=["'; DROP TABLE documents; --", "1=1"], limit=10
+        )
+        assert docs == []
+        mock_pool.acquire.assert_not_called()
+
+
+def test_sanitize_roles_for_query_is_shared_contract():
+    """All retrieval paths share one strict sanitization contract."""
+    from app.auth.role_mapper import KNOWN_ROLES
+
+    # Known roles survive.
+    for role in KNOWN_ROLES:
+        assert DatabaseManager.sanitize_roles_for_query([role]) == [role]
+    # Identifier-shaped custom roles survive (trimmed).
+    assert DatabaseManager.sanitize_roles_for_query(["  my_custom_role "]) == ["my_custom_role"]
+    # Non-strings, empties, and injection payloads are dropped.
+    assert DatabaseManager.sanitize_roles_for_query([123, None, "", "  ", "x; y", "a-b!c"]) == []
+    # Duplicate roles are preserved verbatim (dedup happens in SQL via ?|).
+    assert DatabaseManager.sanitize_roles_for_query(["engineer", "engineer"]) == [
+        "engineer",
+        "engineer",
+    ]
+

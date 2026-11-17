@@ -85,6 +85,26 @@ class DatabaseManager:
             return False
 
     @classmethod
+    def sanitize_roles_for_query(cls, user_roles: List[str]) -> List[str]:
+        """
+        Defense-in-depth role sanitization shared by every retrieval path.
+
+        Keeps only non-empty identifier-shaped strings that are either a known
+        application role (KNOWN_ROLES) or a valid Python-style identifier, so
+        neither SQL-injection payloads nor non-string claims can reach the
+        `allowed_roles ?| $N::text[]` pre-filter. Returns [] when nothing
+        survives, which callers MUST treat as fail-closed (no query executed).
+        """
+        from app.auth.role_mapper import KNOWN_ROLES
+
+        return [
+            str(r).strip()
+            for r in user_roles
+            if isinstance(r, str)
+            and (str(r).strip() in KNOWN_ROLES or str(r).strip().isidentifier())
+        ]
+
+    @classmethod
     def scaled_scan_tuples(cls, roles: List[str]) -> int:
         """
         Scale `hnsw.max_scan_tuples` by role selectivity: narrow callers (1 role) match few rows and
@@ -173,12 +193,8 @@ class DatabaseManager:
         if not user_roles:
             return []
 
-        # Defense-in-depth: Ensure all role entries are valid, non-empty identifier strings
-        from app.auth.role_mapper import KNOWN_ROLES
-        sanitized_roles = [
-            str(r).strip() for r in user_roles
-            if isinstance(r, str) and (str(r).strip() in KNOWN_ROLES or str(r).strip().isidentifier())
-        ]
+        # Defense-in-depth: keep only valid, non-empty identifier role strings
+        sanitized_roles = cls.sanitize_roles_for_query(user_roles)
         if not sanitized_roles:
             return []
 
@@ -234,11 +250,7 @@ class DatabaseManager:
         if not user_roles:
             return []
 
-        from app.auth.role_mapper import KNOWN_ROLES
-        sanitized_roles = [
-            str(r).strip() for r in user_roles
-            if isinstance(r, str) and (str(r).strip() in KNOWN_ROLES or str(r).strip().isidentifier())
-        ]
+        sanitized_roles = cls.sanitize_roles_for_query(user_roles)
         if not sanitized_roles:
             return []
 
@@ -560,7 +572,7 @@ class DatabaseManager:
         if not user_roles:
             return []
 
-        clean_roles = [r for r in user_roles if isinstance(r, str) and re.match(r"^[a-zA-Z0-9_\-\.\@]+$", r)]
+        clean_roles = cls.sanitize_roles_for_query(user_roles)
         if not clean_roles:
             return []
 
