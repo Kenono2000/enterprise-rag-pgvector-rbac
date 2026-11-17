@@ -58,7 +58,7 @@ async def main():
             result = await client.call_tool(
                 "search_sdlc_context",
                 {
-                    "question": "What does the Mindstream report say about AI agents?",
+                    "question": "How do i find out my purpose in life?",
                     "user_role": '["finance_executive"]'
                 }
             )

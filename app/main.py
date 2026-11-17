@@ -71,7 +71,7 @@ class Citation(BaseModel):
 class RAGQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    question: str = Field(..., min_length=1, json_schema_extra={"example": "What does the Mindstream report say about AI agents?"})
+    question: str = Field(..., min_length=1, json_schema_extra={"example": "How do i find out my purpose in life?"})
     mode: str = Field(default="hybrid", description="Retrieval mode: 'hybrid' (vector + full-text RRF) or 'dense'")
     thinking_budget: Optional[int] = Field(
         default=0,
@@ -229,6 +229,23 @@ async def get_current_user(
 # Application Lifespan & Instance
 # ---------------------------------------------------------------------------
 
+# FastMCP 4 Streamable HTTP sub-application, built at import time so the
+# combined lifespan below can drive its session manager. Built with an explicit
+# path="/mcp" so the sub-app serves its endpoint at its own /mcp route; it is
+# mounted at "/" (added LAST, after every REST route) so the outer /mcp maps to
+# the inner /mcp with no redirect. Mounting at a nested prefix (e.g. "/mcp")
+# would make the real endpoint /mcp/mcp and leave /mcp itself 307-redirecting
+# to a 404, which MCP hosts report as a 30s connection timeout.
+try:
+    from app.mcp.gateway import mcp as mcp_gateway
+    mcp_http_app = mcp_gateway.http_app(path="/mcp")
+    _mcp_build_err = None
+except Exception as exc:  # pragma: no cover - import-time guard
+    mcp_gateway = None
+    mcp_http_app = None
+    _mcp_build_err = exc
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing database connection pool...")
@@ -237,7 +254,16 @@ async def lifespan(app: FastAPI):
         logger.info("Database pool established.")
     except Exception as exc:
         logger.warning("Database pool initialization deferred: %s", exc)
-    yield
+    # FastMCP's StreamableHTTPSessionManager task group is only initialized by
+    # the sub-application's own ASGI lifespan; a plain app.mount() never runs
+    # it, so every MCP request would fail with "Task group is not initialized".
+    if mcp_http_app is not None:
+        async with mcp_http_app.router.lifespan_context(app):
+            yield
+    else:
+        if _mcp_build_err is not None:
+            logger.warning("FastMCP HTTP app build deferred: %s", _mcp_build_err)
+        yield
     logger.info("Closing database connection pool...")
     await DatabaseManager.close()
 
@@ -248,14 +274,6 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
-
-# Mount FastMCP 4 Streamable HTTP MCP Sub-Application at /mcp
-try:
-    from app.mcp.gateway import mcp as mcp_gateway
-    app.mount("/mcp", mcp_gateway.http_app())
-    logger.info("Mounted FastMCP 4 Streamable HTTP application at /mcp")
-except Exception as _mcp_mount_err:
-    logger.warning("FastMCP HTTP app mount deferred: %s", _mcp_mount_err)
 
 
 @app.middleware("http")
@@ -918,6 +936,18 @@ async def github_webhook(
         return {"status": "processed", "result": result}
 
     return {"status": "ignored", "event": x_github_event}
+
+
+# Mount the FastMCP 4 Streamable HTTP sub-application as the catch-all route.
+# MUST be registered after every FastAPI endpoint above: Starlette matches
+# routes in registration order, so this catch-all Mount would otherwise shadow
+# any REST route declared later in this module. With the mount at "/", the
+# sub-app's internal /mcp endpoint is reachable at the outer /mcp path with no
+# redirect, and the combined lifespan (above) keeps its session manager alive.
+# See https://gofastmcp.com/deployment/http#integration-with-web-frameworks
+if mcp_http_app is not None:
+    app.mount("/", mcp_http_app)
+    logger.info("Mounted FastMCP 4 Streamable HTTP application at /mcp")
 
 
 if __name__ == "__main__":

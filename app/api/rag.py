@@ -64,7 +64,7 @@ class Citation(BaseModel):
 class RAGQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    question: str = Field(..., example="What does the Mindstream report say about AI agents?")
+    question: str = Field(..., example="How do i find out my purpose in life?")
 
 
 class RAGResponse(BaseModel):

@@ -285,7 +285,121 @@ def test_scaled_scan_tuples_by_role_selectivity():
 
 
 def test_fastmcp_streamable_http_mounted_on_fastapi():
-    """Verify FastMCP 4 Streamable HTTP application is mounted at /mcp on FastAPI."""
+    """Verify the FastMCP 4 Streamable HTTP app is mounted and reachable at /mcp.
+
+    Regression test for a broken integration where `app.mount("/mcp",
+    mcp.http_app())` left the real endpoint at /mcp/mcp (bare /mcp 307-redirected
+    to a 404) and never ran the sub-app's ASGI lifespan, so every MCP request
+    failed with "StreamableHTTPSessionManager task group is not initialized".
+    MCP hosts surface both defects as a 30-second connection timeout.
+    """
+    from fastapi.testclient import TestClient
+
     from app.main import app
-    route_paths = [getattr(r, "path", None) for r in app.routes]
-    assert "/mcp" in route_paths
+
+    # A Mount route must exist and point at the FastMCP sub-application.
+    mounts = [r for r in app.routes if type(r).__name__ == "Mount"]
+    assert mounts, "FastMCP sub-application is not mounted"
+    assert any(
+        getattr(r, "app", None) is not None
+        and type(getattr(r, "app", None)).__name__ == "StarletteWithLifespan"
+        for r in mounts
+    )
+
+
+class TestFastMcpHttpMount:
+    """End-to-end Streamable HTTP handshake over the mounted /mcp endpoint."""
+
+    _INIT = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "regression-test", "version": "1.0"},
+        },
+    }
+
+    def _post(self, client, payload, session_id=None):
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if session_id:
+            headers["Mcp-Session-Id"] = session_id
+        return client.post("/mcp", json=payload, headers=headers)
+
+    def test_initialize_handshake_returns_200_and_protocol_version(self):
+        """POST /mcp must complete the initialize handshake — no 307/404/500."""
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        with TestClient(app) as client:
+            response = self._post(client, self._INIT)
+            assert response.status_code == 200, (
+                f"initialize returned {response.status_code}: {response.text[:300]}"
+            )
+            assert "2025-03-26" in response.text
+            assert "serverInfo" in response.text
+
+    def test_tools_list_round_trip_with_session_id(self):
+        """initialize -> tools/list must enumerate the gateway tools."""
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        with TestClient(app) as client:
+            init = self._post(client, self._INIT)
+            assert init.status_code == 200
+            session_id = init.headers.get("Mcp-Session-Id")
+            assert session_id, "server did not return Mcp-Session-Id"
+
+            notifications = self._post(
+                client,
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                session_id=session_id,
+            )
+            assert notifications.status_code in (200, 202)
+
+            listed = self._post(
+                client,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    "params": {},
+                },
+                session_id=session_id,
+            )
+            assert listed.status_code == 200, (
+                f"tools/list returned {listed.status_code}: {listed.text[:300]}"
+            )
+            for tool_name in (
+                "search_sdlc_context",
+                "propose_patch",
+                "get_gateway_metadata",
+            ):
+                assert tool_name in listed.text
+
+    def test_rest_routes_not_shadowed_by_mcp_mount(self):
+        """The catch-all MCP mount must not shadow FastAPI REST endpoints."""
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        with TestClient(app) as client:
+            health = client.get("/health")
+            assert health.status_code == 200
+            assert health.json()["status"] == "healthy"
+
+            # /readyz depends on a live DATABASE_URL, which the hermetic test
+            # environment blanks out (conftest.py); the readiness probe must
+            # still answer with its own status (200 ready or 503 not-ready)
+            # rather than being swallowed by the MCP catch-all mount (404).
+            readyz = client.get("/readyz")
+            assert readyz.status_code in (200, 503), (
+                f"/readyz returned {readyz.status_code} (catch-all mount shadowed it?)"
+            )
+            assert "ready" in readyz.text or "status" in readyz.text
