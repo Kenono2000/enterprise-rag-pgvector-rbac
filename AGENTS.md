@@ -17,6 +17,15 @@
 10. **`regex-and-cron-utility`**: Dialect validation, ReDoS prevention, regex test matrices, and 5/6-field cron schedule breakdowns.
 11. **`mermaid-diagram-optimizer`**: Compact multi-stage flowchart restructuring, 16:9/4:3 aspect ratio targeting, line wrapping (`<br/>` <= 22 chars), universal quoted syntax, and Dagre rank splay prevention.
 12. **`tiered-subagent-routing`**: Pairs frontier reasoning models (`model: inherit`) with Gemini Flash mechanical log-triage subagents (`model: flash`, `test-triager`) and Gemini Pro independent LLM-as-a-judge diff verifiers (`model: pro`, `cross-model-judge`).
+13. **`minimal-markdown`**: Enforces ultra-compact vertical whitespace, single blank lines, zero trailing spaces, and stripped interior lines in diagrams/code blocks across all Markdown files.
+14. **`readme-auto-sync`**: Mandatory automatic synchronization of README.md, architecture layers, Mermaid diagrams, and test suite counts after code changes.
+15. **`enterprise-rag-skill`**: Project-specific domain skill for enterprise RAG pipelines, pgvector indexing, and RBAC security rules.
+16. **`fastapi-async-architecture`**: High-throughput FastAPI route engineering, asyncpg pooling, Pydantic schemas, and JWT dependencies.
+17. **`zero-trust-rbac-coding`**: Shift-left in-database zero-trust pgvector RBAC queries, GIN pre-filtering, and schema changes.
+18. **`sdlc-self-healing-agent-workflow`**: Autonomous SDLC agent development, LangGraph state persistence, CrewAI crew roles, and FastMCP tools.
+19. **`test-automation-and-tdd`**: Test authoring, pytest suites, asyncio isolation, and database/LLM mock setups.
+20. **`hermes-issue-1-harden-oauth-pkce-state`**: Hardened OAuth 2.0 PKCE state verification, timing-safe validation, and HMAC cookies.
+21. **`default-skill`**: Standard baseline template for scaffolding Agent Skills.
 
 ### Behavioral Enforcement
 - **Single-File Documentation Policy (CRITICAL)**: All project, architectural, runbook, and migration markdown documentation MUST reside exclusively in [`README.md`](file:///c:/src/enterprise-rag-pgvector-rbac/README.md). Never create separate documentation `.md` files in `docs/` or root directories—always consolidate and maintain all documentation directly inside `README.md`.

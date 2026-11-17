@@ -23,6 +23,7 @@ When creating or editing any Markdown (`.md`) file, clean typography, compact sp
 - **Trailing Whitespace Elimination:** Strip all trailing whitespace from every line in the file.
 - **Frontmatter Compactness:** Keep YAML or TOML frontmatter cleanly formatted with no extraneous padding or empty lines inside or immediately following the delimiters.
 - **Compact Block Elements:** Ensure lists, tables, and blockquotes maintain compact spacing without double blank lines between items or rows.
+- **Compact Mermaid Diagrams:** Include compact layout directives (`nodeSpacing: 15`, `rankSpacing: 25`, `padding: 8`), remove all blank lines inside Mermaid code blocks, chain transitions inline, and escape pipe characters with `?#124;` (`mermaid-diagram-optimizer`).
 
 ## Practical workflow
 

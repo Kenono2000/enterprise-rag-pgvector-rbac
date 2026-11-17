@@ -12,5 +12,14 @@
   - `content-brief-and-calendar-generator`: Must govern technical documentation briefs, guides, and dissemination.
   - `viral-animation-prompting`: Must govern any generative video/motion prompting requests.
   - `skill-creator`: Must govern authoring or updating any new skills.
-  - `minimal-markdown`: Must govern markdown file creation and spacing.
+  - `minimal-markdown`: Must govern markdown file creation and compact vertical spacing.
+  - `mermaid-diagram-optimizer`: Must govern authoring, refactoring, and compact layout styling for all Mermaid diagrams.
   - `getting-started-with-muse-skills`: Must govern skill maintenance and Agent Skills formatting adherence.
+  - `readme-auto-sync`: Must govern automatic documentation sync across README.md, diagrams, and website.
+  - `enterprise-rag-skill`: Must govern RAG pipeline, pgvector, and RBAC security rules.
+  - `fastapi-async-architecture`: Must govern FastAPI routing, asyncpg pooling, and API auth dependencies.
+  - `zero-trust-rbac-coding`: Must govern in-database pgvector RBAC queries and SQL schemas.
+  - `sdlc-self-healing-agent-workflow`: Must govern LangGraph SDLC orchestration, CrewAI workflows, and FastMCP tools.
+  - `test-automation-and-tdd`: Must govern test suite execution, pytest fixtures, and test mocking.
+  - `tiered-subagent-routing`: Must govern hierarchical subagent delegation and model tiering.
+  - `hermes-issue-1-harden-oauth-pkce-state`: Must govern OAuth 2.0 PKCE state verification and HMAC cookies.

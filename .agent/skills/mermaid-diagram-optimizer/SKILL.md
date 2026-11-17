@@ -56,6 +56,20 @@ Mermaid's Dagre layout engine calculates subgraph ranks sequentially:
 - Use standard quoted rectangle syntax `id["Text"]` for all general nodes and databases.
 - Avoid cylinder `id[( "Text" )]` or `id[("Text")]` which breaks with `got 'STR'` in many parsers. Instead, use `id["Database Name<br/>• Details"]` and style it with distinct fill and stroke colors (`#e0f2fe`, `#0369a1`).
 
+### 6. Compact Layout Directives & Markdown Minimization
+To minimize diagram height and maintain visual tightness per `markdown-minimal-whitespace`:
+- **Init Config Directives**: Always include compact spacing config at the top of flowcharts:
+  ```mermaid
+  %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+  ```
+- **Sequence Diagram Directives**: For sequence diagrams, specify tight actor and message margins:
+  ```mermaid
+  %%{init: {'sequence': {'actorMargin': 40, 'boxMargin': 8, 'boxTextMargin': 4, 'messageMargin': 22}}}%%
+  ```
+- **Strip Blank Lines**: Do not insert blank lines inside Mermaid diagram blocks.
+- **Pipe Character Escaping**: When labeling nodes or transitions containing `|` (e.g. `pgvector (?| GIN)`), escape the pipe with HTML entity `?#124;` (`pgvector (?#124; GIN)`) to prevent parser conflicts.
+- **Single-Line Chained Transitions**: Chain linear transitions compactly on a single line (`Stage1 --> Stage2 --> Stage3`).
+
 ## Practical workflow
 
 ### Step 1: Diagnose the Layout Issue
