@@ -40,9 +40,12 @@ def test_schema_sql_contains_normalized_tables_and_indexes():
     assert "hnsw.iterative_scan" in sql_text
     assert "relaxed_order" in sql_text
 
-    # 4. GIN Role Index
+    # 4. GIN Role Index (default jsonb_ops operator class: supports ?| key-existence
+    #    queries; jsonb_path_ops only accelerates @>, @?, @@ and would NOT serve the
+    #    `allowed_roles ?| $2::text[]` RBAC pre-filter)
     assert "idx_documents_allowed_roles_gin" in sql_text
-    assert "USING gin (allowed_roles jsonb_path_ops)" in sql_text
+    assert "USING gin (allowed_roles);" in sql_text
+    assert "USING gin (allowed_roles jsonb_path_ops)" not in sql_text
 
     # 5. File Hash De-duplication Index
     assert "idx_documents_file_hash" in sql_text
