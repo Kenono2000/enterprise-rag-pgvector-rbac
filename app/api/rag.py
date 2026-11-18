@@ -33,7 +33,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth.jwks import verify_google_token
-from app.auth.role_mapper import extract_roles, KNOWN_ROLES
+from app.auth.role_mapper import extract_roles, sanitize_roles_for_query
 from app.db.llm import chat_completion, generate_embedding
 from app.db.manager import DatabaseManager
 
@@ -64,7 +64,7 @@ class Citation(BaseModel):
 class RAGQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    question: str = Field(..., example="How do i find out my purpose in life?")
+    question: str = Field(..., json_schema_extra={"example": "How do i find out my purpose in life?"})
 
 
 class RAGResponse(BaseModel):
@@ -127,10 +127,7 @@ async def get_current_user(
             raw_roles = json.loads(x_user_roles)
             if not isinstance(raw_roles, list):
                 raise ValueError("X-User-Roles must be a JSON array")
-            roles = [
-                str(r).strip() for r in raw_roles 
-                if isinstance(r, str) and (r.strip() in KNOWN_ROLES or r.strip().isidentifier())
-            ]
+            roles = sanitize_roles_for_query(raw_roles)
             logger.debug("Using legacy X-User-Roles header: %s", roles)
             return UserIdentity(sub="legacy-header-user", roles=roles)
         except Exception as exc:

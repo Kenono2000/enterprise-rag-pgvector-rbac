@@ -131,11 +131,8 @@ async def databricks_hybrid_search(
     if not user_roles:
         return []
 
-    from app.auth.role_mapper import KNOWN_ROLES
-    sanitized_roles = [
-        str(r).strip() for r in user_roles
-        if isinstance(r, str) and (str(r).strip() in KNOWN_ROLES or str(r).strip().isidentifier())
-    ]
+    from app.auth.role_mapper import sanitize_roles_for_query
+    sanitized_roles = sanitize_roles_for_query(user_roles)
     if not sanitized_roles:
         return []
 

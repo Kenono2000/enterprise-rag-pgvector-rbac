@@ -89,20 +89,15 @@ class DatabaseManager:
         """
         Defense-in-depth role sanitization shared by every retrieval path.
 
-        Keeps only non-empty identifier-shaped strings that are either a known
-        application role (KNOWN_ROLES) or a valid Python-style identifier, so
-        neither SQL-injection payloads nor non-string claims can reach the
-        `allowed_roles ?| $N::text[]` pre-filter. Returns [] when nothing
-        survives, which callers MUST treat as fail-closed (no query executed).
+        Delegates to the canonical implementation in
+        ``app.auth.role_mapper.sanitize_roles_for_query`` so the contract is
+        identical across pgvector, Azure, GCP, Databricks, and the REST/MCP
+        legacy-header paths. Returns [] when nothing survives; callers MUST
+        treat that as fail-closed (no query executed).
         """
-        from app.auth.role_mapper import KNOWN_ROLES
+        from app.auth.role_mapper import sanitize_roles_for_query
 
-        return [
-            str(r).strip()
-            for r in user_roles
-            if isinstance(r, str)
-            and (str(r).strip() in KNOWN_ROLES or str(r).strip().isidentifier())
-        ]
+        return sanitize_roles_for_query(user_roles)
 
     @classmethod
     def scaled_scan_tuples(cls, roles: List[str]) -> int:

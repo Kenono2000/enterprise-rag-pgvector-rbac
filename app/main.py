@@ -29,7 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import settings
 from app.db import DatabaseManager, generate_embedding, chat_completion, chat_completion_stream, get_vector_search_adapter
 from app.rag import ContextAssembler
-from app.auth import verify_google_token, extract_roles, KNOWN_ROLES
+from app.auth import verify_google_token, extract_roles
+from app.auth.role_mapper import sanitize_roles_for_query
 from app.observability import tracer
 from agent.guardrails import (
     SlidingWindowRateLimiter,
@@ -204,10 +205,7 @@ async def get_current_user(
             raw_roles = json.loads(x_user_roles)
             if not isinstance(raw_roles, list):
                 raise ValueError("X-User-Roles header must be a JSON array of strings")
-            roles = [
-                str(r).strip() for r in raw_roles 
-                if isinstance(r, str) and (r.strip() in KNOWN_ROLES or r.strip().isidentifier())
-            ]
+            roles = sanitize_roles_for_query(raw_roles)
             return UserIdentity(sub="legacy-header-user", roles=roles)
         except Exception as exc:
             raise HTTPException(

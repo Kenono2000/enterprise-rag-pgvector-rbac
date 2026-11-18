@@ -283,6 +283,33 @@ def _fallback_roles_from_email(email: str) -> List[str]:
 # Public API
 # ---------------------------------------------------------------------------
 
+def sanitize_roles_for_query(user_roles: Any) -> List[str]:
+    """
+    Defense-in-depth role sanitization shared by every retrieval path.
+
+    Keeps only non-empty identifier-shaped strings that are either a known
+    application role (KNOWN_ROLES) or a valid Python-style identifier, so
+    neither SQL-injection payloads nor non-string claims can reach the
+    ``allowed_roles ?| $N::text[]`` pre-filter (or the equivalent OData /
+    ScaNN restricts / Unity Catalog filters clauses on cloud backends).
+    Returns [] when nothing survives, which callers MUST treat as
+    fail-closed (no query executed).
+
+    This is the single source of truth for the role-sanitization contract:
+    ``DatabaseManager.sanitize_roles_for_query``, the Azure/GCP/Databricks
+    adapters, and the REST/MCP legacy-header paths all delegate here so the
+    invariant cannot drift between engines.
+    """
+    if not isinstance(user_roles, (list, tuple, set)):
+        return []
+    return [
+        str(r).strip()
+        for r in user_roles
+        if isinstance(r, str)
+        and (str(r).strip() in KNOWN_ROLES or str(r).strip().isidentifier())
+    ]
+
+
 def extract_roles(token_payload: Dict[str, Any]) -> List[str]:
     """
     Extract application roles from a verified Google/Firebase ID token payload.

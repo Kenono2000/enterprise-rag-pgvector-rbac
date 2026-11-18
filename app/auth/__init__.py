@@ -20,6 +20,7 @@ from app.auth.role_mapper import (
     KNOWN_ROLES,
     extract_roles,
     ensure_google_application_credentials,
+    sanitize_roles_for_query,
 )
 
 __all__ = [
@@ -39,4 +40,5 @@ __all__ = [
     "get_allowed_issuers",
     "extract_roles",
     "ensure_google_application_credentials",
+    "sanitize_roles_for_query",
 ]
