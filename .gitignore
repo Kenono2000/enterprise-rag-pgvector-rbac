@@ -92,6 +92,9 @@ yarn-error.log*
 # Databases
 *.sqlite3
 *.sqlite3-journal
+*.db
+*.db-journal
+data/
 
 # Project specific
 _agents/

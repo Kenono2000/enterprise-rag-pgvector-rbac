@@ -1,5 +1,5 @@
 # 🛡️ Enterprise Zero-Trust RAG & Autonomous SDLC
-**Navigation**: [1. Arch](#1-system-architecture-overview) | [Pillars](#architectural-pillars-overview) | [2. In-DB RBAC](#2-in-database-rbac-vector-storage-schemasql-appdb) | [3. Quickstart](#3-5-minute-quickstart-runtime-stack) | [4. Identity](#4-identity-oauth-20-pkce-security-appauth) | [5. Ingestion & RAG](#5-ingestion-pipeline-and-hybrid-rag-quality-scriptsingestpy-libs) | [6. Gateways & SDLC](#6-gateways-observability-autonomous-sdlc-app-agent) | [7. Multi-Cloud](#7-multi-cloud-strategy-runbook) | [8. AI Trends](#8-ai-trend-research-extended-thinking-budget)
+**Navigation**: [1. Arch](#1-system-architecture-overview) | [Pillars](#architectural-pillars-overview) | [2. In-DB RBAC](#2-in-database-rbac-vector-storage-schemasql-appdb) | [3. Quickstart](#3-5-minute-quickstart-runtime-stack) | [4. Identity](#4-identity-oauth-20-pkce-security-appauth) | [5. Ingestion & RAG](#5-ingestion-pipeline-and-hybrid-rag-quality-scriptsingestpy-libs) | [6. Gateways & SDLC](#6-gateways-observability-autonomous-sdlc-app-agent) | [7. Multi-Cloud](#7-multi-cloud-strategy-runbook) | [8. AI Trends](#8-ai-trend-research-extended-thinking-budget) | [9. Incident Investigator](#9-incident-investigator-agent-7-step-agentic-roadmap)
 
 ## 1. System Architecture Overview
 ```mermaid
@@ -33,7 +33,7 @@ flowchart LR
 | # | Pillar | Core Focus | Key Outcome |
 | :-: | :--- | :--- | :--- |
 | **1** | **In-DB RBAC & Storage** | Pre-filtered GIN + HNSW iterative scan | **75% RAM savings**, zero recall starvation, in-DB token audit |
-| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox | Kubernetes probe ready, 204 tests (203 pass + 1 Docker-gated skip), 0 warnings |
+| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox | Kubernetes probe ready, 260 tests (260 pass), 0 warnings |
 | **3** | **Identity & Sessions** | Stateless OAuth 2.0 PKCE, HMAC state & encrypted cookies | F5 reload resilience, multi-worker scale-out, zero Redis, SOC-2 bounds |
 | **4** | **Ingestion & Hybrid RAG** | Contextual headers, 64KB SHA-256 de-dup, Adaptive RRF | **>0.90 Context Precision**, O(1) skip for unchanged files |
 | **5** | **Gateways, OTel, SDLC & Deep-Dive** | Zero-Trust FastMCP Gateway, token budgets, OpenTelemetry, SDLC workflow | Rate limits, JWT/TLS auth, token budgets, 60 req/min limits, defense-in-depth |
@@ -104,7 +104,7 @@ flowchart LR
 ```powershell
 git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
 python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run full test suite (207 tests: all pass; Docker-gated testcontainers integration test runs when a daemon is present)
+python -m pytest -v                                                     # 1. Run full test suite (260 tests: all pass; Docker-gated testcontainers integration test runs when a daemon is present)
 docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
@@ -376,6 +376,7 @@ Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional
 | LangGraph checkpointer resilience (UUIDv6 checkpoint chains, pending-write replay, `parent_checkpoint_id` time-travel) | Crash-resilient agent state-machine recovery and time-travel debugging | ✅ `PostgresCheckpointSaver` on `sdlc_workflow_checkpoints`; `PostgresSaver`/`BadgerSaver`/`BadgerLSMCheckpointSaver` aliases in `agent/workflow.py` (Badger names are compatibility aliases — no upstream LangGraph Badger checkpointer exists; Badger LSM is used for Jaeger OTel storage) |
 | RAG Triad observability (context relevance, faithfulness, answer relevance) | Detects hallucinations and retrieval drift | ✅ Implemented via `GroundingGuardrail` & `app/observability.py` tracer |
 | Agentic SDLC coding (Claude Code pattern) | Autonomous patch proposal, test, and repair | ✅ LangGraph + CrewAI + Hermes workflow in `agent/workflow.py` |
+| Incident investigator agent (KDnuggets 7-step roadmap) | Hand-built reason-act-observe loop, six read-only MCP tools, layered memory, orchestrator-workers, replay eval, deployment guardrails | ✅ `incident_agent/` package; 52-test suite in `tests/test_incident_investigator.py`; 30-case replay at 100% pass |
 
 ### 8.4 Daily Automation (Unattended SDLC Refinement)
 A recurring DSH scheduled task runs the full refinement loop **daily at 6:00 AM America/Chicago** (host timezone), delivering the Principal AI Platform Architect prompt into a fresh session rooted at this repository:
@@ -383,6 +384,82 @@ A recurring DSH scheduled task runs the full refinement loop **daily at 6:00 AM 
 * **Task**: `Daily Enterprise RAG Refinement & R&D` — id `schedule-b4134923-9750-46d3-a3ec-5476b2b8e252`, status `active`.
 * **Timing**: `DTSTART;TZID=America/Chicago:20261117T060000` + `RRULE:FREQ=DAILY;BYHOUR=6;BYMINUTE=0` (first occurrence 2026-11-17 06:00 CDT). Equivalent five-field Cron: `0 6 * * *` with explicit `America/Chicago` zone.
 * **Delivery**: native DSH scheduler (`schedule_create`/`schedule_list`/`schedule_edit`/`schedule_view`); each occurrence opens a **new session** (target `new`) with working directory `C:\src\enterprise-rag-pgvector-rbac` and the standard agent preset. Restart preserves committed occurrences; the task ends after its final delivery if the rule is ever bounded.
-* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (207 tests, 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
+* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (260 tests, 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
 * **Manage**: view/edit/cancel from the DSH Automations dashboard or the `schedule_view` / `schedule_edit` / `schedule_list` tools.
+
+## 9. Incident Investigator Agent (7-Step Agentic Roadmap)
+A self-study implementation of the KDnuggets 7-step agentic-system-design roadmap (Bala Priya C): build an **incident investigator agent** that finds the root cause of production alerts, learning how agents fail before designing controls for those failures. The whole project lives in `incident_agent/` and is graded by `tests/test_incident_investigator.py` (53 tests) plus a 30-case replay suite.
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph S1 ["1. Workflow"]
+        direction TB
+        Hook["Webhook<br/>HMAC verify"] --> Triage["Fixed triage<br/>pipeline"]
+        Triage --> Mis{"Misjudged?"}
+        Mis -->|"no: resolved"| Done1["Fixed pipeline<br/>resolves alert"]
+    end
+    subgraph S2 ["2. Loop"]
+        direction TB
+        Loop["Reason-Act-Observe<br/>loop (12-step cap)"] --> Trace["Trace log"]
+    end
+    subgraph S3 ["3-4. Tools+Memory"]
+        direction TB
+        Tools["6 read-only<br/>MCP tools"] --> Mem["Scratchpad +<br/>SQLite store"]
+    end
+    subgraph S5 ["5. Orchestrator"]
+        direction TB
+        Orch["Orchestrator"] --> Logs["Logs<br/>analyst"]
+        Orch --> Mets["Metrics<br/>analyst"]
+        Orch --> Chg["Changes<br/>analyst"]
+    end
+    subgraph S67 ["6-7. Eval+Guard"]
+        direction TB
+        Eval["30-case replay<br/>x3 runs"] --> Guard["Budgets +<br/>approval gate"]
+    end
+    Mis -->|"yes: escalate"| Loop
+    Loop --> Tools
+    Orch --> Tools
+    Eval --> Loop
+    Guard --> Loop
+    style S1 fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style S2 fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style S3 fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
+    style S5 fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style S67 fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
+```
+### 9.1 The Seven Steps Mapped to Code
+| Step | Roadmap Concept | Project Addition | Where |
+| :---: | :--- | :--- | :--- |
+| 1 | Workflow vs. agent (autonomy spectrum) | 10 synthetic incidents + fixed triage pipeline that notes where it misjudges | `incident_agent/loop.py::fixed_triage_pipeline` |
+| 2 | Reasoning-action loop | Hand-built reason-act-observe loop, 12-step cap, trace logging | `incident_agent/loop.py::ReasonActLoop` |
+| 3 | Tool design as contracts | Six read-only tools behind a FastMCP server | `incident_agent/tools.py`, `incident_agent/mcp_server.py` |
+| 4 | Memory (working/session/long-term) | Scratchpad, output compaction, SQLite solved-incident store | `incident_agent/memory.py` |
+| 5 | Multi-agent coordination | Orchestrator + 3 parallel analysts (logs/metrics/changes) with explicit briefs | `incident_agent/orchestrator.py` |
+| 6 | Evaluation | 30-incident replay suite x3 runs, 4-dimension grading, scoreboard + failure taxonomy | `incident_agent/eval.py` |
+| 7 | Deployment guardrails | Step/time/token budgets, least-privilege read-only tools, approval-gated remediation, webhook runs | `incident_agent/guardrails.py`, `incident_agent/runner.py` |
+
+### 9.2 Key Design Decisions
+* **Failure modes controlled before the first run**: malformed arguments get actionable errors (registry names the expected parameters); repeated calls trip a per-tool repeat guard; early answers are impossible (the loop only stops on corroborated confidence ≥ 0.85); runaway loops are bounded by the 12-step cap and a token budget.
+* **Simplest shape that works**: a fixed deterministic triage pipeline runs first; only when it misjudges (deploy correlation needed, or multi-change disambiguation) does the run escalate to the costlier orchestrator-workers path — mirroring the autonomy spectrum.
+* **Temporal deploy/config correlation**: change candidates are scored by proximity to alert onset (≤15 min → 0.9), so the flag toggle minutes before the break outranks a deploy hours old. This is the core incident-investigation reasoning, encoded deterministically.
+* **Least privilege**: the deployed toolset is read-only; remediation (rollback/flag-flip/scale) is a separate approval-gated action requiring an `oncall-lead` sign-off, never a default tool.
+* **Hermetic by construction**: the synthetic corpus is anchored to a fixed base time (`BASE_TIME`), the SQLite store defaults to `data/` (gitignored, env-overridable via `INCIDENT_MEMORY_DB`), and no network or LLM calls are made — mirroring the repository's offline-test convention.
+
+### 9.3 Replay Evaluation Scoreboard
+The 30-case replay suite (10 seeded incidents x 3 deterministic permutations) runs 3 times per case and grades four dimensions. Current results (pinned by `test_replay_evaluator_full_suite_passes`):
+| Dimension | Pass Rate |
+| :--- | :---: |
+| Tool selection (changes + logs queried) | 1.000 |
+| Arguments (all dispatches valid) | 1.000 |
+| Final answer (named change == ground truth) | 1.000 |
+| Trajectory (within step cap, no stuck loops) | 1.000 |
+| **Overall** | **1.000** |
+
+### 9.4 Running It
+```powershell
+python -m incident_agent.mcp_server --transport streamable-http --port 8001   # Six read-only incident tools over FastMCP
+python -m pytest tests/test_incident_investigator.py -v                       # 53 hermetic tests
+```
+* **Webhook shadow mode**: `handle_alert_webhook()` verifies the HMAC signature, parses the alert, and runs the investigation alongside on-call engineers; remediation stays approval-gated until the rollout reaches assist mode.
+* **Rollout path**: shadow mode (observe alongside on-call) → assist mode (suggest root cause + gated remediation) → wider use, with the replay suite as the CI eval gate.
 
