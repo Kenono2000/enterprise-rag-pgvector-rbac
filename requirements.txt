@@ -7,7 +7,6 @@ crewai-core==1.15.43
 crewai-tools==1.15.43
 fastapi>=0.133.0
 fastmcp==4.2.1
-mcp==1.30.0
 firebase_admin==7.7.0
 google-auth>=2.30.0
 google-cloud-aiplatform>=1.60.0
