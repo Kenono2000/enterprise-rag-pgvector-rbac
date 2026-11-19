@@ -68,7 +68,7 @@ WHERE d.allowed_roles ?| $2::text[] AND (c.embedding_model = 'text-embedding-3-s
 ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 ```
 ### 🔧 Technical Implementation
-* **🎯 Zero Recall Starvation**: GIN Index + `hnsw.iterative_scan = 'relaxed_order'` eliminates ANN overfiltering on selective roles. Dynamic candidate depth scales per role cardinality: **80** for single role, **40** for dual, **20** for broad roles.
+* **🎯 Zero Recall Starvation**: GIN Index + `hnsw.iterative_scan = 'relaxed_order'` eliminates ANN overfiltering on selective roles. Dynamic candidate depth scales per role cardinality: **80** for single role, **40** for dual, **20** for broad roles. `hnsw.ef_search` and `hnsw.max_scan_tuples` are configured per connection in `DatabaseManager.configure_iterative_scan()` rather than globally, so each request can apply the right scan budget at runtime.
 ### 🔧 Key RBAC & Storage Innovations
 * **🎯 Zero Recall Starvation**: GIN Index + `hnsw.iterative_scan = 'relaxed_order'` eliminates ANN overfiltering on selective roles. pgvector 0.8+ iterative scans retain filtered-out HNSW candidates in a `discarded` pairing heap and resume traversal in `hnsw.ef_search` batches until `hnsw.max_scan_tuples` (20000) or memory limits stop the scan — so high-selectivity `WHERE d.allowed_roles ?| $2::text[]` clauses no longer exhaust the top-k candidate list. Dynamic candidate depth scales per role cardinality: **80** for single role, **40** for dual, **20** for broad roles.
 * **🔒 SQL Injection Protection**: Parameterized `$2::text[]` array with empty-role guard (returns `[]` before DB execution).

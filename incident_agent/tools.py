@@ -239,11 +239,6 @@ TOOL_SPECS: Dict[str, Dict[str, Any]] = {
         "parameters": {"service": "str, required"},
         "handler": tool_security_exposure_score,
     },
-    "security.exposure_score": {
-        "description": "Calculate a Security Exposure Score (0.0-1.0) for a service.",
-        "parameters": {"service": "str, required"},
-        "handler": tool_security_exposure_score,
-    },
 }
 
 

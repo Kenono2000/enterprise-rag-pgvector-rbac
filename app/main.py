@@ -177,6 +177,7 @@ class MemoryChatRequest(BaseModel):
     title: Optional[str] = Field(default=None, description="Title for a new thread.")
     message: str = Field(..., min_length=1, description="Chat message to append to the shared thread.")
     allowed_roles: Optional[List[str]] = Field(default=None, description="Roles authorized to read a new thread (defaults to caller roles).")
+    role: str = Field(default="user", description="The role of the sender (e.g., 'user', 'assistant').")
 
 
 class MemoryRecallRequest(BaseModel):
