@@ -13,6 +13,10 @@ flowchart LR
         direction TB
         API["FastAPI & FastMCP<br/>(RFC 9728 & ACLs)"] --> OTel["OpenTelemetry SDK<br>(Jaeger Badger LSM)"]
     end
+    subgraph SharedMem ["Shared Chat + Agent Memory"]
+        direction TB
+        SM["pgvector Threads + Facts<br/>(RBAC-pre-filtered, halfvec(1536))"]
+    end
     subgraph RAGCore ["Ingest & In-DB RBAC"]
         direction TB
         PG["PostgreSQL GIN RBAC + HNSW<br>(Contextual Chunk Ingest)"] --> RRF["Adaptive Hybrid RRF<br>+ Grounding Guard"]
@@ -22,9 +26,10 @@ flowchart LR
         SDLC["LangGraph PostgresSaver<br>(Lineage + CrewAI + Hermes)"]
         Clouds["Multi-Cloud Vector<br>(Azure / GCP / Databricks)"]
     end
-    Identity --> Gateways --> RAGCore --> CloudAndSDLC
+    Identity --> Gateways --> SharedMem --> RAGCore --> CloudAndSDLC
     style Identity fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
     style Gateways fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
+    style SharedMem fill:#fffbeb,stroke:#d97706,stroke-width:1.5px
     style RAGCore fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
     style CloudAndSDLC fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
 ```
@@ -33,7 +38,7 @@ flowchart LR
 | # | Pillar | Core Focus | Key Outcome |
 | :-: | :--- | :--- | :--- |
 | **1** | **In-DB RBAC & Storage** | Pre-filtered GIN + HNSW iterative scan | **75% RAM savings**, zero recall starvation, in-DB token audit |
-| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox | Kubernetes probe ready, 284 tests (284 pass), 0 warnings |
+| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox | Kubernetes probe ready, 305 tests collected (304 pass, 1 Docker-gated skip), 0 warnings |
 | **3** | **Identity & Sessions** | Stateless OAuth 2.0 PKCE, HMAC state & encrypted cookies | F5 reload resilience, multi-worker scale-out, zero Redis, SOC-2 bounds |
 | **4** | **Ingestion & Hybrid RAG** | Contextual headers, 64KB SHA-256 de-dup, Adaptive RRF | **>0.90 Context Precision**, O(1) skip for unchanged files |
 | **5** | **Gateways, OTel, SDLC & Deep-Dive** | Zero-Trust FastMCP Gateway, token budgets, OpenTelemetry, SDLC workflow | Rate limits, JWT/TLS auth, token budgets, 60 req/min limits, defense-in-depth |
@@ -86,7 +91,7 @@ ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 flowchart LR
     subgraph DevBootstrap ["1. Bootstrap & Verify"]
         direction TB
-        Venv["Install .venv & Deps"] --> Pytest["Run 284 Pytest Tests"]
+        Venv["Install .venv & Deps"] --> Pytest["Run 305 Pytest Tests<br/>(304 pass · 1 Docker-gated skip)"]
     end
     subgraph Containers ["2. Docker Infrastructure"]
         direction TB
@@ -104,7 +109,7 @@ flowchart LR
 ```powershell
 git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
 python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run full test suite (284 tests: all pass, 0 warnings; Docker-gated testcontainers integration test runs when a daemon is present)
+python -m pytest -v                                                     # 1. Run full test suite (305 collected: 304 pass, 1 Docker-gated skip; 0 warnings; testcontainers integration test runs when a Docker daemon is present)
 docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
@@ -119,6 +124,7 @@ python -m agent checkpoints "<thread_id>"                                # 7. In
 **Key Optimizations**:
 - **Loop-Scoped Async Concurrency**: `DatabaseManager` and `get_openai_client()` scope connection pools to `asyncio.get_running_loop()`, preventing `RuntimeError: Event loop is closed` across Streamlit threads.
 - **Hermetic Testing**: `conftest.py` pins deterministic environment (`OTEL_ENABLED=false`, blank `DATABASE_URL` / `GITHUB_TOKEN`, `SDLC_PUSH=false`, `USE_CREWAI_SDK=false`) *before* application import, ensuring CI/CI override safety with 12-factor precedence.
+- **Strict Warning Gate**: the suite is verified under `python -m pytest -W error` — zero warnings tolerated. The event-loop recreation invariant (`test_pool_is_recreated_across_event_loops`) creates and closes its loops explicitly (never `asyncio.run()`) so no `ProactorEventLoop` is left to garbage-collection finalization, which would leak `ResourceWarning: unclosed event loop` and trip the gate.
 - **Opt-in CrewAI**: Heavyweight SDK strictly opt-in via `USE_CREWAI_SDK=true`, maintaining deterministic `native_pydantic` adapter by default.
 
 ## 4. Identity & OAuth 2.0 PKCE Security (`app/auth/`)
@@ -177,6 +183,15 @@ Formalizes the **retrieve → assemble → cache → compact** discipline:
 * Applies token-bounded deterministic compaction (`DEFAULT_MAX_CONTEXT_TOKENS=4000`) when authorized context exceeds budget, keeping highest-similarity chunks
 
 Both `/api/v1/query` and `/api/v1/query/stream` endpoints route through this optimized pipeline.
+
+### 📐 RAG Triad Evaluation Engine (`app/rag/evaluator.py`)
+Deterministic, fully offline quality evaluator for the RAG Triad (no LLM/network calls — keyword-overlap + vector-similarity heuristics), exported from `app/rag/__init__.py` and pinned by `tests/test_deep_eval.py`:
+
+* **Context Relevance** — 70% query-term coverage in retrieved chunks + 30% average vector similarity
+* **Faithfulness (Groundedness)** — fraction of answer claims traceable to authorized context citations
+* **Answer Relevance** — question/answer keyword alignment against the retrieved context
+* **Composite & verdict** — weighted composite (`faithfulness` weighted 1.5× to penalize hallucination), `PASS ≥ 0.70`, `WARNING ≥ 0.45`, else `FAIL` (faithfulness must independently clear the threshold to `PASS`)
+* **Observability integration** — `ObservabilityManager.record_rag_triad()` (`app/observability.py`) persists scorecards to the ring buffer and emits `rag_triad_evaluation` OTel spans with `rag.triad.*` attributes
 
 ## 6. Gateways, Observability & Autonomous SDLC (`app/`, `agent/`)
 ### 🔐 Zero-Trust FastMCP Gateway & Observability (`app/mcp/gateway.py`, `app/main.py`)
@@ -275,7 +290,7 @@ class PolicyEngine:
     def verify_ast(cls, code: str) -> List[str]:
         tree = ast.parse(code)
         return [f"Blocked: {n.func.id}()" for n in ast.walk(tree)
-                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("exec", "eval", "__import__")]
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("exec", "eval", "__import__", "compile")]
 
 class GroundingGuardrail:
     @classmethod
@@ -322,6 +337,56 @@ Pins the six platform invariants so silent regressions fail CI first:
 #### 6. Factory.ai Autonomy Maturity Model (AMM) Evaluator
 - **Eight Technical Pillars Scorecard**: Built-in automated evaluator (`AutonomyMaturityEvaluator.evaluate_repository`) assessing the repository against Style & Validation, Build System, Testing, Documentation, Dev Environment, Code Quality, Observability, and Security & Governance.
 - **Autonomous Maturity Level**: Measures repository status against Factory.ai thresholds (L1: Functional 5 pts, L2: Documented 19 pts, L3: Standardized 36 pts minimum production bar, L4: Optimized 60 pts, L5: Software Factory 100 pts). The repository scores **106/100 (Level 5 Software Factory)**, clearing the production floor and meeting agent-readiness standards.
+
+#### 7. Shared Chat + Agent Memory Workflow (`app/memory/store.py`)
+
+Free, self-hosted shared memory on the project's existing PostgreSQL + pgvector. Every message/fact is stored with an `allowed_roles` JSONB tag; every read is pre-filtered through the canonical `sanitize_roles_for_query()` and fails closed to empty when the caller resolves to zero roles.
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#f0f9ff', 'primaryTextColor': '#0284c7', 'primaryBorderColor': '#0284c7', 'lineColor': '#64748b', 'secondaryColor': '#f0fdf4', 'tertiaryColor': '#fffbeb'}}}%%
+sequenceDiagram
+    autonumber
+    actor U as Caller (engineer/admin/...)
+    participant API as FastAPI /api/v1/memory*
+    participant GW as FastMCP Gateway memory.*
+    participant Store as app/memory/store.py
+    participant DB as PostgreSQL + pgvector
+    participant RBAC as sanitize_roles_for_query()
+
+    U->>API: POST /api/v1/memory/chat<br/>{message, roles}
+    API->>RBAC: sanitize roles (fail-closed to [])
+    RBAC-->>API: clean roles or []
+    alt roles empty
+        API-->>U: 403 / empty (no SQL touched)
+    else roles valid
+        API->>Store: create_thread / append_message
+        Store->>DB: INSERT thread + message<br/>embedding vector(1536),<br/>allowed_roles JSONB
+        DB-->>Store: thread_id / message_id
+        Store-->>API: stored = true
+        API-->>U: 200 {thread_id, message_id}
+    end
+
+    U->>GW: memory_recall {query, roles}
+    GW->>RBAC: sanitize roles
+    RBAC-->>GW: clean roles or []
+    alt roles empty
+        GW-->>U: {memories: [], chat_messages: [], total: 0}
+    else roles valid
+        GW->>Store: recall(query, roles, top_k, scope)
+        Store->>Store: _embed(query) (offline mock<br/>or provider embedding)
+        Store->>DB: SELECT agent_memories, shared_chat_messages<br/>WHERE allowed_roles ?| roles<br/>ORDER BY cosine distance LIMIT top_k
+        DB-->>Store: ranked rows
+        Store-->>GW: {memories, chat_messages, total}
+        GW-->>U: JSON result string
+    end
+```
+
+**Key invariants enforced in this flow:**
+1. **No roles → no SQL.** The store returns `[]` before acquiring a connection when `sanitize_roles_for_query` yields an empty list.
+2. **Parameterized SQL only.** `allowed_roles ?| $N::text[]` binds roles as parameters; nothing is inlined.
+3. **Embeddings offline by default.** `_mock_embedding()` (deterministic SHA-256) runs when no provider key is configured — no billable API calls.
+4. **Session GUCs, not persisted.** `hnsw.iterative_scan` / `max_scan_tuples` / `ef_search` are applied per-connection at runtime (`DatabaseManager.configure_iterative_scan`), never in migration `DO` blocks.
+5. **Streamlit is opt-in.** The "🧠 Share to team memory" toggle is off by default; when on, exchanges are appended to a role-governed shared thread and recalled into the advisor prompt.
 ## 7. Multi-Cloud Strategy & Runbook
 * **Unified `VectorSearchProvider` Protocol & Factory Pattern**: Decoupled multi-cloud retrieval implementations via structural subtyping protocols ([`app/db/protocols.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/protocols.py)) and concrete adapters ([`app/db/adapters.py`](file:///c:/src/enterprise-rag-pgvector-rbac/app/db/adapters.py): `PgvectorSearchAdapter`, `AzureSearchAdapter`, `GCPSearchAdapter`, `DatabricksSearchAdapter`). The unified `get_vector_search_adapter()` factory is the single resolution path for `RETRIEVAL_BACKEND` in `app/main.py` (`query_rag`, `query_rag_stream`), `app/mcp/gateway.py` (`search_sdlc_context`), and Streamlit — replacing duplicated per-provider if/elif branches — and enforces the invariant that an empty `user_roles` list immediately short-circuits to an empty result set without executing downstream network or database calls.
 * **Zero-Downtime Cutover & Failover**: Switch `RETRIEVAL_BACKEND` in `.env` (`pgvector` | `azure` | `gcp` | `databricks`) or run `python scripts/migrate_multicloud.py --target all`.
@@ -362,9 +427,9 @@ flowchart LR
 ### 8.1a Daily R&D Research Log (2026-11-18)
 * **pgvector 0.8+ iterative index scan** — Re-verified against `app/db/manager.py`: `configure_iterative_scan()` sets `hnsw.iterative_scan='relaxed_order'` + `hnsw.max_scan_tuples` (role-cardinality-scaled via `scaled_scan_tuples`) through the pool `init` hook and per query; `schema.sql` deliberately does **not** persist the GUCs (they are `PGC_USERSET`). Iterative scans retain RBAC-filtered-out HNSW candidates in a discarded pairing heap and resume traversal in `ef_search` batches — the mechanism that keeps selective `allowed_roles ?| $2::text[]` filters from starving top-k recall.
 * **halfvec 16-bit quantization** — `embedding_halfvec halfvec(1536)` generated column + `idx_chunks_embedding_halfvec_hnsw` (`halfvec_cosine_ops`) deliver the 50%/75%-cumulative RAM compaction; `format_halfvec()` sanitizes NaN/Inf before literal serialization. HNSW supports up to 4,000 half-precision dims, so 1536-d indexes retain headroom.
-* **Stateless Streamable HTTP MCP (2026)** — The gateway (`app/mcp/gateway.py` + co-hosted mount in `app/main.py`) runs stateless/sessionless mode: no `Mcp-Session-Id` required, `Mcp-Method`/`Mcp-Name` header reflection for zero-DPI proxy routing, RFC 9728 Protected Resource Metadata via `get_gateway_metadata`, and forwarded sub-app ASGI lifespan so `StreamableHTTPSessionManager` initializes (pinned by `tests/test_mcp_auth.py::TestFastMcpHttpMount`). Installed FastMCP 4.2.0 confirms the FastMCP 4 target.
+* **Stateless Streamable HTTP MCP (2026)** — The gateway (`app/mcp/gateway.py` + co-hosted mount in `app/main.py`) runs stateless/sessionless mode: no `Mcp-Session-Id` required, `Mcp-Method`/`Mcp-Name` header reflection for zero-DPI proxy routing, RFC 9728 Protected Resource Metadata via `get_gateway_metadata`, and forwarded sub-app ASGI lifespan so `StreamableHTTPSessionManager` initializes (pinned by `tests/test_mcp_auth.py::TestFastMcpHttpMount`). Installed FastMCP 4.0.10 (pinned `fastmcp>=4.0.10,<5.0.0` in `requirements.txt`) confirms the FastMCP 4 target.
 * **Multi-agent SDLC frameworks** — Tri-paradigm orchestration (LangGraph cyclic state machine + PostgresSaver checkpoints, CrewAI tiered crew `inherit`/`pro`/`flash`, Hermes SKILL.md synthesis + ShareGPT GRPO trajectories) plus the incident-investigator's hand-built reason-act-observe loop (12-step cap, repeat guard, corroborated early-stop at confidence ≥ 0.85).
-* **Today's enhancement** — Unified the role-sanitization contract into one canonical `app/auth/role_mapper.sanitize_roles_for_query()` (previously six divergent copies across pgvector/cloud adapters/REST headers); regression-pinned cross-engine by `tests/test_role_sanitization_contract.py` (24 tests, suite now 284 pass / 0 warnings).
+* **Today's enhancement** — Unified the role-sanitization contract into one canonical `app/auth/role_mapper.sanitize_roles_for_query()` (previously six divergent copies across pgvector/cloud adapters/REST headers); regression-pinned cross-engine by `tests/test_role_sanitization_contract.py` (24 tests, suite now 305 collected / 304 pass / 1 Docker-gated skip, 0 warnings).
 ### 8.2 Extended Thinking / Reasoning Budget (RAG Pipeline)
 Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional integer 0–128000 tokens controlling reasoning depth for complex queries.
 - **`thinking_budget=0`** (default): Fast mode, default 4K context token budget.
@@ -379,8 +444,9 @@ Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional
 | MCP Streamable HTTP transport & stateless mode (MCP 2025-03-26 spec) | Sessionless proxy-friendly agent tool access; `Mcp-Method`/`Mcp-Name` reflection headers enable zero-DPI reverse-proxy routing, rate-limiting, ACL inspection | ✅ FastMCP 4 gateway co-hosted on FastAPI at `/mcp` (catch-all Mount registered last + forwarded ASGI lifespan so `StreamableHTTPSessionManager` initializes); header reflection in `trace_http_requests` middleware; RFC 9728 metadata declares `stateless_mode_supported` |
 | Decoupled VectorSearchProvider protocols | Multi-cloud engine abstraction adhering to PEP 544/695 subtyping | ✅ Implemented in `app/db/protocols.py`, `app/db/adapters.py`, & `app/main.py` |
 | Shared fail-closed role sanitization | One strict `sanitize_roles_for_query()` contract (KNOWN_ROLES ∪ identifiers) as the single source of truth in `app/auth/role_mapper.py`, delegated to by pgvector + all 3 cloud adapters + both REST header paths; kills the latent `re`-import NameError and the six divergent per-path copies | ✅ `app/auth/role_mapper.py` (canonical), `app/db/manager.py` (delegation), cloud adapters, REST paths; regression-pinned in `tests/test_role_sanitization_contract.py` (24 tests) + `tests/test_architectural_invariants.py` + `tests/test_database_schema.py` |
+| Shared chat + agent memory (pgvector, zero new deps) | Free, self-hosted shared memory: threads + messages + agent facts with halfvec(1536) embeddings, RBAC-pre-filtered GIN/HNSW recall, exposed via FastMCP `memory.*` tools + `/api/v1/memory/*` REST + opt-in Streamlit sharing | ✅ `app/memory/store.py` + `app/memory/__init__.py`, `schema.sql` §5.10, `app/mcp/gateway.py` (`memory_chat`/`memory_recall`/`memory_store_fact`/`memory_list_threads`), `app/main.py` REST, `streamlit_app.py` opt-in share; hermetic suite `tests/test_shared_memory.py` (21 tests) |
 | LangGraph checkpointer resilience (UUIDv6 checkpoint chains, pending-write replay, `parent_checkpoint_id` time-travel) | Crash-resilient agent state-machine recovery and time-travel debugging | ✅ `PostgresCheckpointSaver` on `sdlc_workflow_checkpoints`; `PostgresSaver`/`BadgerSaver`/`BadgerLSMCheckpointSaver` aliases in `agent/workflow.py` (Badger names are compatibility aliases — no upstream LangGraph Badger checkpointer exists; Badger LSM is used for Jaeger OTel storage) |
-| RAG Triad observability (context relevance, faithfulness, answer relevance) | Detects hallucinations and retrieval drift | ✅ Implemented via `GroundingGuardrail` & `app/observability.py` tracer |
+| RAG Triad observability (context relevance, faithfulness, answer relevance) | Detects hallucinations and retrieval drift | ✅ `app/rag/evaluator.py` `RAGTriadEvaluator` (offline deterministic scoring, PASS ≥ 0.70 / faithfulness 1.5× weight) + `GroundingGuardrail` + `ObservabilityManager.record_rag_triad()` OTel spans |
 | Agentic SDLC coding (Claude Code pattern) | Autonomous patch proposal, test, and repair | ✅ LangGraph + CrewAI + Hermes workflow in `agent/workflow.py` |
 | Incident investigator agent (KDnuggets 7-step roadmap) | Hand-built reason-act-observe loop, six read-only MCP tools, layered memory, orchestrator-workers, replay eval, deployment guardrails | ✅ `incident_agent/` package; 53-test suite in `tests/test_incident_investigator.py`; 30-case replay at 100% pass |
 
@@ -390,7 +456,7 @@ A recurring DSH scheduled task runs the full refinement loop **daily at 6:00 AM 
 * **Task**: `Daily Enterprise RAG Refinement & R&D` — id `schedule-b4134923-9750-46d3-a3ec-5476b2b8e252`, status `active`.
 * **Timing**: `DTSTART;TZID=America/Chicago:20261117T060000` + `RRULE:FREQ=DAILY;BYHOUR=6;BYMINUTE=0` (first occurrence 2026-11-17 06:00 CDT). Equivalent five-field Cron: `0 6 * * *` with explicit `America/Chicago` zone.
 * **Delivery**: native DSH scheduler (`schedule_create`/`schedule_list`/`schedule_edit`/`schedule_view`); each occurrence opens a **new session** (target `new`) with working directory `C:\src\enterprise-rag-pgvector-rbac` and the standard agent preset. Restart preserves committed occurrences; the task ends after its final delivery if the rule is ever bounded.
-* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (284 tests, 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
+* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (305 collected: 304 pass, 1 Docker-gated skip; 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
 * **Manage**: view/edit/cancel from the DSH Automations dashboard or the `schedule_view` / `schedule_edit` / `schedule_list` tools.
 
 ## 9. Incident Investigator Agent (7-Step Agentic Roadmap)

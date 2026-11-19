@@ -190,6 +190,115 @@ CREATE INDEX IF NOT EXISTS idx_token_limits_caller
 ON token_managed_limits (caller_id);
 
 -- ============================================================================
+-- 5.10 Shared Chat + Agent Memory (free, self-hosted, pgvector-backed)
+-- ============================================================================
+-- Shared chat threads/messages and cross-agent memory facts. Every row carries
+-- an allowed_roles JSONB column served by the same jsonb_ops GIN ?| pre-filter
+-- contract as documents, so shared memory inherits the project's zero-trust
+-- RBAC invariants (see app/memory/store.py).
+
+DROP TABLE IF EXISTS shared_chat_messages CASCADE;
+DROP TABLE IF EXISTS shared_chat_threads CASCADE;
+DROP TABLE IF EXISTS agent_memories CASCADE;
+
+-- Shared chat threads: a conversation visible to every role in allowed_roles.
+CREATE TABLE shared_chat_threads (
+    thread_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    title VARCHAR(255) NOT NULL,
+    created_by VARCHAR(128) NOT NULL DEFAULT 'anonymous',
+    allowed_roles JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_threads_allowed_roles_gin
+    ON shared_chat_threads USING gin (allowed_roles);
+
+CREATE INDEX IF NOT EXISTS idx_shared_threads_created_at
+    ON shared_chat_threads (created_at DESC);
+
+-- Shared chat messages: each message embedded for semantic recall.
+CREATE TABLE shared_chat_messages (
+    message_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    thread_id UUID NOT NULL REFERENCES shared_chat_threads(thread_id) ON DELETE CASCADE,
+    role VARCHAR(32) NOT NULL DEFAULT 'user',
+    content TEXT NOT NULL,
+    embedding vector(1536),
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_messages_thread
+    ON shared_chat_messages (thread_id, created_at ASC);
+
+CREATE INDEX IF NOT EXISTS idx_shared_messages_embedding_hnsw
+    ON shared_chat_messages
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- Agent memories: durable cross-agent facts with semantic embeddings.
+-- memory_key is unique so re-learning a fact upserts rather than duplicates.
+CREATE TABLE agent_memories (
+    memory_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    memory_key VARCHAR(128) NOT NULL UNIQUE,
+    value TEXT NOT NULL,
+    source VARCHAR(64) NOT NULL DEFAULT 'agent',
+    allowed_roles JSONB NOT NULL DEFAULT '[]'::jsonb,
+    embedding vector(1536),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_memories_allowed_roles_gin
+    ON agent_memories USING gin (allowed_roles);
+
+CREATE INDEX IF NOT EXISTS idx_agent_memories_embedding_hnsw
+    ON agent_memories
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+CREATE INDEX IF NOT EXISTS idx_agent_memories_key
+    ON agent_memories (memory_key);
+
+-- Trigger for shared_chat_threads updated_at
+DROP TRIGGER IF EXISTS trg_shared_threads_updated_at ON shared_chat_threads;
+CREATE TRIGGER trg_shared_threads_updated_at
+    BEFORE UPDATE ON shared_chat_threads
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Trigger for agent_memories updated_at
+DROP TRIGGER IF EXISTS trg_agent_memories_updated_at ON agent_memories;
+CREATE TRIGGER trg_agent_memories_updated_at
+    BEFORE UPDATE ON agent_memories
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- NOTE: hnsw.iterative_scan / hnsw.max_scan_tuples / hnsw.ef_search are
+-- PGC_USERSET session GUCs applied per connection at runtime by
+-- DatabaseManager.configure_iterative_scan() (pool init hook + per query).
+-- They are deliberately NOT persisted here (see ins_0932def6).
+
+-- Retention support: cleanup of stale shared-chat messages.
+-- Call SharedMemoryStore.cleanup_expired_messages(older_than_days) or schedule
+-- this as a periodic job (e.g. pg_cron / cron invoking psql) to bound table
+-- growth. Uses the covering index idx_shared_messages_thread_cleanup.
+CREATE INDEX IF NOT EXISTS idx_shared_messages_thread_cleanup
+    ON shared_chat_messages (thread_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION cleanup_expired_shared_messages(older_than_days INTEGER)
+RETURNS INTEGER LANGUAGE plpgsql AS $$
+DECLARE
+    deleted_count INTEGER;
+BEGIN
+    DELETE FROM shared_chat_messages
+    WHERE created_at < CURRENT_TIMESTAMP - (older_than_days || ' days')::interval;
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    RETURN deleted_count;
+END;
+$$;
+
+-- ============================================================================
 -- 6. Deterministic Mock Seed Data (100% Offline Testing & Initial Boot)
 -- ============================================================================
 

@@ -159,6 +159,39 @@ def _all_changes() -> List[ChangeEvent]:
     return out
 
 
+def tool_security_exposure_score(service: str) -> Dict[str, Any]:
+    """Calculate a Security Exposure Score (0.0-1.0) for a service based on change frequency, log errors, and active incidents."""
+    if not service or not str(service).strip():
+        raise ValueError("service is required.")
+    service = str(service).strip()
+    
+    # 1. Get recent changes
+    changes = tool_list_changes(service, last_n=10).get("changes", [])
+    change_score = min(len(changes) / 10.0, 1.0)
+    
+    # 2. Get recent errors
+    logs = tool_query_logs(service, since_minutes=60, level="ERROR").get("logs", [])
+    log_score = min(len(logs) / 20.0, 1.0)
+    
+    # 3. Get open incidents
+    incidents = tool_list_incidents().get("incidents", [])
+    incident_count = len([i for i in incidents if i["service"] == service])
+    incident_score = min(incident_count / 5.0, 1.0)
+    
+    # Weighted Score (Exposure Model)
+    exposure_score = (change_score * 0.4) + (log_score * 0.4) + (incident_score * 0.2)
+    
+    return {
+        "service": service,
+        "exposure_score": round(exposure_score, 2),
+        "metrics": {
+            "change_score": change_score,
+            "log_score": log_score,
+            "incident_score": incident_score
+        }
+    }
+
+
 # ---------------------------------------------------------------------------
 # Registry + dispatcher
 # ---------------------------------------------------------------------------
@@ -200,6 +233,16 @@ TOOL_SPECS: Dict[str, Dict[str, Any]] = {
         "description": "Recall previously solved incidents similar to this one from long-term memory.",
         "parameters": {"incident_id": "str, required", "top_k": "int, optional (default 3)"},
         "handler": tool_recall_similar_incidents,
+    },
+    "security.exposure_score": {
+        "description": "Calculate a Security Exposure Score (0.0-1.0) for a service.",
+        "parameters": {"service": "str, required"},
+        "handler": tool_security_exposure_score,
+    },
+    "security.exposure_score": {
+        "description": "Calculate a Security Exposure Score (0.0-1.0) for a service.",
+        "parameters": {"service": "str, required"},
+        "handler": tool_security_exposure_score,
     },
 }
 

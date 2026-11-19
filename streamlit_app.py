@@ -61,6 +61,7 @@ import app.db.llm as _llm_module
 importlib.reload(_llm_module)
 from app.db.llm import generate_embedding, chat_completion, chat_completion_stream_sync
 from app.db import DatabaseManager
+from app.memory.store import SharedMemoryStore
 from app.observability import tracer
 import time
 
@@ -1159,6 +1160,20 @@ def _render_rag_interface() -> None:
                 logger.warning("Could not clear persistent chat history in DB: %s", exc)
             st.rerun()
 
+        st.divider()
+        # Opt-in shared team memory: recall cross-agent facts + persist this chat
+        # to a shared thread visible to the caller's roles (pgvector-backed, free,
+        # self-hosted). Off by default so personal consultations stay private.
+        if "shared_memory_enabled" not in st.session_state:
+            st.session_state.shared_memory_enabled = False
+        st.session_state.shared_memory_enabled = st.toggle(
+            "🧠 Share to team memory",
+            value=st.session_state.shared_memory_enabled,
+            help="When on, recall shared agent facts to enrich answers and persist this chat to a shared thread visible to your roles. Off by default (private).",
+        )
+        if st.session_state.shared_memory_enabled:
+            st.caption("Shared memory is backed by the same PostgreSQL + pgvector database (free, self-hosted) and is RBAC-pre-filtered to your roles.")
+
     # Render chat history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
@@ -1291,6 +1306,32 @@ def _render_rag_interface() -> None:
 
                     backend = os.getenv("RETRIEVAL_BACKEND", "").lower()
                     emb = await generate_embedding(search_query)
+
+                    # Shared team memory recall (opt-in): enrich the answer with
+                    # cross-agent facts and prior shared chat visible to the
+                    # caller's roles. Fail-open to no memory on any error.
+                    shared_memory_block = ""
+                    if st.session_state.get("shared_memory_enabled", False):
+                        try:
+                            recall = await SharedMemoryStore.recall(
+                                query=search_query,
+                                user_roles=list(roles),
+                                top_k=4,
+                                scope="all",
+                            )
+                            mem_lines = []
+                            for m in recall.get("memories", []):
+                                mem_lines.append(f"- [Fact/{m.get('source', 'agent')}] {m.get('value', '')}")
+                            for c in recall.get("chat_messages", []):
+                                mem_lines.append(f"- [Chat/{c.get('role', 'user')}] {c.get('content', '')}")
+                            if mem_lines:
+                                shared_memory_block = (
+                                    "\n\nShared Team Memory (recalled from the shared pgvector memory store, "
+                                    "visible to your roles):\n" + "\n".join(mem_lines[:8])
+                                )
+                        except Exception as exc:
+                            logger.warning("Shared memory recall deferred: %s", exc)
+
                     if backend == "azure":
                         from app.db.azure_search import azure_hybrid_search
                         rows = await azure_hybrid_search(search_query, emb, roles, limit=5)
@@ -1327,7 +1368,7 @@ def _render_rag_interface() -> None:
                     prompt = (
                         f"{system_prompt}\n\n"
                         f"Recent Conversation History:\n{conv_history_text}\n\n"
-                        f"Authorized Context:\n{context}\n\n"
+                        f"Authorized Context:\n{context}{shared_memory_block}\n\n"
                         f"Current Question: {prompt_input}\nAnswer:"
                     )
                     return {
@@ -1463,6 +1504,50 @@ def _render_rag_interface() -> None:
             )
         except Exception as exc:
             logger.warning("Could not persist conversation history: %s", exc)
+
+        # Opt-in shared team memory: persist this exchange to a shared thread
+        # visible to the caller's roles, so the team (and other agents) can
+        # recall it later. Uses a stable shared thread ID per role-set.
+        if st.session_state.get("shared_memory_enabled", False):
+            try:
+                shared_thread_key = f"team-advisory:{','.join(sorted(roles)) or 'engineer'}"
+                shared_tid = st.session_state.get("shared_thread_id")
+                if not shared_tid:
+                    # Reuse an existing shared thread for this role-set if present.
+                    existing = run_async(
+                        SharedMemoryStore.list_threads(user_roles=list(roles), limit=100)
+                    )
+                    match = next((t for t in existing if t.get("title") == shared_thread_key), None)
+                    shared_tid = match["thread_id"] if match else None
+                if not shared_tid:
+                    shared_tid = run_async(
+                        SharedMemoryStore.create_thread(
+                            title=shared_thread_key,
+                            allowed_roles=list(roles),
+                            created_by=caller_key,
+                        )
+                    )
+                    if shared_tid:
+                        st.session_state["shared_thread_id"] = shared_tid
+                if shared_tid:
+                    run_async(
+                        SharedMemoryStore.append_message(
+                            thread_id=shared_tid,
+                            message=prompt_input,
+                            role="user",
+                            metadata={"caller_sub": caller_key, "citations": len(citations)},
+                        )
+                    )
+                    run_async(
+                        SharedMemoryStore.append_message(
+                            thread_id=shared_tid,
+                            message=response_text,
+                            role="assistant",
+                            metadata={"caller_sub": caller_key},
+                        )
+                    )
+            except Exception as exc:
+                logger.warning("Could not persist to shared team memory: %s", exc)
         st.rerun()
 
     # Centered Page Footer placed cleanly at the bottom

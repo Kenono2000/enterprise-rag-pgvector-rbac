@@ -339,10 +339,13 @@ async def test_pool_is_bound_to_running_event_loop():
 def test_pool_is_recreated_across_event_loops():
     """A pool cached on a previous loop is recreated (and closed) on a new loop.
 
-    Uses two independent asyncio.run() invocations so the running loop genuinely
-    changes between calls, mirroring a Streamlit rerun or a FastAPI worker
-    restart. Each scenario runs in its own asyncio.run() to guarantee distinct
-    loop objects.
+    Uses two explicit, deterministically closed event loops so the running loop
+    genuinely changes between calls, mirroring a Streamlit rerun or a FastAPI
+    worker restart. Loops are created and closed explicitly (never via
+    asyncio.run()) so no ProactorEventLoop is left for garbage collection to
+    finalize — that nondeterministic __del__ path emits
+    ``ResourceWarning: unclosed event loop``, which the project's strict
+    ``-W error`` policy correctly treats as a failure.
     """
     created_loops: list[asyncio.AbstractEventLoop] = []
     closed_pools: list[object] = []
@@ -353,26 +356,21 @@ def test_pool_is_recreated_across_event_loops():
         pool.close = AsyncMock(side_effect=lambda: closed_pools.append(pool))
         return pool
 
-    def scenario_first() -> None:
-        DatabaseManager._pool = None
-        DatabaseManager._loop = None
-        with patch("app.db.manager.asyncpg.create_pool", new=fake_create_pool), patch(
-            "app.db.manager.get_db_url",
-            return_value="postgresql://user:pass@localhost:5432/db",
-        ):
-            DatabaseManager._pool_created = asyncio.run(DatabaseManager.get_pool())
+    def scenario(patch_attr: str) -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            with patch("app.db.manager.asyncpg.create_pool", new=fake_create_pool), patch(
+                "app.db.manager.get_db_url",
+                return_value="postgresql://user:pass@localhost:5432/db",
+            ):
+                setattr(DatabaseManager, patch_attr, loop.run_until_complete(DatabaseManager.get_pool()))
+        finally:
+            loop.close()
 
-    def scenario_second() -> None:
-        # Simulate a *foreign* cached pool from the first loop: the manager still
-        # holds the pool object but the running loop is now different.
-        with patch("app.db.manager.asyncpg.create_pool", new=fake_create_pool), patch(
-            "app.db.manager.get_db_url",
-            return_value="postgresql://user:pass@localhost:5432/db",
-        ):
-            DatabaseManager._pool_created_second = asyncio.run(DatabaseManager.get_pool())
-
-    scenario_first()
-    scenario_second()
+    DatabaseManager._pool = None
+    DatabaseManager._loop = None
+    scenario("_pool_created")
+    scenario("_pool_created_second")
 
     assert len(created_loops) == 2, "pool must be created once per event loop"
     assert created_loops[0] is not created_loops[1]

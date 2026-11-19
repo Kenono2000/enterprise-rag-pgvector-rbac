@@ -31,6 +31,7 @@ from app.db import DatabaseManager, generate_embedding, chat_completion, chat_co
 from app.rag import ContextAssembler
 from app.auth import verify_google_token, extract_roles
 from app.auth.role_mapper import sanitize_roles_for_query
+from app.memory.store import SharedMemoryStore
 from app.observability import tracer
 from agent.guardrails import (
     SlidingWindowRateLimiter,
@@ -164,6 +165,35 @@ class DocumentDeleteResponse(BaseModel):
     document_id: str
     deleted: bool
     status: str
+
+
+# --- Shared chat + agent memory request/response schemas -------------------
+
+
+class MemoryChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    thread_id: Optional[str] = Field(default=None, description="Existing shared thread ID to continue; omit to create a new thread.")
+    title: Optional[str] = Field(default=None, description="Title for a new thread.")
+    message: str = Field(..., min_length=1, description="Chat message to append to the shared thread.")
+    allowed_roles: Optional[List[str]] = Field(default=None, description="Roles authorized to read a new thread (defaults to caller roles).")
+
+
+class MemoryRecallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(..., min_length=1, description="Natural-language recall query.")
+    top_k: int = Field(default=5, ge=1, le=50, description="Maximum memories/messages to return.")
+    scope: str = Field(default="all", description="'chat', 'facts', or 'all'.")
+
+
+class MemoryFactRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(..., min_length=1, description="Stable fact key.")
+    value: str = Field(..., min_length=1, description="Fact text/value to remember.")
+    allowed_roles: Optional[List[str]] = Field(default=None, description="Roles authorized to read this fact (defaults to caller roles).")
+    source: str = Field(default="agent", description="Provenance label.")
 
 
 # ---------------------------------------------------------------------------
@@ -906,6 +936,147 @@ async def get_token_ledger(
     except Exception as exc:
         logger.warning("Database ledger lookup deferred: %s", exc)
         return {"caller_id": target, "count": 0, "events": [], "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Shared chat + agent memory endpoints (free, self-hosted, pgvector-backed)
+# Every read is pre-filtered by the canonical fail-closed RBAC contract.
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/v1/memory/chat", tags=["Shared Memory"])
+async def memory_chat(
+    request: MemoryChatRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """
+    Append a message to a shared chat thread (or start a new thread), persisted
+    in PostgreSQL so every worker, agent, and chat session sees it. Thread
+    visibility is governed by allowed_roles (defaults to the caller's roles).
+    """
+    thread_roles = sanitize_roles_for_query(request.allowed_roles) if request.allowed_roles else list(user.roles)
+    if not thread_roles:
+        # Fail closed: a thread with no authorized roles is not shareable.
+        thread_roles = ["engineer"]
+    try:
+        if request.thread_id:
+            tid = request.thread_id
+            msg_id = await SharedMemoryStore.append_message(
+                thread_id=tid,
+                message=request.message,
+                role="user",
+                metadata={"caller_sub": user.sub, "caller_email": user.email},
+            )
+        else:
+            tid = await SharedMemoryStore.create_thread(
+                title=request.title or "Shared chat",
+                allowed_roles=thread_roles,
+                created_by=user.sub,
+            )
+            if not tid:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Could not create shared thread (no valid allowed_roles).",
+                )
+            msg_id = await SharedMemoryStore.append_message(
+                thread_id=tid,
+                message=request.message,
+                role="user",
+                metadata={"caller_sub": user.sub, "caller_email": user.email},
+            )
+        if not msg_id:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Failed to persist shared chat message.",
+            )
+        return {"thread_id": tid, "message_id": msg_id, "stored": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Shared memory chat deferred: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Shared memory unavailable: {exc}",
+        ) from exc
+
+
+@app.post("/api/v1/memory/recall", tags=["Shared Memory"])
+async def memory_recall(
+    request: MemoryRecallRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """
+    Recall shared memories — semantically relevant agent facts and chat messages
+    visible to the caller's roles — from the pgvector-backed shared memory store.
+    Fails closed to an empty result when the caller resolves to zero roles.
+    """
+    try:
+        recall = await SharedMemoryStore.recall(
+            query=request.query,
+            user_roles=list(user.roles),
+            top_k=request.top_k,
+            scope=request.scope,
+        )
+        return recall
+    except Exception as exc:
+        logger.warning("Shared memory recall deferred: %s", exc)
+        return {"query": request.query, "memories": [], "chat_messages": [], "total": 0, "error": str(exc)}
+
+
+@app.post("/api/v1/memory/fact", tags=["Shared Memory"])
+async def memory_store_fact(
+    request: MemoryFactRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """
+    Store a durable cross-agent memory fact (key/value) with a semantic embedding,
+    visible to the authorized roles. Upserts on key. Engineer/Admin only.
+    """
+    if "admin" not in user.roles and "engineer" not in user.roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Admin or Engineer role required to store agent memory facts.",
+        )
+    fact_roles = sanitize_roles_for_query(request.allowed_roles) if request.allowed_roles else list(user.roles)
+    if not fact_roles:
+        fact_roles = ["engineer"]
+    try:
+        memory_id = await SharedMemoryStore.store_fact(
+            key=request.key,
+            value=request.value,
+            allowed_roles=fact_roles,
+            source=request.source,
+        )
+        if not memory_id:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Failed to persist agent memory fact.",
+            )
+        return {"memory_id": memory_id, "key": request.key, "stored": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Shared memory fact store deferred: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Shared memory unavailable: {exc}",
+        ) from exc
+
+
+@app.get("/api/v1/memory/threads", tags=["Shared Memory"])
+async def memory_list_threads(
+    limit: int = 50,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """List shared chat threads visible to the caller's roles (RBAC pre-filtered)."""
+    try:
+        threads = await SharedMemoryStore.list_threads(
+            user_roles=list(user.roles), limit=limit,
+        )
+        return {"count": len(threads), "threads": threads}
+    except Exception as exc:
+        logger.warning("Shared memory thread list deferred: %s", exc)
+        return {"count": 0, "threads": [], "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------

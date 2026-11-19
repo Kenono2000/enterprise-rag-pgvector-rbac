@@ -20,6 +20,7 @@ from app.db.llm import generate_embedding, chat_completion
 from app.db.adapters import get_vector_search_adapter
 from app.auth.jwks import verify_google_token
 from app.auth.role_mapper import extract_roles
+from app.memory.store import SharedMemoryStore
 from app.observability import tracer
 from agent.guardrails import SlidingWindowRateLimiter, TokenCircuitBreaker
 
@@ -45,6 +46,12 @@ TOOL_REQUIRED_ROLES: Dict[str, List[str]] = {
     "run_sdlc_crew": ["engineer", "admin"],
     "recall_hermes_skills": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
     "get_gateway_metadata": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+    "memory_chat": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+    "memory_recall": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+    "memory_store_fact": ["engineer", "admin"],
+    "memory_list_threads": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+    "memory_cleanup": ["engineer", "admin"],
+    "memory_store_summary": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
 }
 
 
@@ -88,6 +95,38 @@ class MCPListDocumentsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     limit: int = Field(default=20, ge=1, le=100, description="Maximum number of documents to return.")
+    auth_token: Optional[str] = Field(default=None, description="Google OAuth ID token.")
+    user_roles: Optional[List[str]] = Field(default=None, description="Fallback roles when REQUIRE_GOOGLE_AUTH=false.")
+
+
+class MCPMemoryChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    thread_id: Optional[str] = Field(default=None, description="Existing shared thread ID to continue; omit to create a new thread.")
+    title: Optional[str] = Field(default=None, description="Title for a new thread (used when thread_id is omitted).")
+    message: str = Field(..., min_length=1, description="Chat message to append to the shared thread.")
+    allowed_roles: Optional[List[str]] = Field(default=None, description="Roles authorized to read a new thread (defaults to caller roles).")
+    auth_token: Optional[str] = Field(default=None, description="Google OAuth ID token.")
+    user_roles: Optional[List[str]] = Field(default=None, description="Fallback roles when REQUIRE_GOOGLE_AUTH=false.")
+
+
+class MCPMemoryRecallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(..., min_length=1, description="Natural-language recall query over shared chat + agent facts.")
+    top_k: int = Field(default=5, ge=1, le=50, description="Maximum memories/messages to return.")
+    scope: str = Field(default="all", description="'chat', 'facts', or 'all'.")
+    auth_token: Optional[str] = Field(default=None, description="Google OAuth ID token.")
+    user_roles: Optional[List[str]] = Field(default=None, description="Fallback roles when REQUIRE_GOOGLE_AUTH=false.")
+
+
+class MCPMemoryFactRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(..., min_length=1, description="Stable fact key (e.g. 'prefers_dark_mode').")
+    value: str = Field(..., min_length=1, description="Fact text/value to remember.")
+    allowed_roles: Optional[List[str]] = Field(default=None, description="Roles authorized to read this fact (defaults to caller roles).")
+    source: str = Field(default="agent", description="Provenance label (agent name, tool, or 'chat').")
     auth_token: Optional[str] = Field(default=None, description="Google OAuth ID token.")
     user_roles: Optional[List[str]] = Field(default=None, description="Fallback roles when REQUIRE_GOOGLE_AUTH=false.")
 
@@ -706,6 +745,614 @@ async def list_documents(
         return f"⛔ {err_msg}"
 
 
+# ---------------------------------------------------------------------------
+# Shared chat + agent memory tools (memory.*)
+# Free, self-hosted, pgvector-backed shared memory with fail-closed RBAC.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def memory_chat(
+    message: str,
+    thread_id: Optional[str] = None,
+    title: Optional[str] = None,
+    allowed_roles: Optional[list[str]] = None,
+    auth_token: Optional[str] = None,
+    user_roles: Optional[list[str]] = None,
+) -> str:
+    """
+    Append a message to a shared chat thread (or start a new thread), persisting
+    it in PostgreSQL so every worker, agent, and chat session sees it.
+
+    Parameters:
+    - message: Chat message to append.
+    - thread_id: Existing thread to continue; omit to create a new thread.
+    - title: Title for a new thread (used when thread_id is omitted).
+    - allowed_roles: Roles authorized to read a new thread (defaults to caller roles).
+    - auth_token: Optional Google ID token.
+    - user_roles: Optional fallback roles (only honored if REQUIRE_GOOGLE_AUTH=false).
+    """
+    t_start = time.perf_counter()
+    validated = MCPMemoryChatRequest(
+        thread_id=thread_id,
+        title=title,
+        message=message,
+        allowed_roles=allowed_roles,
+        auth_token=auth_token,
+        user_roles=user_roles,
+    )
+    roles, error = _resolve_tool_roles(validated.auth_token, validated.user_roles)
+    attribution = _resolve_caller_attribution(validated.auth_token)
+    caller_key = attribution["caller_sub"]
+
+    if error:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {error}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_chat",
+            parameters={"message": validated.message, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=error,
+        )
+        return res
+
+    allowed_acl, acl_err = check_tool_permission("memory_chat", roles)
+    if not allowed_acl:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {acl_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_chat",
+            parameters={"message": validated.message, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=acl_err,
+        )
+        return res
+
+    allowed_rate, _, retry_after = mcp_rate_limiter.allow_request(caller_key)
+    if not allowed_rate:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        err = f"Rate limit exceeded for caller '{caller_key}'. Retry after {retry_after}s."
+        res = f"⛔ {err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_chat",
+            parameters={"message": validated.message, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=err,
+        )
+        return res
+
+    estimated_tokens = TokenCircuitBreaker.estimate_tokens(validated.message)
+    allowed_tokens, _, token_err = mcp_token_breaker.check_and_consume(caller_key, estimated_tokens)
+    if not allowed_tokens:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {token_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_chat",
+            parameters={"message": validated.message, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=token_err,
+        )
+        return res
+
+    try:
+        # Thread visibility is governed by allowed_roles; default to the caller's
+        # own roles so a new thread is at least visible to its creator.
+        thread_roles = validated.allowed_roles or list(roles or [])
+        if validated.thread_id:
+            tid = validated.thread_id
+            msg_id = await SharedMemoryStore.append_message(
+                thread_id=tid,
+                message=validated.message,
+                role="user",
+                metadata={"caller_sub": caller_key},
+            )
+        else:
+            tid = await SharedMemoryStore.create_thread(
+                title=validated.title or "Shared chat",
+                allowed_roles=thread_roles,
+                created_by=caller_key,
+            )
+            if not tid:
+                raise RuntimeError("Failed to create shared chat thread (no valid allowed_roles).")
+            msg_id = await SharedMemoryStore.append_message(
+                thread_id=tid,
+                message=validated.message,
+                role="user",
+                metadata={"caller_sub": caller_key},
+            )
+        if not msg_id:
+            raise RuntimeError("Failed to append message to shared thread.")
+        res = json.dumps({
+            "thread_id": tid,
+            "message_id": msg_id,
+            "stored": True,
+            "caller": caller_key,
+        }, indent=2)
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_chat",
+            parameters={"thread_id": tid, "message_len": len(validated.message), **attribution},
+            result=f"message {msg_id} stored on thread {tid}",
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+        )
+        return res
+    except Exception as exc:
+        err_msg = f"Failed to store shared chat message: {str(exc)}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_chat",
+            parameters={"message": validated.message, **attribution},
+            result=err_msg, roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=err_msg,
+        )
+        return f"⛔ {err_msg}"
+
+
+@mcp.tool()
+async def memory_recall(
+    query: str,
+    top_k: int = 5,
+    scope: str = "all",
+    ef_search: Optional[int] = None,
+    auth_token: Optional[str] = None,
+    user_roles: Optional[list[str]] = None,
+) -> str:
+    """
+    Recall shared memories — semantically relevant agent facts and chat messages
+    visible to the caller's roles — from the pgvector-backed shared memory store.
+
+    Parameters:
+    - query: Natural-language recall query.
+    - top_k: Maximum memories/messages to return (1-50).
+    - scope: 'chat', 'facts', or 'all' (default).
+    - ef_search: HNSW search depth override (guardrail for large tables); raise
+      for better recall, lower for faster speed. Omitted uses the role-scaled
+      default from DatabaseManager.scaled_ef_search().
+    - auth_token: Optional Google ID token.
+    - user_roles: Optional fallback roles (only honored if REQUIRE_GOOGLE_AUTH=false).
+    """
+    t_start = time.perf_counter()
+    validated = MCPMemoryRecallRequest(
+        query=query, top_k=top_k, scope=scope, auth_token=auth_token, user_roles=user_roles,
+    )
+    roles, error = _resolve_tool_roles(validated.auth_token, validated.user_roles)
+    attribution = _resolve_caller_attribution(validated.auth_token)
+    caller_key = attribution["caller_sub"]
+
+    if error:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {error}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_recall",
+            parameters={"query": validated.query, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=error,
+        )
+        return res
+
+    allowed_acl, acl_err = check_tool_permission("memory_recall", roles)
+    if not allowed_acl:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {acl_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_recall",
+            parameters={"query": validated.query, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=acl_err,
+        )
+        return res
+
+    allowed_rate, _, retry_after = mcp_rate_limiter.allow_request(caller_key)
+    if not allowed_rate:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        err = f"Rate limit exceeded for caller '{caller_key}'. Retry after {retry_after}s."
+        res = f"⛔ {err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_recall",
+            parameters={"query": validated.query, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=err,
+        )
+        return res
+
+    estimated_tokens = TokenCircuitBreaker.estimate_tokens(validated.query)
+    allowed_tokens, _, token_err = mcp_token_breaker.check_and_consume(caller_key, estimated_tokens)
+    if not allowed_tokens:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {token_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_recall",
+            parameters={"query": validated.query, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=token_err,
+        )
+        return res
+
+    try:
+        recall = await SharedMemoryStore.recall(
+            query=validated.query,
+            user_roles=list(roles or []),
+            top_k=validated.top_k,
+            scope=validated.scope,
+            ef_search=ef_search,
+        )
+        res = json.dumps(recall, indent=2, default=str)
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_recall",
+            parameters={"query": validated.query, "scope": validated.scope, "ef_search": ef_search, **attribution},
+            result=f"{recall.get('total', 0)} shared memories recalled",
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+        )
+        return res
+    except Exception as exc:
+        err_msg = f"Failed to recall shared memories: {str(exc)}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_recall",
+            parameters={"query": validated.query, **attribution},
+            result=err_msg, roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=err_msg,
+        )
+        return f"⛔ {err_msg}"
+
+
+@mcp.tool()
+async def memory_store_fact(
+    key: str,
+    value: str,
+    allowed_roles: Optional[list[str]] = None,
+    source: str = "agent",
+    auth_token: Optional[str] = None,
+    user_roles: Optional[list[str]] = None,
+) -> str:
+    """
+    Store a durable cross-agent memory fact (key/value) with a semantic embedding,
+    visible to the authorized roles. Upserts on key so re-learning updates it.
+
+    Parameters:
+    - key: Stable fact key (e.g. 'prefers_dark_mode').
+    - value: Fact text/value to remember.
+    - allowed_roles: Roles authorized to read this fact (defaults to caller roles).
+    - source: Provenance label (agent name, tool, or 'chat').
+    - auth_token: Optional Google ID token.
+    - user_roles: Optional fallback roles (only honored if REQUIRE_GOOGLE_AUTH=false).
+    """
+    t_start = time.perf_counter()
+    validated = MCPMemoryFactRequest(
+        key=key, value=value, allowed_roles=allowed_roles, source=source,
+        auth_token=auth_token, user_roles=user_roles,
+    )
+    roles, error = _resolve_tool_roles(validated.auth_token, validated.user_roles)
+    attribution = _resolve_caller_attribution(validated.auth_token)
+    caller_key = attribution["caller_sub"]
+
+    if error:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {error}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_store_fact",
+            parameters={"key": validated.key, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=error,
+        )
+        return res
+
+    allowed_acl, acl_err = check_tool_permission("memory_store_fact", roles)
+    if not allowed_acl:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {acl_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_store_fact",
+            parameters={"key": validated.key, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=acl_err,
+        )
+        return res
+
+    allowed_rate, _, retry_after = mcp_rate_limiter.allow_request(caller_key)
+    if not allowed_rate:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        err = f"Rate limit exceeded for caller '{caller_key}'. Retry after {retry_after}s."
+        res = f"⛔ {err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_store_fact",
+            parameters={"key": validated.key, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=err,
+        )
+        return res
+
+    estimated_tokens = TokenCircuitBreaker.estimate_tokens(validated.key + validated.value)
+    allowed_tokens, _, token_err = mcp_token_breaker.check_and_consume(caller_key, estimated_tokens)
+    if not allowed_tokens:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {token_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_store_fact",
+            parameters={"key": validated.key, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=token_err,
+        )
+        return res
+
+    try:
+        fact_roles = validated.allowed_roles or list(roles or [])
+        memory_id = await SharedMemoryStore.store_fact(
+            key=validated.key,
+            value=validated.value,
+            allowed_roles=fact_roles,
+            source=validated.source,
+        )
+        if not memory_id:
+            raise RuntimeError("Failed to store agent memory fact (no valid allowed_roles).")
+        res = json.dumps({"memory_id": memory_id, "key": validated.key, "stored": True}, indent=2)
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_store_fact",
+            parameters={"key": validated.key, "source": validated.source, **attribution},
+            result=f"fact {validated.key} stored as {memory_id}",
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+        )
+        return res
+    except Exception as exc:
+        err_msg = f"Failed to store agent memory fact: {str(exc)}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_store_fact",
+            parameters={"key": validated.key, **attribution},
+            result=err_msg, roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=err_msg,
+        )
+        return f"⛔ {err_msg}"
+
+
+@mcp.tool()
+async def memory_list_threads(
+    limit: int = 50,
+    auth_token: Optional[str] = None,
+    user_roles: Optional[list[str]] = None,
+) -> str:
+    """
+    List shared chat threads visible to the caller's roles (RBAC pre-filtered).
+
+    Parameters:
+    - limit: Maximum threads to return (1-100).
+    - auth_token: Optional Google ID token.
+    - user_roles: Optional fallback roles (only honored if REQUIRE_GOOGLE_AUTH=false).
+    """
+    t_start = time.perf_counter()
+    validated = MCPListDocumentsRequest(
+        limit=limit, auth_token=auth_token, user_roles=user_roles,
+    )
+    roles, error = _resolve_tool_roles(validated.auth_token, validated.user_roles)
+    attribution = _resolve_caller_attribution(validated.auth_token)
+    caller_key = attribution["caller_sub"]
+
+    if error:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {error}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_list_threads",
+            parameters={"limit": validated.limit, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=error,
+        )
+        return res
+
+    allowed_acl, acl_err = check_tool_permission("memory_list_threads", roles)
+    if not allowed_acl:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {acl_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_list_threads",
+            parameters={"limit": validated.limit, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=acl_err,
+        )
+        return res
+
+    allowed_rate, _, retry_after = mcp_rate_limiter.allow_request(caller_key)
+    if not allowed_rate:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        err = f"Rate limit exceeded for caller '{caller_key}'. Retry after {retry_after}s."
+        res = f"⛔ {err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_list_threads",
+            parameters={"limit": validated.limit, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=err,
+        )
+        return res
+
+    try:
+        threads = await SharedMemoryStore.list_threads(
+            user_roles=list(roles or []), limit=validated.limit,
+        )
+        res = json.dumps({"count": len(threads), "threads": threads}, indent=2, default=str)
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_list_threads",
+            parameters={"limit": validated.limit, **attribution},
+            result=f"{len(threads)} shared threads listed",
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+        )
+        return res
+    except Exception as exc:
+        err_msg = f"Failed to list shared threads: {str(exc)}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_list_threads",
+            parameters={"limit": validated.limit, **attribution},
+            result=err_msg, roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=err_msg,
+        )
+        return f"⛔ {err_msg}"
+
+
+@mcp.tool()
+async def memory_cleanup(
+    older_than_days: int = 30,
+    auth_token: Optional[str] = None,
+    user_roles: Optional[list[str]] = None,
+) -> str:
+    """
+    Purge shared-chat messages older than ``older_than_days`` to bound table
+    growth (retention guardrail). Engineer/admin only.
+
+    Parameters:
+    - older_than_days: Delete shared_chat_messages older than this many days (default 30).
+    - auth_token: Optional Google ID token.
+    - user_roles: Optional fallback roles (only honored if REQUIRE_GOOGLE_AUTH=false).
+    """
+    t_start = time.perf_counter()
+    if "admin" not in (user_roles or []) and "engineer" not in (user_roles or []):
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        err = "Forbidden: Admin or Engineer role required to run shared-memory cleanup."
+        attribution = _resolve_caller_attribution(auth_token)
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_cleanup",
+            parameters={"older_than_days": older_than_days, **attribution},
+            result=err, roles=None, duration_ms=duration_ms, error=err,
+        )
+        return f"⛔ {err}"
+    roles, error = _resolve_tool_roles(auth_token, user_roles)
+    attribution = _resolve_caller_attribution(auth_token)
+    caller_key = attribution["caller_sub"]
+
+    if error:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {error}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_cleanup",
+            parameters={"older_than_days": older_than_days, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=error,
+        )
+        return res
+
+    allowed_acl, acl_err = check_tool_permission("memory_cleanup", roles)
+    if not allowed_acl:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {acl_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_cleanup",
+            parameters={"older_than_days": older_than_days, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=acl_err,
+        )
+        return res
+
+    allowed_rate, _, retry_after = mcp_rate_limiter.allow_request(caller_key)
+    if not allowed_rate:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        err = f"Rate limit exceeded for caller '{caller_key}'. Retry after {retry_after}s."
+        res = f"⛔ {err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_cleanup",
+            parameters={"older_than_days": older_than_days, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=err,
+        )
+        return res
+
+    try:
+        deleted = await SharedMemoryStore.cleanup_expired_messages(older_than_days)
+        res = json.dumps({"deleted": deleted, "older_than_days": older_than_days}, indent=2)
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_cleanup",
+            parameters={"older_than_days": older_than_days, **attribution},
+            result=f"{deleted} shared messages cleaned up",
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+        )
+        return res
+    except Exception as exc:
+        err_msg = f"Failed to cleanup shared messages: {str(exc)}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_cleanup",
+            parameters={"older_than_days": older_than_days, **attribution},
+            result=err_msg, roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=err_msg,
+        )
+        return f"⛔ {err_msg}"
+
+
+@mcp.tool()
+async def memory_store_summary(
+    thread_id: str,
+    summary: str,
+    allowed_roles: Optional[list[str]] = None,
+    message_count: Optional[int] = None,
+    auth_token: Optional[str] = None,
+    user_roles: Optional[list[str]] = None,
+) -> str:
+    """
+    Store a rolling summary of a long thread as an agent-memory fact keyed
+    ``thread_summary:{thread_id}`` (summarization guardrail). Recalled first by
+    memory_recall so long threads don't require reading every raw message.
+
+    Parameters:
+    - thread_id: Thread whose conversation is being summarized.
+    - summary: Rolling summary text.
+    - allowed_roles: Roles authorized to read the summary (defaults to caller roles).
+    - message_count: Number of raw messages the summary covers.
+    - auth_token: Optional Google ID token.
+    - user_roles: Optional fallback roles (only honored if REQUIRE_GOOGLE_AUTH=false).
+    """
+    t_start = time.perf_counter()
+    validated_roles = allowed_roles or list(user_roles or [])
+    roles, error = _resolve_tool_roles(auth_token, user_roles)
+    attribution = _resolve_caller_attribution(auth_token)
+    caller_key = attribution["caller_sub"]
+
+    if error:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {error}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_store_summary",
+            parameters={"thread_id": thread_id, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=error,
+        )
+        return res
+
+    allowed_acl, acl_err = check_tool_permission("memory_store_summary", roles)
+    if not allowed_acl:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        res = f"⛔ {acl_err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_store_summary",
+            parameters={"thread_id": thread_id, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=acl_err,
+        )
+        return res
+
+    allowed_rate, _, retry_after = mcp_rate_limiter.allow_request(caller_key)
+    if not allowed_rate:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        err = f"Rate limit exceeded for caller '{caller_key}'. Retry after {retry_after}s."
+        res = f"⛔ {err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_store_summary",
+            parameters={"thread_id": thread_id, **attribution},
+            result=res, roles=roles, duration_ms=duration_ms, error=err,
+        )
+        return res
+
+    try:
+        memory_id = await SharedMemoryStore.store_thread_summary(
+            thread_id=thread_id,
+            summary=summary,
+            allowed_roles=validated_roles,
+            source="summary",
+            message_count=message_count,
+        )
+        if not memory_id:
+            raise RuntimeError("Failed to store thread summary (no valid allowed_roles).")
+        res = json.dumps({"memory_id": memory_id, "thread_id": thread_id, "stored": True}, indent=2)
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_store_summary",
+            parameters={"thread_id": thread_id, "message_count": message_count, **attribution},
+            result=f"summary for {thread_id} stored as {memory_id}",
+            roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+        )
+        return res
+    except Exception as exc:
+        err_msg = f"Failed to store thread summary: {str(exc)}"
+        tracer.record_mcp_tool_execution(
+            tool_name="memory_store_summary",
+            parameters={"thread_id": thread_id, **attribution},
+            result=err_msg, roles=roles,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            error=err_msg,
+        )
+        return f"⛔ {err_msg}"
+
+
 @mcp.tool()
 async def get_gateway_metadata(
     auth_token: Optional[str] = None,
@@ -762,6 +1409,42 @@ async def get_gateway_metadata(
                 "required_roles": ["*"],
                 "rate_limit": "unthrottled",
             },
+            {
+                "name": "memory_chat",
+                "risk_tier": "mutation_shared_chat",
+                "required_roles": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+                "rate_limit": f"{mcp_rate_limiter.max_requests} req / {mcp_rate_limiter.window_seconds}s",
+            },
+            {
+                "name": "memory_recall",
+                "risk_tier": "read_only",
+                "required_roles": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+                "rate_limit": f"{mcp_rate_limiter.max_requests} req / {mcp_rate_limiter.window_seconds}s",
+            },
+            {
+                "name": "memory_store_fact",
+                "risk_tier": "mutation_high_risk",
+                "required_roles": ["engineer", "admin"],
+                "rate_limit": f"{mcp_rate_limiter.max_requests} req / {mcp_rate_limiter.window_seconds}s",
+            },
+            {
+                "name": "memory_list_threads",
+                "risk_tier": "read_only",
+                "required_roles": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+                "rate_limit": f"{mcp_rate_limiter.max_requests} req / {mcp_rate_limiter.window_seconds}s",
+            },
+            {
+                "name": "memory_cleanup",
+                "risk_tier": "mutation_high_risk",
+                "required_roles": ["engineer", "admin"],
+                "rate_limit": f"{mcp_rate_limiter.max_requests} req / {mcp_rate_limiter.window_seconds}s",
+            },
+            {
+                "name": "memory_store_summary",
+                "risk_tier": "mutation_shared_chat",
+                "required_roles": ["engineer", "compliance_auditor", "finance_executive", "admin", "executive"],
+                "rate_limit": f"{mcp_rate_limiter.max_requests} req / {mcp_rate_limiter.window_seconds}s",
+            },
         ],
         "rate_limiter": {
             "type": "SlidingWindowRateLimiter",
@@ -800,6 +1483,12 @@ def get_budget_policy() -> str:
             "run_sdlc_crew",
             "recall_hermes_skills",
             "get_gateway_metadata",
+            "memory_chat",
+            "memory_recall",
+            "memory_store_fact",
+            "memory_list_threads",
+            "memory_cleanup",
+            "memory_store_summary",
         ],
     })
 
