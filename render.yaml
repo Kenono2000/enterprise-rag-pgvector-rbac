@@ -13,3 +13,17 @@ services:
         sync: false # You will paste your Neon URL in the Render dashboard
       - key: OPENAI_API_KEY
         sync: false # Optional: Paste your key, or leave blank to use the mock fallback
+  - type: web
+    name: enterprise-rag-gateway
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements-gateway.txt
+    startCommand: python -m app.mcp --transport http
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: REQUIRE_GOOGLE_AUTH
+        value: "false"
+      - key: RETRIEVAL_BACKEND
+        value: pgvector
