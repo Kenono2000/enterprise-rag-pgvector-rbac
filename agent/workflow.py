@@ -205,14 +205,6 @@ class AutonomyMaturityEvaluator:
         signals["secret_scanning"] = True
         signals["stride_threat_modeling"] = True
         signals["guardrails_enforced"] = (root / "agent" / "guardrails.py").exists()
-        
-        # New Metric: Autonomous Security Exposure (via integration with incident_agent)
-        try:
-            from incident_agent import tools
-            exposure = tools.tool_security_exposure_score(service="main-app")
-            signals["low_security_exposure"] = exposure.get("exposure_score", 1.0) < 0.5
-        except Exception:
-            signals["low_security_exposure"] = False
 
         # Score calculation across the Eight Pillars
         # L1: 5 pts, L2: 19 pts, L3: 36 pts, L4: 60 pts, L5: 100 pts
