@@ -612,7 +612,7 @@ async def test_rest_store_fact_persists_and_rows_are_present(mock_db):
             "value": "this fact was stored via REST",
             "allowed_roles": ["engineer"],
         },
-        headers={"X-User-Roles": "engineer"},
+        headers={"X-User-Roles": json.dumps(['engineer'])},
     )
     assert resp.status_code == 200, f"Fact storage failed: {resp.text}"
     fact_data = resp.json()
@@ -771,7 +771,7 @@ async def test_rest_store_fact_persists_and_rows_are_present(mock_db):
             "value": "this fact was stored via REST",
             "allowed_roles": ["engineer"],
         },
-        headers={"X-User-Roles": "engineer"},
+        headers={"X-User-Roles": json.dumps(['engineer'])},
     )
     assert resp.status_code == 200, f"Fact storage failed: {resp.text}"
     fact_data = resp.json()

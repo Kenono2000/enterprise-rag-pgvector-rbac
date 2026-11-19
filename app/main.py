@@ -965,7 +965,7 @@ async def memory_chat(
             msg_id = await SharedMemoryStore.append_message(
                 thread_id=tid,
                 message=request.message,
-                role="user",
+                role=request.role,
                 metadata={"caller_sub": user.sub, "caller_email": user.email},
             )
         else:
@@ -982,7 +982,7 @@ async def memory_chat(
             msg_id = await SharedMemoryStore.append_message(
                 thread_id=tid,
                 message=request.message,
-                role="user",
+                role=request.role,
                 metadata={"caller_sub": user.sub, "caller_email": user.email},
             )
         if not msg_id:
