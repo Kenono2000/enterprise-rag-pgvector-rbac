@@ -1512,6 +1512,19 @@ def run_server(
     import argparse
 
     parser = argparse.ArgumentParser(description="SDLC-Harness FastMCP Gateway")
+
+    def _env_int(name: str, default: int) -> int:
+        """Parse an int env var, tolerating unexpanded shell placeholders like '$PORT'."""
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            # Render may cache a literal '$PORT' from a prior deploy; ignore it and
+            # let the CLI argument (--port $PORT, expanded by Render's shell) take over.
+            return default
+
     parser.add_argument(
         "--transport",
         choices=["stdio", "sse", "http", "streamable-http"],
@@ -1526,7 +1539,7 @@ def run_server(
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.getenv("MCP_PORT", "8000")),
+        default=_env_int("MCP_PORT", 8000),
         help="Bind port for HTTP/SSE transports (default: 8000)",
     )
     args, _ = parser.parse_known_args()
