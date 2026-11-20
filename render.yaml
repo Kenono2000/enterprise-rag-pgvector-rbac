@@ -27,3 +27,7 @@ services:
         value: "false"
       - key: RETRIEVAL_BACKEND
         value: pgvector
+      - key: MCP_HOST
+        value: 0.0.0.0
+      - key: MCP_PORT
+        value: $PORT
