@@ -38,7 +38,7 @@ flowchart LR
 | # | Pillar | Core Focus | Key Outcome |
 | :-: | :--- | :--- | :--- |
 | **1** | **In-DB RBAC & Storage** | Pre-filtered GIN + HNSW iterative scan | **75% RAM savings**, zero recall starvation, in-DB token audit |
-| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox | Kubernetes probe ready, 307 tests collected (306 pass, 1 skipped), 0 warnings |
+| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox | Kubernetes probe ready, 307 tests collected (307 pass, 0 skipped), 0 warnings |
 | **3** | **Identity & Sessions** | Stateless OAuth 2.0 PKCE, HMAC state & encrypted cookies | F5 reload resilience, multi-worker scale-out, zero Redis, SOC-2 bounds |
 | **4** | **Ingestion & Hybrid RAG** | Contextual headers, 64KB SHA-256 de-dup, Adaptive RRF | **>0.90 Context Precision**, O(1) skip for unchanged files |
 | **5** | **Gateways, OTel, SDLC & Deep-Dive** | Zero-Trust FastMCP Gateway, token budgets, OpenTelemetry, SDLC workflow | Rate limits, JWT/TLS auth, token budgets, 60 req/min limits, defense-in-depth |
@@ -91,7 +91,7 @@ ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 flowchart LR
     subgraph DevBootstrap ["1. Bootstrap & Verify"]
         direction TB
-        Venv["Install .venv & Deps"] --> Pytest["Run 307 Pytest Tests<br/>(306 pass · 1 skipped)"]
+        Venv["Install .venv & Deps"] --> Pytest["Run 307 Pytest Tests<br/>(307 pass · 0 skipped)"]
     end
     subgraph Containers ["2. Docker Infrastructure"]
         direction TB
@@ -109,7 +109,7 @@ flowchart LR
 ```powershell
 git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
 python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run full test suite (307 collected: 306 pass, 1 skipped; 0 warnings)
+python -m pytest -v                                                     # 1. Run full test suite (307 collected: 307 passed, 0 skipped; 0 warnings)
 docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
@@ -429,11 +429,11 @@ flowchart LR
 * **halfvec 16-bit quantization** — `embedding_halfvec halfvec(1536)` generated column + `idx_chunks_embedding_halfvec_hnsw` (`halfvec_cosine_ops`) deliver the 50%/75%-cumulative RAM compaction; `format_halfvec()` sanitizes NaN/Inf before literal serialization. HNSW supports up to 4,000 half-precision dims, so 1536-d indexes retain headroom.
 * **Stateless Streamable HTTP MCP (2026)** — The gateway (`app/mcp/gateway.py` + co-hosted mount in `app/main.py`) runs stateless/sessionless mode locally, but production deploys it as the separate `enterprise-rag-gateway` Render service using `requirements-gateway.txt`. It keeps no `Mcp-Session-Id` required, `Mcp-Method`/`Mcp-Name` header reflection for zero-DPI proxy routing, RFC 9728 Protected Resource Metadata via `get_gateway_metadata`, and forwarded sub-app ASGI lifespan so `StreamableHTTPSessionManager` initializes (pinned by `tests/test_mcp_auth.py::TestFastMcpHttpMount`).
 * **Multi-agent SDLC frameworks** — Tri-paradigm orchestration (LangGraph cyclic state machine + PostgresSaver checkpoints, CrewAI tiered crew `inherit`/`pro`/`flash`, Hermes SKILL.md synthesis + ShareGPT GRPO trajectories) plus the incident-investigator's hand-built reason-act-observe loop (12-step cap, repeat guard, corroborated early-stop at confidence ≥ 0.85).
-* **Today's enhancement** — Unified the role-sanitization contract into one canonical `app/auth/role_mapper.sanitize_roles_for_query()` (previously six divergent copies across pgvector/cloud adapters/REST headers); regression-pinned cross-engine by `tests/test_role_sanitization_contract.py` (24 tests, suite now 307 collected / 306 pass / 1 skipped, 0 warnings).
+* **Today's enhancement** — Unified the role-sanitization contract into one canonical `app/auth/role_mapper.sanitize_roles_for_query()` (previously six divergent copies across pgvector/cloud adapters/REST headers); regression-pinned cross-engine by `tests/test_role_sanitization_contract.py` (24 tests, suite now 307 collected / 307 pass / 0 skipped, 0 warnings).
 
 ### 8.1a Daily R&D Research Log (2026-11-19)
 * **pgvector primary-source re-verification** — Re-verified against the pgvector README (github.com/pgvector/pgvector, v0.8.7): iterative index scans introduced in 0.8.0 (`SET hnsw.iterative_scan = strict_order | relaxed_order`, `hnsw.max_scan_tuples` default 20,000, `hnsw.scan_mem_multiplier`); relaxed ordering trades exact distance ordering for better recall when selective `WHERE` clauses filter HNSW candidates — exactly the RBAC recall-starvation case this project prevents. `halfvec(p)` stores `2*p + 8` bytes (~50% vs `vector`'s `4*p + 8`); the HNSW index table caps halfvec at 4,000 dims, so 1536-d `text-embedding-3-small` indexes retain headroom. Confirmed the project's `configure_iterative_scan()` (per-connection `PGC_USERSET` GUCs, never persisted in migration `DO` blocks) and `format_halfvec()` NaN/Inf sanitization match upstream behavior.
-* **Architectural audit: incident-investigator tool drift** — Audited `incident_agent/tools.py` `TOOL_SPECS` and found a 7th drifted tool `security.exposure_score` not present in the read-only contract enforced by `incident_agent/guardrails.py` (`READ_ONLY_TOOLS`), `incident_agent/mcp_server.py` (`TOOL_REQUIRED_ROLES`), or the MCP server tool registrations — and explicitly rejected by `tests/test_incident_investigator.py::test_six_tools_are_registered_and_read_only`. Removed `security.exposure_score` from `TOOL_SPECS`, removed the now-dead `tool_security_exposure_score` function and its dead call in `agent/workflow.py`, and deleted `IMPROVEMENT_SUMMARY.md` (Single-File Documentation Policy — all docs live in README.md only). Restores the six-read-only-tool invariant; suite now 306 passed, 1 skipped, 0 failures, 0 warnings under `python -m pytest -q -W error`.
+* **Architectural audit: incident-investigator tool drift** — Audited `incident_agent/tools.py` `TOOL_SPECS` and found a 7th drifted tool `security.exposure_score` not present in the read-only contract enforced by `incident_agent/guardrails.py` (`READ_ONLY_TOOLS`), `incident_agent/mcp_server.py` (`TOOL_REQUIRED_ROLES`), or the MCP server tool registrations — and explicitly rejected by `tests/test_incident_investigator.py::test_six_tools_are_registered_and_read_only`. Removed `security.exposure_score` from `TOOL_SPECS`, removed the now-dead `tool_security_exposure_score` function and its dead call in `agent/workflow.py`, and deleted `IMPROVEMENT_SUMMARY.md` (Single-File Documentation Policy — all docs live in README.md only). Restores the six-read-only-tool invariant; suite now 307 passed, 0 skipped, 0 failures, 0 warnings under `python -m pytest -q -W error`.
 ### 8.2 Extended Thinking / Reasoning Budget (RAG Pipeline)
 Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional integer 0–128000 tokens controlling reasoning depth for complex queries.
 - **`thinking_budget=0`** (default): Fast mode, default 4K context token budget.
@@ -460,7 +460,7 @@ A recurring DSH scheduled task runs the full refinement loop **daily at 6:00 AM 
 * **Task**: `Daily Enterprise RAG Refinement & R&D` — id `schedule-b4134923-9750-46d3-a3ec-5476b2b8e252`, status `active`.
 * **Timing**: `DTSTART;TZID=America/Chicago:20261117T060000` + `RRULE:FREQ=DAILY;BYHOUR=6;BYMINUTE=0` (first occurrence 2026-11-17 06:00 CDT). Equivalent five-field Cron: `0 6 * * *` with explicit `America/Chicago` zone.
 * **Delivery**: native DSH scheduler (`schedule_create`/`schedule_list`/`schedule_edit`/`schedule_view`); each occurrence opens a **new session** (target `new`) with working directory `C:\src\enterprise-rag-pgvector-rbac` and the standard agent preset. Restart preserves committed occurrences; the task ends after its final delivery if the rule is ever bounded.
-* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (307 collected: 306 pass, 1 skipped; 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
+* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (307 collected: 307 passed, 0 skipped; 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
 * **Manage**: view/edit/cancel from the DSH Automations dashboard or the `schedule_view` / `schedule_edit` / `schedule_list` tools.
 
 ## 9. Incident Investigator Agent (7-Step Agentic Roadmap)
