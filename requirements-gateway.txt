@@ -1,1 +1,1 @@
-fastmcp-slim==4.2.1
+fastmcp-slim[server]==4.2.1
