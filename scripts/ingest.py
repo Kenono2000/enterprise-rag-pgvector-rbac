@@ -53,10 +53,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "libs"))
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# History tracking file (outside the repo) to avoid re-ingesting the same JSON files.
+# History tracking file (outside the repo or configurable via env var) to avoid re-ingesting the same JSON files.
 # Format: {"files": ["#PressOn.json", "I_Will_Not_Come_Down.json", ...]}
 # Separate from idisciple_history.json so JSON-import tracking is independent.
-HISTORY_FILE = Path(r"C:\Users\Ken Wong\Downloads\temp\json_import_history.json")
+import os
+
+_DEFAULT_HISTORY_FILE = PROJECT_ROOT / "data" / "json_import_history.json"
+HISTORY_FILE = Path(os.environ.get("JSON_IMPORT_HISTORY_FILE", str(_DEFAULT_HISTORY_FILE)))
 
 import openai
 import psycopg2
@@ -136,13 +139,13 @@ def load_processed_files() -> set[str]:
     The history file has the shape {"files": ["#PressOn.json", ...]}.
     Returns an empty set if the file is missing, empty, or malformed.
     """
-    if not HISTORY_FILE.is_file():
-        return set()
     try:
+        if not HISTORY_FILE.is_file():
+            return set()
         data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
         names = data.get("files", []) if isinstance(data, dict) else []
         return {n for n in names if isinstance(n, str)}
-    except (json.JSONDecodeError, OSError, ValueError):
+    except (json.JSONDecodeError, OSError, ValueError, PermissionError):
         return set()
 
 
