@@ -104,7 +104,7 @@ async def test_db_record_token_consumption():
             caller_id="eng@corp.com",
             prompt_tokens=80,
             completion_tokens=40,
-            model="gpt-4o",
+            model="gpt-4o-mini",
             operation_type="rag_query",
         )
         assert result["total_tokens_consumed"] == 120

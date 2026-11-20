@@ -223,7 +223,7 @@ async def query_rag(
             caller_id=caller_key,
             prompt_tokens=p_tokens,
             completion_tokens=c_tokens,
-            model="gpt-4o",
+            model="gpt-4o-mini",
             operation_type="rag_query",
             metadata={"citations_count": len(citations)},
         )

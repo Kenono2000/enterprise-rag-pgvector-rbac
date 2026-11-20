@@ -102,7 +102,7 @@ def _get_embedding_model_or_deployment() -> str:
     return "text-embedding-3-small"
 
 
-def _get_chat_model_or_deployment(default_model: str = "gpt-4o") -> str:
+def _get_chat_model_or_deployment(default_model: str = "gpt-4o-mini") -> str:
     if is_azure_backend():
         return os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT", "gpt-4o-mini")
     if is_databricks_backend():
@@ -128,7 +128,7 @@ async def generate_embedding(text: str, dimensions: int = 1536) -> list[float]:
     return [0.01 * (i % 5) for i in range(dimensions)]
 
 
-async def chat_completion(prompt: str, model: str = "gpt-4o", temperature: float = 0.0) -> str:
+async def chat_completion(prompt: str, model: str = "gpt-4o-mini", temperature: float = 0.0) -> str:
     client = get_openai_client()
     if client:
         target_model = _get_chat_model_or_deployment(model)
@@ -141,7 +141,7 @@ async def chat_completion(prompt: str, model: str = "gpt-4o", temperature: float
     return f"[Local Mock Response for]: {prompt[:50]}..."
 
 
-async def chat_completion_stream(prompt: str, model: str = "gpt-4o", temperature: float = 0.0):
+async def chat_completion_stream(prompt: str, model: str = "gpt-4o-mini", temperature: float = 0.0):
     """Async generator yielding LLM response tokens in real-time."""
     client = get_openai_client()
     if client:
@@ -165,7 +165,7 @@ async def chat_completion_stream(prompt: str, model: str = "gpt-4o", temperature
             yield word + " "
 
 
-def chat_completion_stream_sync(prompt: str, model: str = "gpt-4o", temperature: float = 0.0):
+def chat_completion_stream_sync(prompt: str, model: str = "gpt-4o-mini", temperature: float = 0.0):
     """Synchronous generator yielding LLM response tokens (compatible with st.write_stream)."""
     if is_azure_backend():
         sync_client = AzureOpenAI(

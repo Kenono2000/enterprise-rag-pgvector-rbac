@@ -1455,7 +1455,7 @@ def _render_rag_interface() -> None:
                             caller_id=caller_key_curr,
                             prompt_tokens=p_tokens,
                             completion_tokens=c_tokens,
-                            model="gpt-4o",
+                            model="gpt-4o-mini",
                             operation_type="streamlit_chat",
                             metadata={"roles": roles, "citations": len(citations)},
                         ))
@@ -1470,7 +1470,7 @@ def _render_rag_interface() -> None:
                     answer=response_text,
                     roles=roles,
                     duration_ms=chat_duration_ms,
-                    model="gpt-4o",
+                    model="gpt-4o-mini",
                 )
 
 

@@ -485,7 +485,7 @@ async def query_rag(
     p_tokens = len(prompt.split())
     c_tokens = len(answer_text.split())
     tracer.record_generation(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         prompt_tokens=p_tokens,
         completion_tokens=c_tokens,
         duration_ms=gen_ms,
@@ -495,7 +495,7 @@ async def query_rag(
         answer=answer_text,
         roles=user.roles,
         duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
-        model="gpt-4o",
+        model="gpt-4o-mini",
     )
 
     # Record extended thinking budget usage in observability
@@ -513,7 +513,7 @@ async def query_rag(
             caller_id=caller_key,
             prompt_tokens=p_tokens,
             completion_tokens=c_tokens,
-            model="gpt-4o",
+            model="gpt-4o-mini",
             operation_type="rag_query",
             metadata={"mode": request.mode, "citations_count": len(citations)},
         )
@@ -637,7 +637,7 @@ async def query_rag_stream(
         c_tokens = len(answer_text.split())
 
         tracer.record_generation(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             prompt_tokens=p_tokens,
             completion_tokens=c_tokens,
             duration_ms=gen_ms,
@@ -647,7 +647,7 @@ async def query_rag_stream(
             answer=answer_text,
             roles=user.roles,
             duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
-            model="gpt-4o",
+            model="gpt-4o-mini",
         )
 
         try:
@@ -655,7 +655,7 @@ async def query_rag_stream(
                 caller_id=caller_key,
                 prompt_tokens=p_tokens,
                 completion_tokens=c_tokens,
-                model="gpt-4o",
+                model="gpt-4o-mini",
                 operation_type="rag_query_stream",
                 metadata={"mode": request.mode, "citations_count": len(citations)},
             )
@@ -759,7 +759,7 @@ async def ingest_document(
             c.page_content,
             len(c.page_content.split()),
             c_emb,
-            "text-embedding-3-large",
+            "text-embedding-3-small",
         ))
 
     await DatabaseManager.ingest_normalized_document(

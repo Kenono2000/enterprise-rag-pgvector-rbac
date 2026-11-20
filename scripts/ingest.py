@@ -53,6 +53,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "libs"))
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# History tracking file (outside the repo) to avoid re-ingesting the same JSON files.
+# Format: {"files": ["#PressOn.json", "I_Will_Not_Come_Down.json", ...]}
+# Separate from idisciple_history.json so JSON-import tracking is independent.
+HISTORY_FILE = Path(r"C:\Users\Ken Wong\Downloads\temp\json_import_history.json")
+
 import openai
 import psycopg2
 from langchain_core.documents import Document
@@ -122,6 +127,43 @@ def check_document_exists(target: Any, filename: str, file_hash: Optional[str] =
         return _execute_check(target)
     else:
         raise ValueError(f"Invalid target type for check_document_exists: {type(target)}")
+
+
+def load_processed_files() -> set[str]:
+    """
+    Load the set of already-processed file names from the history file.
+
+    The history file has the shape {"files": ["#PressOn.json", ...]}.
+    Returns an empty set if the file is missing, empty, or malformed.
+    """
+    if not HISTORY_FILE.is_file():
+        return set()
+    try:
+        data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        names = data.get("files", []) if isinstance(data, dict) else []
+        return {n for n in names if isinstance(n, str)}
+    except (json.JSONDecodeError, OSError, ValueError):
+        return set()
+
+
+def save_processed_files(names: set[str]) -> None:
+    """
+    Persist the set of processed file names back to the history file.
+
+    Preserves the {"files": [...]} format.
+    """
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"files": sorted(names)}
+    HISTORY_FILE.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def extract_json_filename(file_path: str) -> str:
+    """
+    Return the file name of a JSON file for history tracking.
+
+    Example: "C:/data/I_Will_Not_Come_Down.json" -> "I_Will_Not_Come_Down.json"
+    """
+    return Path(file_path).name
 
 
 def ingest_data(
@@ -264,29 +306,45 @@ def main():
         print("No valid files found.")
         return
 
-    # Check if files already exist via SHA-256 hash or document_id
+    # Load history of already-processed file names to avoid re-ingesting the same JSON files.
+    processed_files = load_processed_files()
     files_to_process: list[str] = []
+    newly_processed_files: list[str] = []
+    for file_path in file_paths:
+        p = Path(file_path)
+        if p.suffix.lower() == ".json":
+            fname = extract_json_filename(file_path)
+            if fname in processed_files:
+                print(f"⚠️ Skipping already processed JSON file: {p.name}")
+                continue
+            files_to_process.append(file_path)
+            newly_processed_files.append(fname)
+        else:
+            files_to_process.append(file_path)
+
+    # Check if files already exist via SHA-256 hash or document_id
     if getattr(args, "force", False):
-        files_to_process = file_paths
+        db_files_to_process = files_to_process
     else:
         try:
             with get_db_connection(database_url) as conn, conn.cursor() as cur:
-                for file_path in file_paths:
+                db_files_to_process = []
+                for file_path in files_to_process:
                     filename = Path(file_path).name
                     file_hash = compute_file_hash(file_path) if Path(file_path).is_file() else None
                     if check_document_exists(cur, filename, file_hash=file_hash):
                         print(f"⚠️ Skipping already ingested file: {filename} (content unchanged)")
                     else:
-                        files_to_process.append(file_path)
+                        db_files_to_process.append(file_path)
         except psycopg2.Error as e:
             print(f"⚠️ Could not verify existing documents in database ({e}). Proceeding with all files.")
-            files_to_process = file_paths
+            db_files_to_process = files_to_process
 
-    if not files_to_process:
+    if not db_files_to_process:
         print("All documents have already been ingested.")
         return
 
-    documents = get_documents(files_to_process)
+    documents = get_documents(db_files_to_process)
     # Attach file_hash to document metadata
     for doc in documents:
         src = doc.metadata.get("source")
@@ -305,6 +363,12 @@ def main():
         default_roles=args.roles,
         batch_size=args.batch_size,
     )
+
+    # Record newly processed JSON file names in the history file so they aren't repeated.
+    if newly_processed_files:
+        all_files = processed_files | set(newly_processed_files)
+        save_processed_files(all_files)
+        print(f"📝 History updated: {len(newly_processed_files)} new file(s) tracked in {HISTORY_FILE}")
 
 
 if __name__ == "__main__":

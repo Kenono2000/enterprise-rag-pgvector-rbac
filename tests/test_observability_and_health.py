@@ -76,7 +76,7 @@ def test_observability_tracer_records_metrics_and_spans():
         )
 
     tracer.record_generation(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         prompt_tokens=150,
         completion_tokens=45,
         duration_ms=250.0,
@@ -118,7 +118,7 @@ def test_record_chat_interaction():
         answer="The architecture consists of PostgreSQL pgvector and FastAPI.",
         roles=["engineer"],
         duration_ms=45.2,
-        model="gpt-4o",
+        model="gpt-4o-mini",
     )
     summary = tracer.get_metrics_summary()
     assert summary["chat_interactions"] >= 1

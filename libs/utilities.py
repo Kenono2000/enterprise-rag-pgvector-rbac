@@ -58,7 +58,7 @@ with warnings.catch_warnings():
 from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 ROLE_HIERARCHY = {
     "admin": ["admin", "executive", "finance_analyst", "engineering"],
@@ -374,9 +374,24 @@ def _is_retryable_embedding_error(exc: BaseException) -> bool:
     return "429" in err_msg or "rate limit" in err_msg or "503" in err_msg or "timeout" in err_msg
 
 
+def _retry_wait(retry_state: "RetryCallState") -> float:
+    """Wait for the OpenAI-suggested Retry-After seconds on 429, else exponential backoff."""
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    if exc is not None:
+        response = getattr(exc, "response", None) or getattr(exc, "http_response", None)
+        if response is not None:
+            retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
+            if retry_after:
+                try:
+                    return float(retry_after)
+                except ValueError:
+                    pass
+    return wait_exponential(multiplier=1, min=2, max=60)(retry_state)
+
+
 @retry(
     retry=retry_if_exception(_is_retryable_embedding_error),
-    wait=wait_exponential(multiplier=1, min=2, max=60),
+    wait=_retry_wait,
     stop=stop_after_attempt(5),
     reraise=True,
 )
@@ -452,7 +467,7 @@ def rerank_candidates(
     return sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)[:top_k]
 
 
-def get_llm(api_key: str, model: str = "gpt-4o", temperature: float = 0.0) -> ChatOpenAI:
+def get_llm(api_key: str, model: str = "gpt-4o-mini", temperature: float = 0.0) -> ChatOpenAI:
     return ChatOpenAI(model=model, temperature=temperature, openai_api_key=api_key)
 
 

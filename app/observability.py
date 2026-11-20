@@ -164,7 +164,7 @@ class ObservabilityTracer:
         answer: str,
         roles: List[str],
         duration_ms: float,
-        model: str = "gpt-4o",
+        model: str = "gpt-4o-mini",
     ) -> None:
         """Capture user question and AI response in Jaeger spans, tags, and events."""
         data = {

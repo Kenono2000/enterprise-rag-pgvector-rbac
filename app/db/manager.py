@@ -828,7 +828,7 @@ class DatabaseManager:
         caller_id: str,
         prompt_tokens: int,
         completion_tokens: int,
-        model: str = "gpt-4o",
+        model: str = "gpt-4o-mini",
         operation_type: str = "rag_query",
         metadata: Optional[Dict[str, Any]] = None,
         default_budget_limit: int = 50000,
