@@ -455,10 +455,10 @@ Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional
 | Incident investigator agent (KDnuggets 7-step roadmap) | Hand-built reason-act-observe loop, six read-only MCP tools, layered memory, orchestrator-workers, replay eval, deployment guardrails | ✅ `incident_agent/` package; 53-test suite in `tests/test_incident_investigator.py`; 30-case replay at 100% pass |
 
 ### 8.4 Daily Automation (Unattended SDLC Refinement)
-A recurring DSH scheduled task runs the full refinement loop **daily at 6:00 AM America/Chicago** (host timezone), delivering the Principal AI Platform Architect prompt into a fresh session rooted at this repository:
+A recurring DSH scheduled task runs the full refinement loop **daily at 5:00 AM America/Chicago** (host timezone), delivering the Principal AI Platform Architect prompt into a fresh session rooted at this repository:
 
-* **Task**: `Daily Enterprise RAG Refinement & R&D` — id `schedule-b4134923-9750-46d3-a3ec-5476b2b8e252`, status `active`.
-* **Timing**: `DTSTART;TZID=America/Chicago:20261117T060000` + `RRULE:FREQ=DAILY;BYHOUR=6;BYMINUTE=0` (first occurrence 2026-11-17 06:00 CDT). Equivalent five-field Cron: `0 6 * * *` with explicit `America/Chicago` zone.
+* **Task**: `Daily Enterprise RAG Refinement & R&D` — id `schedule-94bcc368-a7fc-463d-9227-2a210f436b25`, status `active`.
+* **Timing**: `DTSTART;TZID=America/Chicago:20261120T050000` + `RRULE:FREQ=DAILY;BYHOUR=5;BYMINUTE=0` (first occurrence 2026-11-20 05:00 CDT). Equivalent five-field Cron: `0 5 * * *` with explicit `America/Chicago` zone.
 * **Delivery**: native DSH scheduler (`schedule_create`/`schedule_list`/`schedule_edit`/`schedule_view`); each occurrence opens a **new session** (target `new`) with working directory `C:\src\enterprise-rag-pgvector-rbac` and the standard agent preset. Restart preserves committed occurrences; the task ends after its final delivery if the rule is ever bounded.
 * **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (307 collected: 306 pass, 1 skipped; 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
 * **Manage**: view/edit/cancel from the DSH Automations dashboard or the `schedule_view` / `schedule_edit` / `schedule_list` tools.
