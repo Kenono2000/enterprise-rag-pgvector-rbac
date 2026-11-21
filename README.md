@@ -176,13 +176,12 @@ flowchart LR
 * **Adaptive Hybrid Search (Semantic + Keyword RRF)**: Combines 16-bit `halfvec(1536)` cosine search with robust full-text search (`plainto_tsquery` + `websearch_to_tsquery` fallback) using parameterized Reciprocal Rank Fusion (`dense_weight / (k + rank) + sparse_weight / (k + rank)`, default `k=60`), pre-filtered by user role in PostgreSQL. Fusion runs as a **single-pass SQL CTE** (`ROW_NUMBER() OVER (...)` dense + sparse ranks, `FULL OUTER JOIN`, in-database RRF score) with automatic Python RRF fallback, and `hnsw.max_scan_tuples` auto-scales per caller via `DatabaseManager.scaled_scan_tuples` (1 role 2x, 2 roles 1x, 3+ roles 0.5x).
 * **Embedding & Re-Ranking Models (`libs/utilities.py`)**: Uses OpenAI / Azure OpenAI `text-embedding-3-small` (1536-d) for chunk embeddings and optional `CrossEncoder` (`ms-marco-MiniLM-L-6-v2`) for secondary re-ranking; `GroundingGuardrail` verifies source citations (`[Doc: <Title>, Chunk <Index>]`) and gracefully refuses ungrounded responses.
 ### 📚 Context Engineering Pipeline (`app/rag/context.py`)
-Formalizes the **retrieve → assemble → cache → compact** discipline:
+Formalizes the retrieve → assemble → cache → compact discipline:
 
-* `ContextAssembler.assemble()`: Converts authorized chunks into citation-formatted context text
-* Builds deterministic static-prefix prompt (SHA-256 `prefix_hash`, `static_prefix_tokens`) for cross-turn KV prefix caching
-* Applies token-bounded deterministic compaction (`DEFAULT_MAX_CONTEXT_TOKENS=4000`) when authorized context exceeds budget, keeping highest-similarity chunks
-
-Both `/api/v1/query` and `/api/v1/query/stream` endpoints route through this optimized pipeline.
+ContextAssembler.assemble(): Converts authorized chunks into citation-formatted context text
+Builds deterministic static-prefix prompt (SHA-256 prefix_hash, static_prefix_tokens) for cross-turn KV prefix caching
+Applies token-bounded deterministic compaction (DEFAULT_MAX_CONTEXT_TOKENS=4000) when authorized context exceeds budget, keeping highest-similarity chunks
+Both /api/v1/query and /api/v1/query/stream endpoints route through this optimized pipeline.
 
 ### 📐 RAG Triad Evaluation Engine (`app/rag/evaluator.py`)
 Deterministic, fully offline quality evaluator for the RAG Triad (no LLM/network calls — keyword-overlap + vector-similarity heuristics), exported from `app/rag/__init__.py` and pinned by `tests/test_deep_eval.py`:
