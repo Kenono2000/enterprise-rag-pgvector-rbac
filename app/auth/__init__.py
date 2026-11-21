@@ -16,6 +16,7 @@ from app.auth.pkce import (
     generate_code_verifier,
     generate_pkce_pair,
 )
+from app.auth.claims import UserClaims, claims_from_payload
 from app.auth.role_mapper import (
     KNOWN_ROLES,
     extract_roles,
@@ -26,6 +27,7 @@ from app.auth.role_mapper import (
 __all__ = [
     "KNOWN_ROLES",
     "build_authorization_url",
+    "claims_from_payload",
     "decode_pkce_state",
     "decode_session_cookie",
     "derive_code_challenge",
@@ -35,6 +37,7 @@ __all__ = [
     "exchange_code_for_tokens_sync",
     "generate_code_verifier",
     "generate_pkce_pair",
+    "UserClaims",
     "verify_google_token",
     "verify_jwt_token",
     "get_allowed_issuers",

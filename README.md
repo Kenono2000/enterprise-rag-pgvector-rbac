@@ -38,7 +38,7 @@ flowchart LR
 | # | Pillar | Core Focus | Key Outcome |
 | :-: | :--- | :--- | :--- |
 | **1** | **In-DB RBAC & Storage** | Pre-filtered GIN + HNSW iterative scan | **75% RAM savings**, zero recall starvation, in-DB token audit |
-| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox | Kubernetes probe ready, 307 tests collected (306 pass, 1 skipped), 0 warnings |
+| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox, centralized pool sizing under Settings | Kubernetes probe ready, 308 tests collected (307 pass, 1 skipped), 0 warnings |
 | **3** | **Identity & Sessions** | Stateless OAuth 2.0 PKCE, HMAC state & encrypted cookies | F5 reload resilience, multi-worker scale-out, zero Redis, SOC-2 bounds |
 | **4** | **Ingestion & Hybrid RAG** | Contextual headers, 64KB SHA-256 de-dup, Adaptive RRF | **>0.90 Context Precision**, O(1) skip for unchanged files |
 | **5** | **Gateways, OTel, SDLC & Deep-Dive** | Zero-Trust FastMCP Gateway, token budgets, OpenTelemetry, SDLC workflow | Rate limits, JWT/TLS auth, token budgets, 60 req/min limits, defense-in-depth |
@@ -91,7 +91,7 @@ ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 flowchart LR
     subgraph DevBootstrap ["1. Bootstrap & Verify"]
         direction TB
-        Venv["Install .venv & Deps"] --> Pytest["Run 307 Pytest Tests<br/>(306 pass · 1 skipped)"]
+        Venv["Install .venv & Deps"] --> Pytest["Run 308 Pytest Tests<br/>(307 pass · 1 skipped)"]
     end
     subgraph Containers ["2. Docker Infrastructure"]
         direction TB
@@ -109,7 +109,7 @@ flowchart LR
 ```powershell
 git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
 python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run full test suite (307 collected: 306 pass, 1 skipped; 0 warnings)
+python -m pytest -v                                                     # 1. Run full test suite (308 collected: 307 pass, 1 skipped; 0 warnings)
 docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
@@ -123,6 +123,7 @@ python -m agent checkpoints "<thread_id>"                                # 7. In
 
 **Key Optimizations**:
 - **Loop-Scoped Async Concurrency**: `DatabaseManager` and `get_openai_client()` scope connection pools to `asyncio.get_running_loop()`, preventing `RuntimeError: Event loop is closed` across Streamlit threads.
+- **Centralized Pool Sizing Under Settings**: `DB_POOL_MIN_SIZE` (default 5), `DB_POOL_MAX_SIZE` (default 20), `DB_POOL_COMMAND_TIMEOUT` (default 60) configured via `app/config.Settings` and exposed through `get_db_pool_config()` — replaces hard-coded `min_size=1, max_size=5` literals so pool sizing is centrally governed by environment.
 - **Hermetic Testing**: `conftest.py` pins deterministic environment (`OTEL_ENABLED=false`, blank `DATABASE_URL` / `GITHUB_TOKEN`, `SDLC_PUSH=false`, `USE_CREWAI_SDK=false`) *before* application import, ensuring CI/CI override safety with 12-factor precedence.
 - **Strict Warning Gate**: the suite is verified under `python -m pytest -W error` — zero warnings tolerated. The event-loop recreation invariant (`test_pool_is_recreated_across_event_loops`) creates and closes its loops explicitly (never `asyncio.run()`) so no `ProactorEventLoop` is left to garbage-collection finalization, which would leak `ResourceWarning: unclosed event loop` and trip the gate.
 - **Opt-in CrewAI**: Heavyweight SDK strictly opt-in via `USE_CREWAI_SDK=true`, maintaining deterministic `native_pydantic` adapter by default.
@@ -144,6 +145,7 @@ sequenceDiagram
     App->>Browser: Set encrypted cookie (15m idle / 12h max)
 ```
 * **Stateless HMAC PKCE State**: `encode_pkce_state()` signs `{b64_payload}.{sig}` (300s TTL) with HMAC-SHA256, surviving OAuth redirects and multi-worker restarts without Redis.
+* **Strict Pydantic v2 User Claims**: `UserClaims` model (`app/auth/claims.py`) enforces strict validation (`extra="forbid"`, `str_strip_whitespace=True`) on verified JWT payloads — required `sub`, normalized lowercased `email`/`roles`, rejection of unknown fields — so malformed or over-privileged claims cannot reach RBAC retrieval paths. `claims_from_payload()` builds validated claims from token payloads.
 * **F5 Reload Resilience**: Compresses (`zlib`) and HMAC-signs session tokens into the `enterprise_rag_session` cookie, rehydrating `st.session_state` and silently rotating expired tokens on browser refresh.
 * **Multi-IdP JWKS & SOC-2 Bounds**: Validates RS256 signatures (`leeway=60s`), maps claims across Google, Azure AD, Okta, Cognito, and Keycloak against `KNOWN_ROLES`, and enforces a **15-minute idle timeout** and **12-hour hard ceiling**.
 ## 5. Ingestion Pipeline and Hybrid RAG Quality (`scripts/ingest.py`, `libs/`)
@@ -177,11 +179,12 @@ flowchart LR
 * **Embedding & Re-Ranking Models (`libs/utilities.py`)**: Uses OpenAI / Azure OpenAI `text-embedding-3-small` (1536-d) for chunk embeddings and optional `CrossEncoder` (`ms-marco-MiniLM-L-6-v2`) for secondary re-ranking; `GroundingGuardrail` verifies source citations (`[Doc: <Title>, Chunk <Index>]`) and gracefully refuses ungrounded responses.
 ### 📚 Context Engineering Pipeline (`app/rag/context.py`)
 Formalizes the retrieve → assemble → cache → compact discipline:
-
-ContextAssembler.assemble(): Converts authorized chunks into citation-formatted context text
-Builds deterministic static-prefix prompt (SHA-256 prefix_hash, static_prefix_tokens) for cross-turn KV prefix caching
-Applies token-bounded deterministic compaction (DEFAULT_MAX_CONTEXT_TOKENS=4000) when authorized context exceeds budget, keeping highest-similarity chunks
-Both /api/v1/query and /api/v1/query/stream endpoints route through this optimized pipeline.
+* **ContextAssembler.assemble()**: Converts authorized chunks into citation-formatted context text (`[Doc: <Title>, Chunk <N>]`).
+* **Canonical Header Normalization**: Enforces strict title/content whitespace stripping and canonical header formatting across all chunks to stabilize byte-level SHA-256 `prefix_hash` across multi-turn queries.
+* **Attention-Aware Context Placement**: `ContextAssembler.reorder_chunks_extremities` places highest-similarity chunks at prompt extremities (`[rank_1, rank_3, ..., rank_4, rank_2]`) to mitigate LLM attention decay ("lost in the middle").
+* **Static-Prefix Prompt Caching**: Builds deterministic static-prefix prompt (`prefix_hash`, `static_prefix_tokens`) for cross-turn KV prefix caching on OpenAI and Gemini APIs.
+* **Token-Bounded Compaction**: Applies deterministic compaction (`DEFAULT_MAX_CONTEXT_TOKENS=4000`) when authorized context exceeds budget, keeping highest-similarity chunks.
+Both `/api/v1/query` and `/api/v1/query/stream` endpoints route through this optimized pipeline.
 
 ### 📐 RAG Triad Evaluation Engine (`app/rag/evaluator.py`)
 Deterministic, fully offline quality evaluator for the RAG Triad (no LLM/network calls — keyword-overlap + vector-similarity heuristics), exported from `app/rag/__init__.py` and pinned by `tests/test_deep_eval.py`:
@@ -437,6 +440,8 @@ flowchart LR
 * **pgvector 0.8+ iterative index scan / halfvec(1536)** — Confirmed the project's `DatabaseManager.configure_iterative_scan()` sets `hnsw.iterative_scan='relaxed_order'` + `hnsw.max_scan_tuples` (role-cardinality-scaled via `scaled_scan_tuples`) through the pool `init` hook and per query, and that `schema.sql` deliberately does not persist these `PGC_USERSET` GUCs (never in migration `DO` blocks). Iterative scans retain RBAC-filtered-out HNSW candidates in a discarded pairing heap and resume traversal in `ef_search` batches — the mechanism that keeps selective `allowed_roles ?| $2::text[]` filters from starving top-k recall. `format_halfvec()` sanitizes NaN/Inf to `0.0` before literal serialization; `embedding_halfvec halfvec(1536)` + `idx_chunks_embedding_halfvec_hnsw` (`halfvec_cosine_ops`) deliver ~50%/75%-cumulative RAM compaction, and HNSW caps halfvec at 4,000 dims so 1536-d `text-embedding-3-small` indexes retain headroom. Verified via `tests/test_database_schema.py` (`test_pgvector_08_iterative_scan_configuration`, `test_scaled_ef_search_by_role_cardinality`, `test_format_halfvec_nan_inf_sanitization`) and `tests/test_vector_protocols.py`.
 * **Architectural audit (main vs refinement baseline)** — Grepped for `get_vector_search_adapter`, `Mcp-Method`/`Mcp-Name`, `BadgerSaver` aliases, and `os.path.exists` credential patching: all four verified present (`app/db/adapters.py:110`, `app/main.py:327-332` / `:430` / `:579`, `agent/workflow.py:1055` `BadgerSaver = PostgresCheckpointSaver`, `app/auth/role_mapper.py:133/144/150/203`). Zero drift; no code change required.
 * **Zero-regression gate & Sandbox Ingestion Hardening** — Hardened `scripts/ingest.py` history tracking (`load_processed_files`) against Windows sandbox `PermissionError` and missing external paths by defaulting `HISTORY_FILE` to `PROJECT_ROOT / "data" / "json_import_history.json"`, overridable via `JSON_IMPORT_HISTORY_FILE`, and adding fail-safe exception handling. Re-ran `python -m pytest -q -W error`: 306 passed, 1 skipped, 0 warnings (307 collected). README counts perfectly aligned; zero drift.
+### 8.1a Daily R&D Research Log (2026-11-21)
+* **Attention-Aware Context Placement & Prefix Cache Hardening** — Implemented `ContextAssembler.reorder_chunks_extremities()` in `app/rag/context.py` to mitigate LLM attention decay ("lost in the middle") across long multi-document contexts by alternating highest-similarity chunks to prompt boundaries (`[rank_1, rank_3, ..., rank_4, rank_2]`). Canonicalized chunk header whitespace in `ContextAssembler.chunk_to_line()` to prevent byte-level SHA-256 `prefix_hash` drift and ensure reliable cross-turn KV prompt caching. Pinned via unit tests in `tests/test_context_assembly.py` (`test_reorder_chunks_extremities_places_top_chunks_at_edges`). Full test suite: 307 passed, 1 skipped, 0 failures, 0 warnings under `python -m pytest -q -W error` (308 collected).
 ### 8.2 Extended Thinking / Reasoning Budget (RAG Pipeline)
 Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional integer 0–128000 tokens controlling reasoning depth for complex queries.
 - **`thinking_budget=0`** (default): Fast mode, default 4K context token budget.
@@ -456,6 +461,8 @@ Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional
 | RAG Triad observability (context relevance, faithfulness, answer relevance) | Detects hallucinations and retrieval drift | ✅ `app/rag/evaluator.py` `RAGTriadEvaluator` (offline deterministic scoring, PASS ≥ 0.70 / faithfulness 1.5× weight) + `GroundingGuardrail` + `ObservabilityManager.record_rag_triad()` OTel spans |
 | Agentic SDLC coding (Claude Code pattern) | Autonomous patch proposal, test, and repair | ✅ LangGraph + CrewAI + Hermes workflow in `agent/workflow.py` |
 | Incident investigator agent (KDnuggets 7-step roadmap) | Hand-built reason-act-observe loop, six read-only MCP tools, layered memory, orchestrator-workers, replay eval, deployment guardrails | ✅ `incident_agent/` package; 53-test suite in `tests/test_incident_investigator.py`; 30-case replay at 100% pass |
+| Strict Pydantic v2 UserClaims RBAC validation | Zero-trust typed claims layer on verified JWTs; `extra="forbid"` rejects unknown fields, normalizes roles/email, requires `sub`; prevents malformed or over-privileged claims reaching RBAC filters | ✅ `app/auth/claims.py` `UserClaims` model + `claims_from_payload()`; exported from `app/auth/__init__.py` |
+| Centralized FastAPI async pool sizing under Settings | `DB_POOL_MIN_SIZE`/`DB_POOL_MAX_SIZE`/`DB_POOL_COMMAND_TIMEOUT` governed by `app/config.Settings` via `get_db_pool_config()`; replaces hard-coded pool literals for environment-driven tuning | ✅ `app/config.py` `get_db_pool_config()` + `DB_POOL_*` settings |
 
 ### 8.4 Daily Automation (Unattended SDLC Refinement)
 A recurring DSH scheduled task runs the full refinement loop **daily at 5:00 AM America/Chicago** (host timezone), delivering the Principal AI Platform Architect prompt into a fresh session rooted at this repository:
@@ -463,7 +470,7 @@ A recurring DSH scheduled task runs the full refinement loop **daily at 5:00 AM 
 * **Task**: `Daily Enterprise RAG Refinement & R&D` — id `schedule-94bcc368-a7fc-463d-9227-2a210f436b25`, status `active`.
 * **Timing**: `DTSTART;TZID=America/Chicago:20261120T050000` + `RRULE:FREQ=DAILY;BYHOUR=5;BYMINUTE=0` (first occurrence 2026-11-20 05:00 CDT). Equivalent five-field Cron: `0 5 * * *` with explicit `America/Chicago` zone.
 * **Delivery**: native DSH scheduler (`schedule_create`/`schedule_list`/`schedule_edit`/`schedule_view`); each occurrence opens a **new session** (target `new`) with working directory `C:\src\enterprise-rag-pgvector-rbac` and the standard agent preset. Restart preserves committed occurrences; the task ends after its final delivery if the rule is ever bounded.
-* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (307 collected: 306 pass, 1 skipped; 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
+* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (308 collected: 307 pass, 1 skipped; 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
 * **Manage**: view/edit/cancel from the DSH Automations dashboard or the `schedule_view` / `schedule_edit` / `schedule_list` tools.
 
 ## 9. Incident Investigator Agent (7-Step Agentic Roadmap)

@@ -45,20 +45,45 @@ class ContextAssembler:
     DEFAULT_MAX_CONTEXT_TOKENS: int = 4000
 
     # ------------------------------------------------------------------
-    # Step 1 — Assemble
+    # Step 1 — Assemble & Attention Optimization
     # ------------------------------------------------------------------
     @classmethod
     def chunk_to_line(cls, chunk: Optional[Dict[str, Any]]) -> str:
         if not chunk:
             return ""
-        title = str(chunk.get("title") or chunk.get("document_id") or "Document")
+        title = str(chunk.get("title") or chunk.get("document_id") or "Document").strip()
         chunk_index = int(chunk.get("chunk_index") or 0)
-        content = str(chunk.get("content") or chunk.get("text") or "")
+        content = str(chunk.get("content") or chunk.get("text") or "").strip()
         return f"[Doc: {title}, Chunk {chunk_index}]:\n{content}"
 
     @classmethod
-    def assemble_context_text(cls, context_chunks: Optional[List[Dict[str, Any]]]) -> str:
-        lines = [cls.chunk_to_line(c) for c in (context_chunks or []) if c]
+    def reorder_chunks_extremities(cls, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Reorder ranked chunks to place highest-similarity evidence at the extremities
+        (beginning and end) of the prompt to mitigate attention decay ('lost in the middle').
+        Pattern: [rank_1, rank_3, rank_5, ..., rank_4, rank_2]
+        """
+        if len(chunks) <= 2:
+            return list(chunks)
+        front: List[Dict[str, Any]] = []
+        back: List[Dict[str, Any]] = []
+        for idx, chunk in enumerate(chunks):
+            if idx % 2 == 0:
+                front.append(chunk)
+            else:
+                back.insert(0, chunk)
+        return front + back
+
+    @classmethod
+    def assemble_context_text(
+        cls,
+        context_chunks: Optional[List[Dict[str, Any]]],
+        optimize_attention: bool = False,
+    ) -> str:
+        valid_chunks = [c for c in (context_chunks or []) if c]
+        if optimize_attention and len(valid_chunks) > 2:
+            valid_chunks = cls.reorder_chunks_extremities(valid_chunks)
+        lines = [cls.chunk_to_line(c) for c in valid_chunks]
         return "\n\n".join(line for line in lines if line)
 
     # ------------------------------------------------------------------
@@ -92,14 +117,15 @@ class ContextAssembler:
         context_chunks: Optional[List[Dict[str, Any]]],
         question: str,
         max_context_tokens: Optional[int] = None,
+        optimize_attention: bool = False,
     ) -> ContextAssemblyResult:
         budget = int(max_context_tokens) if max_context_tokens is not None else cls.DEFAULT_MAX_CONTEXT_TOKENS
         kept = [c for c in (context_chunks or []) if c]
-        context_text = cls.assemble_context_text(kept)
+        context_text = cls.assemble_context_text(kept, optimize_attention=optimize_attention)
         compacted = False
         if kept and TokenCircuitBreaker.estimate_tokens(context_text) > budget:
             kept = cls._compact(kept, budget)
-            context_text = cls.assemble_context_text(kept)
+            context_text = cls.assemble_context_text(kept, optimize_attention=optimize_attention)
             compacted = True
         context_tokens = TokenCircuitBreaker.estimate_tokens(context_text)
         bundle = GroundingGuardrail.build_prefix_cached_prompt(context_chunks_text=context_text, user_question=question)
@@ -119,6 +145,12 @@ def assemble_context(
     context_chunks: Optional[List[Dict[str, Any]]],
     question: str,
     max_context_tokens: Optional[int] = None,
+    optimize_attention: bool = False,
 ) -> ContextAssemblyResult:
     """Convenience wrapper for the Context Assembler pipeline."""
-    return ContextAssembler.assemble(context_chunks, question, max_context_tokens=max_context_tokens)
+    return ContextAssembler.assemble(
+        context_chunks,
+        question,
+        max_context_tokens=max_context_tokens,
+        optimize_attention=optimize_attention,
+    )

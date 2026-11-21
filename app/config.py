@@ -6,7 +6,7 @@ Validates database connection, authentication, and observability credentials at 
 """
 
 from typing import Optional
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -92,6 +92,25 @@ class Settings(BaseSettings):
         default="enterprise-rag-pgvector-rbac",
         description="OpenTelemetry service name attribute",
     )
+
+    # Async connection pool sizing (pgvector / asyncpg)
+    DB_POOL_MIN_SIZE: int = Field(default=5, description="asyncpg pool min connections")
+    DB_POOL_MAX_SIZE: int = Field(default=20, description="asyncpg pool max connections")
+    DB_POOL_COMMAND_TIMEOUT: int = Field(default=60, description="asyncpg command timeout seconds")
+
+
+def get_db_pool_config() -> dict:
+    """
+    Return asyncpg connection pool configuration from settings.
+
+    Use this in FastAPI lifespan or DatabaseManager.get_pool() to centralize
+    pool sizing under Settings rather than hard-coded literals.
+    """
+    return {
+        "min_size": settings.DB_POOL_MIN_SIZE,
+        "max_size": settings.DB_POOL_MAX_SIZE,
+        "command_timeout": settings.DB_POOL_COMMAND_TIMEOUT,
+    }
 
 
 settings = Settings()

@@ -105,6 +105,20 @@ def test_assemble_wrapper_matches_classmethod():
     assert via_wrapper.prompt == via_class.prompt
 
 
+def test_reorder_chunks_extremities_places_top_chunks_at_edges():
+    """Verify that extremity reordering places highest-ranked chunks at the front and back."""
+    chunks = [
+        _chunk("Doc 1", "Content 1", similarity=0.99),
+        _chunk("Doc 2", "Content 2", similarity=0.88),
+        _chunk("Doc 3", "Content 3", similarity=0.77),
+        _chunk("Doc 4", "Content 4", similarity=0.66),
+    ]
+    reordered = ContextAssembler.reorder_chunks_extremities(chunks)
+    # Expected pattern: [idx 0, idx 2, idx 3, idx 1] -> [Doc 1, Doc 3, Doc 4, Doc 2]
+    titles = [c["title"] for c in reordered]
+    assert titles == ["Doc 1", "Doc 3", "Doc 4", "Doc 2"]
+
+
 def test_context_assembly_result_rejects_extra_fields():
     """ContextAssemblyResult must enforce strict extra='forbid' schema discipline."""
     with pytest.raises(Exception):
