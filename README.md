@@ -302,40 +302,41 @@ async def run_autonomous_sdlc(workflow: LangGraphSDLCWorkflow, payload: dict) ->
         }
 ```
 
-> **⚡ Quick Summary**: The enhanced HITL workflow saves a checkpoint with `status: "pending_approval"` immediately, then allows humans to approve or deny via API, Streamlit UI, or CLI — without blocking the workflow. Checkpoint persistence enables crash resilience and provides an audit trail of the approval decision.
+> **⚡ Quick Summary**: The autonomous SDLC workflow operates under the `never_ask_approval` policy: it executes end-to-end without pausing for human-in-the-loop approvals, auto-classifies test timeouts with bounded execution (`SDLC_WEBHOOK_TIMEOUT_SECONDS`), and persists terminal checkpoints with full audit trails.
 
-## How the Enhanced HITL Workflow Works
+## How the Autonomous SDLC Workflow Works
 
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
     subgraph Trigger ["1. Webhook Intake"]
         direction TB
-        A["GitHub webhook POST<br/>to workflow.run"] --> Cond{"High-risk and<br/>HITL enabled?"}
+        A["GitHub webhook POST<br/>to workflow.run"] --> B["Apply policy:<br/>never_ask_approval"]
     end
-    subgraph Checkpoint ["2. Async HITL Gate"]
+    subgraph Execution ["2. Autonomous SDLC Pipeline"]
         direction TB
-        Cond -->|"Yes"| B["Save checkpoint<br/>status: pending_approval"]
-        B --> C["Return pending_approval<br/>(Workflow non-blocking)"]
+        B --> C["Patch Generation<br/>& AST Security Audit"]
+        C --> D["Automated Test Run<br/>& Timeout Watchdog"]
     end
-    subgraph Decision ["3. Review and Channel"]
+    subgraph Decision ["3. Autonomous Evaluation"]
         direction TB
-        C --> D["Human reviews card<br/>(API / Streamlit / CLI)"]
-        D --> E["POST /api/v1/approval/decision<br/>resume_from_checkpoint"]
+        D --> E["Cross-Model Judge<br/>Verdict: PASS / FAIL"]
+        E --> Cond{"Judge score &gt;= 0.70<br/>and tests pass?"}
     end
-    subgraph Outcome ["4. Finalization"]
+    subgraph Outcome ["4. Terminal Outcome"]
         direction TB
-        E -->|"Approved"| F["status: completed<br/>Git commit, push, PR"]
-        E -->|"Rejected"| G["status: rejected<br/>Workflow stops (no PR)"]
-        F --> H["Final checkpoint updated<br/>with terminal status"]
-        G --> H
+        Cond -->|"Yes"| F["status: completed<br/>Git commit, push, PR"]
+        Cond -->|"No / Error"| G["status: rejected / error<br/>Workflow stops (no PR)"]
+        D -->|"Timeout"| H["status: timeout<br/>Bounded watchdog (no PR)"]
+        F --> I["Terminal checkpoint saved<br/>to PostgreSQL"]
+        G --> I
+        H --> I
     end
-    Cond -->|"No / Low-risk"| F
-    Trigger --> Checkpoint
-    Checkpoint --> Decision
+    Trigger --> Execution
+    Execution --> Decision
     Decision --> Outcome
     style Trigger fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style Checkpoint fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style Execution fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
     style Decision fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
     style Outcome fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
 ```
@@ -357,7 +358,7 @@ flowchart LR
    - ✅ Generates code patches
    - ✅ Runs tests with configurable timeout (`SDLC_TEST_TIMEOUT_SECONDS`)
    - ✅ Classifies test failures (timeout, compilation_error, assertion_failure)
-   - ✅ Judge verdict: PASS/FASS with scoring
+   - ✅ Judge verdict: PASS/FAIL with scoring
    - ✅ All decisions automated - no human approval required
 
 3. **Workflow completes** with autonomous decision:
@@ -393,45 +394,14 @@ flowchart LR
 | **Policy Configuration** | `require_hitl_for_high_risk=True/False` | `never_ask_approval: True` (set once, stays) |
 
 **Policy Enforcement**: The `never_ask_approval` policy is enforced at the webhook endpoint (`app/main.py`) - the `asyncio.wait_for()` timeout ensures the workflow never runs indefinitely, and the `approval_card` is always set to `{requires_human_approval: False}` regardless of internal workflow decisions.
-| **Workflow blocking** | ✅ Blocks at `interrupt()` call | ✅ Continues immediately |
-| **Checkpoint saved** | After human decision | ✅ Immediately (status "pending_approval") |
-| **Human notification** | None (caller must implement) | ✅ Explicit via approval card + API |
-| **Crash resilience** | Risk of lost state | ✅ Full recovery (checkpoint persists) |
-| **Timeout handling** | Difficult (interrupt hangs) | ✅ Easy (poll API + timeout) |
-| **Multiple channels** | None built-in | ✅ API + Streamlit + CLI |
-| **Status visibility** | Unclear during block | ✅ "pending_approval" status visible |
 
-### How Humans Can Approve/Deny
+### Benefits of Autonomous Execution
 
-#### Via API (recommended for automation):
-```bash
-curl -X POST http://localhost:8000/api/v1/approval/decision \
-  -H "Content-Type: application/json" \
-  -d '{"thread_id": "sdlc-org/repo-1", "decision": "approved", "comment": "LGTM"}'
-```
-
-#### Via Streamlit UI:
-- Dedicated HITL screen appears with approval card details
-- Click "Approve" or "Reject" buttons
-- System automatically calls the API endpoint
-
-#### Via CLI:
-```bash
-# Interactive prompt shows approval card
-# Enter "approved" or "denied" to proceed
-```
-
-### Benefits of the New Flow
-
-1. **No indefinite blocking**: Workflow doesn't hang waiting for human
-2. **State preservation**: Checkpoint saved immediately enables crash recovery
-3. **Clear status**: `"pending_approval"` tells systems human decision needed
-4. **Multiple channels**: Choose UI that fits your workflow (Streamlit, CLI, API)
-5. **Audit trail**: All decisions recorded in checkpoint metadata
-6. **Testable**: Can test approval/rejection flows without blocking event loops
-7. **Scalable**: Multiple workflows can have pending approvals simultaneously
-
-The README now documents both the code implementation and the conceptual flow, making it clear how the enhanced HITL workflow differs from and improves upon the old `interrupt()`-based approach.
+1. **No indefinite blocking**: Workflow never hangs waiting for human intervention
+2. **Deterministic SLA**: `SDLC_WEBHOOK_TIMEOUT_SECONDS` guarantees prompt response
+3. **State preservation**: PostgreSQL checkpoint persists terminal states and metrics
+4. **Audit trail**: Every patch, judge verdict, and error is tracked in checkpoint metadata
+5. **Zero overhead**: High-throughput automated triage and remediation on GitHub issue events
 
 ##### 2. CrewAI Multi-Tier Orchestrator (`agent/workflow.py`)
 ```python
