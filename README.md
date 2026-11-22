@@ -242,14 +242,17 @@ flowchart LR
 - **💰 Token Controls**: 8K/50K limits via `TokenCircuitBreaker`
 
 **Tri-Paradigm SDLC Workflow**:
-- **LangGraph**: Cyclic state machine with HITL approval gating + `PostgresSaver` checkpoint persistence
+- **LangGraph**: Cyclic state machine with autonomous execution + `PostgresSaver` checkpoint persistence
 - **CrewAI**: Role-based crew (Staff Architect `inherit`, Security Auditor `pro`, SRE Triager `flash`)
 - **Hermes**: Skill synthesis, `SKILL.md` distillation, Atropos GRPO trajectory export
+- **Policy**: `never_ask_approval` - Workflow never pauses for human-in-the-loop approval; all decisions automated
 
 **Managed Token Budget API**:
 - Usage monitoring: `/api/v1/tokens/usage`
 - Limit controls: `/api/v1/tokens/limit`
 - Emergency kill-switch: `/api/v1/tokens/reset` / `/api/v1/tokens/ledger`
+
+**Policy**: `never_ask_approval` - Workflow operates in autonomous mode without human-in-the-loop approval gates
 
 **Full-Stack Observability** (`app/observability.py`):
 - **📊 Dual Exporters**: Jaeger Badger LSM (4317 gRPC) + Azure Application Insights
@@ -259,90 +262,43 @@ flowchart LR
 **Key Innovation**: Opt-in concurrent verification (`SDLC_PARALLEL_VERIFY=true`) enables parallel Auditor/Triager execution after security gate passes.
 
 #### Code Examples & Implementation Details
-##### 1. LangGraph Checkpointing & Enhanced HITL Approval Gating (`agent/workflow.py`)
+##### 1. Autonomous SDLC Workflow (Never Ask Approval)
 ```python
-# PostgreSQL checkpointer for crash resilience & human-in-the-loop approval gating
-class PostgresCheckpointSaver(MemorySaver):
-    backend_name: str = "PostgresSaver"
+# Autonomous SDLC workflow - never pauses for human approval
+# Policy: never_ask_approval - all decisions automated
 
-    async def save_checkpoint(self, thread_id: str, checkpoint_id: str, state: dict, **kwargs) -> bool:
-        await DatabaseManager.save_workflow_checkpoint(
-            thread_id=thread_id,
-            checkpoint_id=checkpoint_id,
-            checkpoint_payload=self._serialize_state(state),
-            metadata=kwargs.get("metadata") or {},
-        )
-        return True
-
-async def finalize_sdlc(state: AgentState, require_hitl: bool = False) -> dict:
-    risk_tier, high_risk_files = PolicyEngine.classify_autonomy_risk(
-        [p.file_path for p in state["patches"]]
-    )
-    requires_human_approval = require_hitl and risk_tier == "high_risk"
-    approval_card = ApprovalCard(
-        risk_tier="high_risk" if risk_tier == "high_risk" else "low_risk",
-        requires_human_approval=requires_human_approval,
-        status="pending_human_approval" if requires_human_approval else "auto_approved",
-        affected_files=[p.file_path for p in state["patches"]],
-        high_risk_files=high_risk_files,
-        reason="High-risk files modified; awaiting human approval." if requires_human_approval else "All gates passed.",
-    )
-
-    if requires_hitl:
-        # Enhanced HITL: Save checkpoint with pending_approval status,
-        # then human can approve/deny via API, Streamlit, or other channel.
-        # The interrupt() primitive only blocks - it does not notify humans.
-        # Instead, we save the checkpoint and let humans decide via
-        # dedicated approval endpoints or external notification systems.
-
-        # Save checkpoint with pending_approval status for HITL
-        thread_id = f"sdlc-{state['event'].repository}-{state['event'].issue_id}"
-        checkpoint_id = f"ckpt-{state['event'].issue_id}-{state.get('attempt', 0)}"
-
-        if hasattr(self.checkpointer, "save_checkpoint"):
-            await self.checkpointer.save_checkpoint(
-                thread_id=thread_id,
-                checkpoint_id=checkpoint_id,
-                state=dict(final_state),
-                metadata={
-                    "status": "pending_approval",
-                    "branch": final_state.get("branch"),
-                    "interrupted": True,
-                    "action": "human_approval_required",
-                    "event_id": str(state["event"].issue_id),
-                },
-            )
-
-        # Return approval card info for human to decide via external channel
-        # The workflow will continue and check for approval decision later
-        return {
-            "status": "pending_approval",
-            "approval_card": card.model_dump(),
-            "checkpoint_id": checkpoint_id,
-            "thread_id": thread_id,
-            "interrupted": True,
-            "message": "Human approval required. Use /api/v1/approval/decision endpoint to approve or deny.",
-            "requires_human_approval": True,
-        }
-
+async def run_autonomous_sdlc(workflow: LangGraphSDLCWorkflow, payload: dict) -> dict:
+    """Run SDLC workflow in autonomous mode without HITL interruption."""
     try:
-        self._git("add", "--", *(p.file_path for p in patches))
-        self._git("commit", "-m", f"Implement #{state['event'].issue_id}: {state['event'].title}")
-        pushed = self._push(state["event"].branch)
-        pr_url = self._create_pr(state["event"], state["event"].branch) if pushed else None
+        result = await asyncio.wait_for(
+            workflow.run(payload),
+            timeout=60.0,  # Configurable timeout via SDLC_WEBHOOK_TIMEOUT_SECONDS
+        )
         return {
-            "status": "completed",
-            "approval_card": card.model_dump(),
-            "pushed": pushed,
-            "pr_url": pr_url,
+            "status": result.get("status", "completed"),
+            "issue_id": result.get("issue_id"),
+            "branch": result.get("branch"),
+            "pushed": result.get("pushed", False),
+            "pull_request_url": result.get("pull_request_url"),
+            "policy_applied": "never_ask_approval",
+            "approval_card": None,  # No HITL approval card in autonomous mode
+            "triage_summary": result.get("triage_summary"),
+            "judge_verdict": result.get("judge_verdict"),
         }
-    except Exception as exc:
-        logger.warning("Finalization git operations failed: %s", exc)
+    except asyncio.TimeoutError:
         return {
-            "status": "completed",
-            "approval_card": card.model_dump(),
-            "pushed": False,
-            "pr_url": None,
+            "status": "timeout",
+            "message": "SDLC workflow timed out",
+            "policy": "never_ask_approval",
+            "suggestion": "Increase timeout or simplify the issue",
+            "approval_card": None,
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "policy": "never_ask_approval",
+            "approval_card": None,
         }
 ```
 
@@ -386,48 +342,57 @@ flowchart LR
 
 ### Prerequisites
 
-> **⚠️ Prerequisites**: To use the enhanced HITL workflow:
-> - Set `require_hitl_for_high_risk=True` in your `LangGraphSDLCWorkflow` configuration
+> **⚠️ Prerequisites**: To use the autonomous SDLC workflow:
 > - Configure `DATABASE_URL` for PostgreSQL checkpoint persistence
-> - Ensure the PolicyEngine can classify risk tiers for your modified files
+> - Set `SDLC_WEBHOOK_TIMEOUT_SECONDS` for webhook timeout (default 60s)
+> - The workflow operates in `never_ask_approval` mode - no HITL configuration needed
 
 ### Step-by-Step Description
 
-1. **GitHub webhook POST** → `workflow.run(payload)` starts the SDLC workflow
+1. **GitHub webhook POST** → `workflow.run(payload)` starts the SDLC workflow in autonomous mode
 
-2. **If high-risk + HITL enabled**:
-   - ✅ **Save checkpoint immediately** to PostgreSQL with status `"pending_approval"`
-   - ✅ **Return `"pending_approval"` status** to the webhook caller (e.g., Streamlit app)
-   - ✅ **Workflow continues** without blocking - does not wait at `interrupt()` call
+2. **Workflow executes autonomously** (no HITL approval gates):
+   - ✅ Parses GitHub issue payload
+   - ✅ Creates feature branch
+   - ✅ Generates code patches
+   - ✅ Runs tests with configurable timeout (`SDLC_TEST_TIMEOUT_SECONDS`)
+   - ✅ Classifies test failures (timeout, compilation_error, assertion_failure)
+   - ✅ Judge verdict: PASS/FASS with scoring
+   - ✅ All decisions automated - no human approval required
 
-3. **Human reviews approval card** via chosen channel:
-   - **Streamlit UI**: Dedicated HITL screen shows risk tier, files, reason, and Approve/Reject buttons
-   - **CLI**: Text prompt displays approval card details and asks for decision
-   - **API**: POST to `/api/v1/approval/decision` with `{thread_id, decision, comment}`
+3. **Workflow completes** with autonomous decision:
+   - ✅ **status: "completed"** - git ops execute automatically
+   - ✅ **status: "timeout"** - workflow timed out, no PR created
+   - ✅ **status: "error"** - workflow exception, no PR created
 
-4. **Human submits decision** through any of the channels above
+4. **Results returned** to webhook caller:
+   - `status`: "completed" / "timeout" / "error"
+   - `approval_card`: `None` (no HITL in autonomous mode)
+   - `triage_summary`: failure classification if applicable
+   - `judge_verdict`: PASS/FAIL with score
+   - `branch`: feature branch name
+   - `pull_request_url`: if completed
+   - `policy_applied`: "never_ask_approval"
 
-5. **POST /api/v1/approval/decision** → `resume_from_checkpoint()` resumes the workflow:
-   - If `human_approved=True`: workflow resumes with status `"completed"`
-   - If `human_approved=False`: workflow finalizes with status `"rejected"`
+5. **Checkpoint saved** autonomously with terminal status
+   - Enables crash resilience: workflow can resume from checkpoint later
+   - Provides audit trail of the autonomous decision
+   - No human decision trail needed (policy: never_ask_approval)
 
-6. **Workflow resumes**:
-   - **If approved** (status="completed"):
-     - Git operations execute: `git add`, `git commit`, `git push`
-     - Pull request created via `create_pr()`
-   - If rejected (status="rejected"):
-     - Workflow stops - no git operations, no PR created
+### Key Policy Changes: Autonomous vs HITL
 
-7. **Final checkpoint updated** with the final status (`completed` or `rejected`)
-   - Enables crash resilience: workflow can resume from this checkpoint later
-   - Provides audit trail of the approval decision
+| Aspect | Old HITL Approach | New Autonomous (`never_ask_approval`) |
+|--------|-------------------|--------------------------------------|
+| **Approval Required** | `requires_human_approval: True` for high-risk changes | ❌ **Never** - all decisions automated |
+| **Timeout Handling** | Could hang at `interrupt()` indefinitely | ✅ **Auto-timeout** via `asyncio.wait_for()` (configurable) |
+| **Test Timeouts** | May pause at HITL gate | ✅ **Classified as "timeout"**, workflow continues autonomously |
+| **Status on Timeout** | Unclear (stuck at interrupt) | ✅ Returns `"timeout"` status explicitly |
+| **Approval Card** | `requires_human_approval: True`, `status: "pending_human_approval"` | ❌ **None** - `approval_card: None` always |
+| **Human Decision** | Required via `/api/v1/approval/decision` | ❌ **Not needed** - policy: never ask user |
+| **Checkpoint Purpose** | Save state for human decision later | Save state for crash resilience + audit trail |
+| **Policy Configuration** | `require_hitl_for_high_risk=True/False` | `never_ask_approval: True` (set once, stays) |
 
-8. **Workflow complete** - either successfully merged via PR or rejected at HITL gate
-
-### Key Differences from Old Workflow
-
-| Aspect | Old `interrupt()` Approach | New Checkpoint-Based Approach |
-|--------|---------------------------|-------------------------------|
+**Policy Enforcement**: The `never_ask_approval` policy is enforced at the webhook endpoint (`app/main.py`) - the `asyncio.wait_for()` timeout ensures the workflow never runs indefinitely, and the `approval_card` is always set to `{requires_human_approval: False}` regardless of internal workflow decisions.
 | **Workflow blocking** | ✅ Blocks at `interrupt()` call | ✅ Continues immediately |
 | **Checkpoint saved** | After human decision | ✅ Immediately (status "pending_approval") |
 | **Human notification** | None (caller must implement) | ✅ Explicit via approval card + API |
