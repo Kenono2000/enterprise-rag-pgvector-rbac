@@ -573,3 +573,60 @@ def test_autonomy_maturity_evaluator(tmp_path):
     report = AutonomyMaturityEvaluator.evaluate_repository(tmp_path)
     assert report.maturity_level in ("L1", "L2", "L3", "L4", "L5")
     assert "style_and_validation" in report.pillar_scores
+
+
+@pytest.mark.asyncio
+async def test_autonomous_github_webhook():
+    """Verify GitHub webhook triggers autonomous SDLC agent without HITL approval."""
+    import asyncio
+    from fastapi.testclient import TestClient
+    from unittest.mock import AsyncMock, patch
+    from app.main import app
+
+    client = TestClient(app)
+
+    payload = {
+        "action": "opened",
+        "issue": {
+            "number": 99,
+            "title": "Autonomous bugfix",
+            "body": "Fix bug autonomously without HITL",
+        },
+        "repository": {"full_name": "Kenono2000/enterprise-rag-pgvector-rbac"},
+    }
+
+    mock_workflow_run = AsyncMock(return_value={
+        "status": "completed",
+        "issue_id": "99",
+        "branch": "fix-issue-99",
+        "approval_card": None,
+    })
+
+    with patch("agent.workflow.LangGraphSDLCWorkflow.run", mock_workflow_run):
+        resp = client.post(
+            "/webhooks/github",
+            json=payload,
+            headers={"X-GitHub-Event": "issues"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "processed"
+        assert data["result"]["status"] == "completed"
+        assert data["result"]["issue_id"] == "99"
+
+    # Test timeout classification
+    with patch(
+        "agent.workflow.LangGraphSDLCWorkflow.run",
+        AsyncMock(side_effect=asyncio.TimeoutError()),
+    ):
+        resp = client.post(
+            "/webhooks/github",
+            json=payload,
+            headers={"X-GitHub-Event": "issues"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "timeout"
+        assert data["policy"] == "never_ask_approval"
+        assert "timed out" in data["message"]
+

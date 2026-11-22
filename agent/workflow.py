@@ -1475,41 +1475,35 @@ class LangGraphSDLCWorkflow:
         )
 
         if requires_hitl:
-            # Enhanced HITL: Save checkpoint with pending_approval status,
-            # then human can approve/deny via API, Streamlit, or other channel.
-            # The interrupt() primitive only blocks - it does not notify humans.
-            # Instead, we save the checkpoint and let humans decide via
-            # dedicated approval endpoints or external notification systems.
-            
-            # Save checkpoint with pending_approval status for HITL
-            thread_id = f"sdlc-{event.repository}-{event.issue_id}"
-            checkpoint_id = f"ckpt-{event.issue_id}-{final_state.get('attempt', 0)}"
-            
-            if hasattr(self.checkpointer, "save_checkpoint"):
-                await self.checkpointer.save_checkpoint(
-                    thread_id=thread_id,
-                    checkpoint_id=checkpoint_id,
-                    state=dict(final_state),
-                    metadata={
-                        "status": "pending_approval",
-                        "branch": final_state.get("branch"),
-                        "interrupted": True,
-                        "action": "human_approval_required",
-                        "event_id": str(event.issue_id),
-                    },
-                )
-            
-            # Return approval card info for human to decide via external channel
-            # The workflow will continue and check for approval decision later
-            return {
-                "status": "pending_approval",
+            # Native LangGraph Human-in-the-Loop (HITL) interrupt primitive:
+            # Pauses execution and surfaces review payload to PostgreSQL checkpoint
+            review_payload = {
+                "action": "human_approval_required",
                 "approval_card": card.model_dump(),
-                "checkpoint_id": checkpoint_id,
-                "thread_id": thread_id,
-                "interrupted": True,
-                "message": "Human approval required. Use /api/v1/approval/decision endpoint to approve or deny.",
-                "requires_human_approval": True,
+                "affected_files": affected,
+                "high_risk_files": high_risk_files,
+                "issue_id": str(event.issue_id),
+                "branch": branch,
             }
+            decision = interrupt(review_payload)
+            is_approved = (
+                decision in ("approved", "auto_approved", True)
+                or (isinstance(decision, dict) and (decision.get("approved") is True or decision.get("status") in ("approved", "auto_approved")))
+            )
+            if is_approved:
+                card.status = "auto_approved"
+                card.requires_human_approval = False
+                card.reason = "Human-in-the-loop sign-off granted via native LangGraph interrupt resume."
+            else:
+                card.status = "rejected"
+                card.requires_human_approval = False
+                card.reason = f"Human reviewer rejected patch proposal: {decision}"
+                return {
+                    "status": "rejected",
+                    "approval_card": card.model_dump(),
+                    "pushed": False,
+                    "pr_url": None,
+                }
 
         try:
             self._git("add", "--", *(p.file_path for p in patches))
