@@ -9,5 +9,4 @@ SELECT * FROM public.shared_chat_messages;
 SELECT * FROM public.shared_chat_threads;
 
 SELECT * FROM public.token_consumption_ledger;
-
 SELECT * FROM public.token_managed_limits;
