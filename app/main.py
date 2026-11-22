@@ -27,6 +27,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import settings
+
 from app.db import DatabaseManager, generate_embedding, chat_completion, chat_completion_stream, get_vector_search_adapter
 from app.rag import ContextAssembler
 from app.auth import verify_google_token, extract_roles
@@ -37,6 +38,11 @@ from agent.guardrails import (
     SlidingWindowRateLimiter,
     TokenCircuitBreaker,
 )
+
+
+def get_db() -> DatabaseManager:
+    """FastAPI dependency that provides a DatabaseManager instance."""
+    return DatabaseManager
 
 logging.basicConfig(
     level=logging.INFO,
