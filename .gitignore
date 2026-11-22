@@ -1,35 +1,59 @@
+# ============================================================
 # OS files
+# ============================================================
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
 Thumbs.db
+ehthumbs.db
 desktop.ini
+$RECYCLE.BIN/
 
-# Environments & Secrets
+# ============================================================
+# Secrets & Environment
+# ============================================================
+# NOTE: never ignore all *.txt — it silently drops requirements.txt,
+# LICENSE.txt, etc. Be specific instead.
 .env
-.env.local
+.env.*
+!.env.example
+!.env.template
 .envrc
-.venv/
-env/
-venv/
-ENV/
 *.bak
+*.orig
 *.pfx
-# Firebase service account keys — NEVER commit these
+*.p12
+*.key
+*.pem
+secrets/
+credentials*.json
+service_account.json
 firebase-service-account*.json
 *-firebase-adminsdk-*.json
 
-
-# IDEs and Editors
+# ============================================================
+# IDEs & Editors
+# ============================================================
 .vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
 .idea/
+*.iml
 *.swp
 *.swo
+*~
 .project
 .classpath
 .settings/
 *.sublime-workspace
 *.sublime-project
+.history/
 
+# ============================================================
 # Python
+# ============================================================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -41,67 +65,155 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
-parts/
 sdist/
-var/
 wheels/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
-*.manifest
-*.spec
 pip-log.txt
 pip-delete-this-directory.txt
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Testing / coverage
 htmlcov/
 .tox/
 .nox/
 .coverage
 .coverage.*
 .cache
+.pytest_cache/
 nosetests.xml
 coverage.xml
 *.cover
+*.py,cover
 .hypothesis/
-.pytest_cache/
+.coveragerc
+
+# Type checkers / linters
 .mypy_cache/
+.dmypy.json
+dmypy.json
 .ruff_cache/
 .pyre/
 .pytype/
 cython_debug/
-.pypirc
+
+# Jupyter
+.ipynb_checkpoints/
 *.ipynb_checkpoints
 
-# Node.js
+# Packaging
+.pypirc
+
+# ============================================================
+# Node.js / TypeScript
+# ============================================================
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+.npm/
+.yarn/
+.pnp.*
+.pnp.js
 
-# .NET / C#
+# Build output
+dist/
+build/
+out/
+.next/
+.nuxt/
+.turbo/
+*.tsbuildinfo
+coverage/
+.nyc_output/
+
+# Node env
+.node-version
+.nvmrc
+
+# ============================================================
+# PowerShell
+# ============================================================
+# PowerShell module / script artifacts
+*.ps1xml
+!profile.ps1xml
+*.psd1.bak
+*.psm1.bak
+Modules/
+PowerShellGet/
+# PSScriptAnalyzer
+PSScriptAnalyzerSettings.psd1.bak
+# Test results
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+# NuGet / PSGallery packaging
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+# Transcripts
+*.transcript
+
+# ============================================================
+# .NET / C# (kept for PowerShell module dev)
+# ============================================================
 [Bb]in/
 [Oo]bj/
 *.user
 *.suo
 *.userosscache
 *.sln.docstates
+*.userprefs
 
-# Databases
+# ============================================================
+# Databases & Data
+# ============================================================
 *.sqlite3
 *.sqlite3-journal
 *.db
 *.db-journal
+*.mdb
+*.ldb
 data/
+!data/.gitkeep
 
-# Project specific
-_agents/
+# ============================================================
+# Logs & Temp
+# ============================================================
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
 tempCodeRunnerFile.py
+
+# ============================================================
+# Project specific
+# ============================================================
+_agents/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
 .streamlit/
 .abstra/
-service_account.json
+
+# ============================================================
+# Python tooling caches (extra)
+# ============================================================
+.cache/
+.pyre/
+.pytype/
+pip-wheel-metadata/

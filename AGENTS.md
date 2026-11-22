@@ -32,4 +32,64 @@
 - Whenever planning or executing engineering tasks, check task scope against relevant skills.
 - When generating or auditing code in this repository, strictly adhere to `code-reviewer` standards and verify RAG retrieval/prompts using `rag-evaluator`.
 - When coordinating multi-step or multi-agent workflows, follow `fleet-planner` patterns.
-- When authoring or refactoring architecture or workflow diagrams, apply `mermaid-diagram-optimizer`.
+- When authoring or refactoring architecture or workflow diagrams, apply `mermaid-diagram-optimizer` and adhere strictly to the MDHero (Mermaid 11.17.2) Compatibility Specification below.
+
+## Instruction: MDHero-Compatible Mermaid Output (Mermaid 11.17.2)
+
+> **Scope:** Every Mermaid diagram emitted must parse cleanly under Mermaid **11.17.2** (the version MDHero bundles). Treat "works in mermaid.live on a newer build" as insufficient — it must pass the 11.17.2 parser.
+
+### 1. Always Quote Node, Edge, and Subgraph Labels
+- Every `[...]`, `(...)`, `{...}`, and `>...]` label must be wrapped in double quotes: `A["Deploy (prod)"]`, `B{"Retry &lt; 3?"}`, `C("Status: OK")`.
+- Quote **even when there are no special characters**, for consistency and safety.
+- Subgraph titles are always quoted: `subgraph S1 ["1. Intake"]`.
+
+### 2. Escape or Eliminate Parser-Breaking Characters
+Inside quoted labels, escape XML/HTML-sensitive characters:
+- `<` → `&lt;` (a bare `<` starts an HTML tag and breaks parsing)
+- `>` → `&gt;`
+- `&` → `&amp;` (when followed by something tag-like)
+- `"` → `&quot;`
+- Never put a raw `<br/>` **outside** a quoted label. Use `<br/>` only inside double quotes.
+- Avoid inside labels unless double-quoted: `()` `[]` `{}` `|` `;` `:` `/` `+` `,` `?` `!` `#` `%` `@`.
+
+### 3. Edge Labels Are Always Quoted
+Write `-->|"Yes"|`, `-->|"Retry &lt; 3"|`, `-.->|"Replaced By"|`. Never `-->|Yes|` or `-->|Retry < 3|`.
+
+### 4. Participant and Actor Aliases
+In `sequenceDiagram`:
+- Always quote aliases: `participant RBAC as "sanitize_roles_for_query()"`, `actor Browser as "Browser / Streamlit"`.
+- Never leave a trailing `()` or a `/` in an unquoted alias.
+
+### 5. `%%{init}%%` Directives
+- Keep the directive on **one single line**.
+- Use single quotes for keys/values and double-quote nothing inside: `%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%`.
+- Do not nest multiple `init` blocks in one diagram.
+- If a diagram fails to parse, **remove the `init` block first**.
+
+### 6. Forbidden Constructs (Fail-Fast List)
+- Reserved keywords as bare node IDs: `graph`, `end`, `flowchart`, `subgraph`, `class`, `style`, `click`, `linkStyle`, `direction`, `TB`, `LR`.
+- `end` as a node label must be quoted: `A["end"]`.
+- HTML tags other than `<br/>` inside labels.
+- Emoji inside unquoted labels (quote them or drop them).
+- Mixed `direction` declarations: give **each** subgraph exactly one `direction TB` (or `LR`) at the top; don't repeat it.
+- Semicolons as statement terminators — omit them; one statement per line.
+- Tabs — use spaces only.
+
+### 7. Structural Rules
+- Declare subgraphs **before** the cross-subgraph edges that reference them.
+- Declare `style` / `classDef` lines at the **end** of the diagram.
+- In `flowchart`, put subgraph-level `direction` immediately after the `subgraph` line.
+- Do not use `flowchart` and `graph` interchangeably within the same project — standardize on `flowchart`.
+- `sequenceDiagram`: `autonumber` goes first; `actor`/`participant` declarations next; messages after; `alt`/`else`/`end` blocks must be balanced.
+
+### 8. Version Safety Checklist (Self-Verify Before Emitting)
+1. [ ] Every label is wrapped in `"..."`.
+2. [ ] No raw `<`, `>`, `&`, `"` inside quoted labels (use entities `&lt;`, `&gt;`, `&amp;`, `&quot;`).
+3. [ ] Every edge label is quoted: `-->|"Label"|`.
+4. [ ] `init` directive is on a single line, single-quoted, present at most once.
+5. [ ] No reserved keyword used as a bare node ID.
+6. [ ] Each subgraph has exactly one `direction` line at the top.
+7. [ ] No tabs, no trailing semicolons.
+8. [ ] `style`/`classDef` lines are at the bottom.
+9. [ ] `sequenceDiagram` aliases are quoted; `alt`/`end` are balanced.
+10. [ ] Target parser: Mermaid **11.17.2**.

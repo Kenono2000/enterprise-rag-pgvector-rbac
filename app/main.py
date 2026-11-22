@@ -1108,6 +1108,77 @@ async def github_webhook(
     return {"status": "ignored", "event": x_github_event}
 
 
+# ---------------------------------------------------------------------------
+# HITL Approval Decision Endpoint
+# ---------------------------------------------------------------------------
+# Humans can approve or deny pending HITL approvals here.
+# The workflow run() method saves a checkpoint with status "pending_approval"
+# and this endpoint allows submitting the human decision.
+# ---------------------------------------------------------------------------
+
+@app.post("/api/v1/approval/decision", tags=["SDLC Agent"])
+async def approval_decision(
+    request: Request,
+    db: DatabaseManager = Depends(get_db),
+):
+    """
+    Submit human approval/denial decision for pending HITL approval.
+    
+    Expected JSON body:
+    {
+        "thread_id": "sdlc-org/repo-1",
+        "decision": "approved" or "denied",
+        "comment": "Optional human comment"
+    }
+    """
+    from agent.workflow import LangGraphSDLCWorkflow
+    
+    body = await request.json()
+    thread_id = body.get("thread_id")
+    decision = body.get("decision", "").lower()
+    comment = body.get("comment", "")
+    
+    if not thread_id or decision not in ("approved", "denied"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid input: thread_id and decision (approved/denied) are required",
+        )
+    
+    # Load the workflow and resume from checkpoint with human decision
+    workflow = LangGraphSDLCWorkflow()
+    
+    # Resume from checkpoint with the human decision
+    # We need to use resume_from_checkpoint with the decision
+    # The workflow needs to know whether this was approved or denied
+    
+    # First, load the checkpoint to get current state
+    from langgraph.checkpoint.memory import MemorySaver
+    
+    # Check if checkpoint exists and resume
+    try:
+        resumed = await workflow.resume_from_checkpoint(
+            thread_id=thread_id,
+            human_approved=(decision == "approved"),
+        )
+        
+        status = resumed.get("status", "unknown")
+        
+        return {
+            "status": "submitted",
+            "thread_id": thread_id,
+            "decision": decision,
+            "workflow_status": status,
+            "message": f"Human {decision} the approval successfully",
+        }
+        
+    except Exception as e:
+        logger.error(f"Error resuming workflow from checkpoint: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process approval decision: {str(e)}",
+        )
+
+
 # Mount the FastMCP 4 Streamable HTTP sub-application as the catch-all route.
 # MUST be registered after every FastAPI endpoint above: Starlette matches
 # routes in registration order, so this catch-all Mount would otherwise shadow

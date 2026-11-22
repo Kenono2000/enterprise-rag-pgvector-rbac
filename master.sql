@@ -1,16 +1,26 @@
--- 1. Confirm the thread and message were persisted
-SELECT thread_id, title, allowed_roles, created_at
-FROM shared_chat_threads;
+-- 1. agent_memories
+SELECT * FROM public.agent_memories;
 
-SELECT message_id, thread_id, role, content, metadata, created_at
-FROM shared_chat_messages
-ORDER BY created_at ASC;
+-- 2. document_chunks
+SELECT * FROM public.document_chunks;
 
--- 2. Confirm a cross-agent fact
-SELECT memory_id, memory_key, value, source, allowed_roles
-FROM agent_memories;
+-- 3. documents
+SELECT * FROM public.documents;
 
--- 3. Confirm RBAC pre-filter: this should return rows only for roles that overlap allowed_roles
-SELECT count(*) FROM shared_chat_messages m
-JOIN shared_chat_threads t ON t.thread_id = m.thread_id
-WHERE t.allowed_roles ?| ARRAY['engineer']::text[];
+-- 4. sdlc_outbox_events
+SELECT * FROM public.sdlc_outbox_events;
+
+-- 5. sdlc_workflow_checkpoints
+SELECT * FROM public.sdlc_workflow_checkpoints;
+
+-- 6. shared_chat_messages
+SELECT * FROM public.shared_chat_messages;
+
+-- 7. shared_chat_threads
+SELECT * FROM public.shared_chat_threads;
+
+-- 8. token_consumption_ledger
+SELECT * FROM public.token_consumption_ledger;
+
+-- 9. token_managed_limits
+SELECT * FROM public.token_managed_limits;

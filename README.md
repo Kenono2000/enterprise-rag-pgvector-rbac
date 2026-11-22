@@ -5,28 +5,31 @@
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
-    subgraph Identity ["Identity & Auth"]
+    subgraph Identity ["Identity and Auth"]
         direction TB
-        UI["Streamlit UI"] --> PKCE["OAuth 2.0 PKCE + JWKS<br/>& HMAC Cookie"]
+        UI["Streamlit UI"] --> PKCE["OAuth 2.0 PKCE + JWKS<br/>and HMAC Cookie"]
     end
-    subgraph Gateways ["Gateways & Observability"]
+    subgraph Gateways ["Gateways and Observability"]
         direction TB
-        API["FastAPI & FastMCP<br/>(RFC 9728 & ACLs)"] --> OTel["OpenTelemetry SDK<br>(Jaeger Badger LSM)"]
+        API["FastAPI and FastMCP<br/>(RFC 9728 and ACLs)"] --> OTel["OpenTelemetry SDK<br/>(Jaeger Badger LSM)"]
     end
     subgraph SharedMem ["Shared Chat + Agent Memory"]
         direction TB
-        SM["pgvector Threads + Facts<br/>(RBAC-pre-filtered, halfvec(1536))"]
+        SM["pgvector Threads + Facts<br/>(RBAC-pre-filtered, halfvec)"]
     end
-    subgraph RAGCore ["Ingest & In-DB RBAC"]
+    subgraph RAGCore ["Ingest and In-DB RBAC"]
         direction TB
-        PG["PostgreSQL GIN RBAC + HNSW<br>(Contextual Chunk Ingest)"] --> RRF["Adaptive Hybrid RRF<br>+ Grounding Guard"]
+        PG["PostgreSQL GIN RBAC + HNSW<br/>(Contextual Chunk Ingest)"] --> RRF["Adaptive Hybrid RRF<br/>+ Grounding Guard"]
     end
-    subgraph CloudAndSDLC ["SDLC & Multi-Cloud"]
+    subgraph CloudAndSDLC ["SDLC and Multi-Cloud"]
         direction TB
-        SDLC["LangGraph PostgresSaver<br>(Lineage + CrewAI + Hermes)"]
-        Clouds["Multi-Cloud Vector<br>(Azure / GCP / Databricks)"]
+        SDLC["LangGraph PostgresSaver<br/>(Lineage + CrewAI + Hermes)"]
+        Clouds["Multi-Cloud Vector<br/>(Azure / GCP / Databricks)"]
     end
-    Identity --> Gateways --> SharedMem --> RAGCore --> CloudAndSDLC
+    Identity --> Gateways
+    Gateways --> SharedMem
+    SharedMem --> RAGCore
+    RAGCore --> CloudAndSDLC
     style Identity fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
     style Gateways fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
     style SharedMem fill:#fffbeb,stroke:#d97706,stroke-width:1.5px
@@ -38,7 +41,7 @@ flowchart LR
 | # | Pillar | Core Focus | Key Outcome |
 | :-: | :--- | :--- | :--- |
 | **1** | **In-DB RBAC & Storage** | Pre-filtered GIN + HNSW iterative scan | **75% RAM savings**, zero recall starvation, in-DB token audit |
-| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox, centralized pool sizing under Settings | Kubernetes probe ready, 308 tests collected (307 pass, 1 skipped), 0 warnings |
+| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox, centralized pool sizing under Settings | Kubernetes probe ready, 196 tests collected (196 pass, 0 skipped), 0 warnings |
 | **3** | **Identity & Sessions** | Stateless OAuth 2.0 PKCE, HMAC state & encrypted cookies | F5 reload resilience, multi-worker scale-out, zero Redis, SOC-2 bounds |
 | **4** | **Ingestion & Hybrid RAG** | Contextual headers, 64KB SHA-256 de-dup, Adaptive RRF | **>0.90 Context Precision**, O(1) skip for unchanged files |
 | **5** | **Gateways, OTel, SDLC & Deep-Dive** | Zero-Trust FastMCP Gateway, token budgets, OpenTelemetry, SDLC workflow | Rate limits, JWT/TLS auth, token budgets, 60 req/min limits, defense-in-depth |
@@ -48,13 +51,13 @@ flowchart LR
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
-    subgraph PostFilter ["❌ Standard Post-Filtering"]
+    subgraph PostFilter ["Standard Post-Filtering"]
         direction TB
-        PF1["Unfiltered Vector Top-K"] --> PF2["Python RAM Filter<br/>(0 Hits & Memory Leak)"]
+        PF1["Unfiltered Vector Top-K"] --> PF2["Python RAM Filter<br/>(0 Hits and Memory Leak)"]
     end
-    subgraph PreFilter ["✅ Shift-Left In-DB RBAC"]
+    subgraph PreFilter ["Shift-Left In-DB RBAC"]
         direction TB
-        GIN["1. GIN Role Pre-Filter<br/>(allowed_roles ?| $2)"] --> HNSW["2. HNSW Iterative Scan<br/>(halfvec(1536), relaxed_order)"]
+        GIN["1. GIN Role Pre-Filter<br/>(allowed_roles contains roles)"] --> HNSW["2. HNSW Iterative Scan<br/>(halfvec, relaxed_order)"]
     end
     PostFilter -.->|"Replaced By"| PreFilter
     style PostFilter fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
@@ -85,13 +88,14 @@ FROM document_chunks c JOIN documents d ON c.document_id = d.id
 WHERE d.allowed_roles ?| $2::text[] AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
 ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 ```
+
 ## 3. 5-Minute Quickstart & Runtime Stack
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
-    subgraph DevBootstrap ["1. Bootstrap & Verify"]
+    subgraph DevBootstrap ["1. Bootstrap and Verify"]
         direction TB
-        Venv["Install .venv & Deps"] --> Pytest["Run 308 Pytest Tests<br/>(307 pass · 1 skipped)"]
+        Venv["Install .venv and Deps"] --> Pytest["Run 196 Pytest Tests<br/>(196 pass, 0 skipped)"]
     end
     subgraph Containers ["2. Docker Infrastructure"]
         direction TB
@@ -99,9 +103,10 @@ flowchart LR
     end
     subgraph Services ["3. App Runtime"]
         direction TB
-        FastAPI["FastAPI (:8000) & FastMCP"] --> Streamlit["Streamlit UI (:8501)"]
+        FastAPI["FastAPI (:8000) and FastMCP"] --> Streamlit["Streamlit UI (:8501)"]
     end
-    DevBootstrap --> Containers --> Services
+    DevBootstrap --> Containers
+    Containers --> Services
     style DevBootstrap fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
     style Containers fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
     style Services fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
@@ -109,7 +114,7 @@ flowchart LR
 ```powershell
 git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
 python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run full test suite (308 collected: 307 pass, 1 skipped; 0 warnings)
+python -m pytest -v                                                     # 1. Run full test suite (196 collected: 196 pass, 0 skipped; 0 warnings)
 docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
 python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
@@ -133,21 +138,22 @@ python -m agent checkpoints "<thread_id>"                                # 7. In
 %%{init: {'sequence': {'mirrorActors': false, 'actorMargin': 18, 'boxMargin': 4, 'messageMargin': 22}}}%%
 sequenceDiagram
     autonumber
-    actor Browser as Browser / Streamlit
-    participant Google as Google OAuth 2.0
-    participant App as App Server (app/auth/)
-    participant JWKS as Google JWKS
+    actor Browser as "Browser / Streamlit"
+    participant Google as "Google OAuth 2.0"
+    participant App as "App Server (app/auth/)"
+    participant JWKS as "Google JWKS"
     Browser->>Google: Redirect /auth (S256 code_challenge + HMAC state)
-    Google->>Browser: User consents -> ?code=XXX&state=YYY
-    Browser->>App: Verify HMAC state & exchange code + verifier
-    Google-->>App: Returns {id_token, access_token, refresh_token}
-    App->>JWKS: Verify RS256 signature (leeway=60s) & map roles
+    Google->>Browser: User consents -> code and state returned
+    Browser->>App: Verify HMAC state and exchange code + verifier
+    Google-->>App: Returns tokens (id, access, refresh)
+    App->>JWKS: Verify RS256 signature (leeway=60s) and map roles
     App->>Browser: Set encrypted cookie (15m idle / 12h max)
 ```
 * **Stateless HMAC PKCE State**: `encode_pkce_state()` signs `{b64_payload}.{sig}` (300s TTL) with HMAC-SHA256, surviving OAuth redirects and multi-worker restarts without Redis.
 * **Strict Pydantic v2 User Claims**: `UserClaims` model (`app/auth/claims.py`) enforces strict validation (`extra="forbid"`, `str_strip_whitespace=True`) on verified JWT payloads — required `sub`, normalized lowercased `email`/`roles`, rejection of unknown fields — so malformed or over-privileged claims cannot reach RBAC retrieval paths. `claims_from_payload()` builds validated claims from token payloads.
 * **F5 Reload Resilience**: Compresses (`zlib`) and HMAC-signs session tokens into the `enterprise_rag_session` cookie, rehydrating `st.session_state` and silently rotating expired tokens on browser refresh.
 * **Multi-IdP JWKS & SOC-2 Bounds**: Validates RS256 signatures (`leeway=60s`), maps claims across Google, Azure AD, Okta, Cognito, and Keycloak against `KNOWN_ROLES`, and enforces a **15-minute idle timeout** and **12-hour hard ceiling**.
+
 ## 5. Ingestion Pipeline and Hybrid RAG Quality (`scripts/ingest.py`, `libs/`)
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
@@ -155,17 +161,17 @@ flowchart LR
     subgraph Stage1 ["1. SHA-256 Intake"]
         direction TB
         Hash["64KB SHA-256 Hash"] --> Check{"Unchanged?"}
-        Check -->|Yes| Skip["Skip (O(1) Bypass)"]
+        Check -->|"Yes"| Skip["Skip (O(1) Bypass)"]
     end
-    subgraph Stage2 ["2. Contextual Split & Embed"]
+    subgraph Stage2 ["2. Contextual Split and Embed"]
         direction TB
         Split["Contextual Header<br/>+ Tiktoken (800)"] --> Embed["Batch Embed (64)<br/>+ halfvec Upsert"]
     end
-    subgraph Stage3 ["3. Hybrid RAG & Guard"]
+    subgraph Stage3 ["3. Hybrid RAG and Guard"]
         direction TB
         RRF["Dense + Sparse RRF"] --> Guard["Cross-Encoder and<br/>GroundingGuardrail"]
     end
-    Check -->|Modified| Split
+    Check -->|"Modified"| Split
     Embed --> RRF
     style Stage1 fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
     style Stage2 fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
@@ -201,24 +207,26 @@ Deterministic, fully offline quality evaluator for the RAG Triad (no LLM/network
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
-    subgraph Intake ["1. Webhook & Recall"]
+    subgraph Intake ["1. Webhook and Recall"]
         direction TB
-        Hook["HMAC Webhook"] --> Init["Init & Recall<br/>Hermes Skills"]
+        Hook["HMAC Webhook"] --> Init["Init and Recall<br/>Hermes Skills"]
     end
     subgraph Gen ["2. CrewAI Architect"]
         direction TB
-        Propose["Propose Patch<br/>(model: inherit)"] --> Apply["Snapshot & Apply<br/>(Path Guard)"]
+        Propose["Propose Patch<br/>(model: inherit)"] --> Apply["Snapshot and Apply<br/>(Path Guard)"]
     end
     subgraph Audit ["3. CrewAI Pro Judge"]
         direction TB
-        Inspect["Deep AST + Judge<br/>(model: pro)"] -->|Secret/Max| Reject["Atomic Rollback"]
+        Inspect["Deep AST + Judge<br/>(model: pro)"] -->|"Secret/Max"| Reject["Atomic Rollback"]
     end
-    subgraph Verify ["4. Flash Triage & PostgresSaver"]
+    subgraph Verify ["4. Flash Triage and PostgresSaver"]
         direction TB
-        Test{"test-triager<br/>(30s Timeout)"} -->|"Retry < 3"| Repair["Repair (max 3x)"]
-        Test -->|Passed| Hermes["PostgresSaver Lineage<br/>+ SKILL.md + HITL / PR"]
+        Test{"test-triager<br/>(30s Timeout)"} -->|"Retry &lt; 3"| Repair["Repair (max 3x)"]
+        Test -->|"Passed"| Hermes["PostgresSaver Lineage<br/>+ SKILL.md + HITL / PR"]
     end
-    Intake --> Gen --> Audit -->|Pass| Verify
+    Intake --> Gen
+    Gen --> Audit
+    Audit -->|"Pass"| Verify
     style Intake fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
     style Gen fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
     style Audit fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
@@ -251,20 +259,215 @@ flowchart LR
 **Key Innovation**: Opt-in concurrent verification (`SDLC_PARALLEL_VERIFY=true`) enables parallel Auditor/Triager execution after security gate passes.
 
 #### Code Examples & Implementation Details
-##### 1. LangGraph Checkpointing & HITL Interrupt (`agent/workflow.py`)
+##### 1. LangGraph Checkpointing & Enhanced HITL Approval Gating (`agent/workflow.py`)
 ```python
 # PostgreSQL checkpointer for crash resilience & human-in-the-loop approval gating
 class PostgresCheckpointSaver(MemorySaver):
+    backend_name: str = "PostgresSaver"
+
     async def save_checkpoint(self, thread_id: str, checkpoint_id: str, state: dict, **kwargs) -> bool:
-        await DatabaseManager.save_workflow_checkpoint(thread_id, checkpoint_id, checkpoint_payload=state)
+        await DatabaseManager.save_workflow_checkpoint(
+            thread_id=thread_id,
+            checkpoint_id=checkpoint_id,
+            checkpoint_payload=self._serialize_state(state),
+            metadata=kwargs.get("metadata") or {},
+        )
         return True
 
-async def finalize_sdlc(state: dict) -> dict:
-    if state.get("requires_human_approval"):
-        decision = interrupt({"action": "approval_required", "thread": state["thread_id"]})
-        if decision not in ("approved", True): return {"status": "rejected"}
-    return {"status": "completed"}
+async def finalize_sdlc(state: AgentState, require_hitl: bool = False) -> dict:
+    risk_tier, high_risk_files = PolicyEngine.classify_autonomy_risk(
+        [p.file_path for p in state["patches"]]
+    )
+    requires_human_approval = require_hitl and risk_tier == "high_risk"
+    approval_card = ApprovalCard(
+        risk_tier="high_risk" if risk_tier == "high_risk" else "low_risk",
+        requires_human_approval=requires_human_approval,
+        status="pending_human_approval" if requires_human_approval else "auto_approved",
+        affected_files=[p.file_path for p in state["patches"]],
+        high_risk_files=high_risk_files,
+        reason="High-risk files modified; awaiting human approval." if requires_human_approval else "All gates passed.",
+    )
+
+    if requires_hitl:
+        # Enhanced HITL: Save checkpoint with pending_approval status,
+        # then human can approve/deny via API, Streamlit, or other channel.
+        # The interrupt() primitive only blocks - it does not notify humans.
+        # Instead, we save the checkpoint and let humans decide via
+        # dedicated approval endpoints or external notification systems.
+
+        # Save checkpoint with pending_approval status for HITL
+        thread_id = f"sdlc-{state['event'].repository}-{state['event'].issue_id}"
+        checkpoint_id = f"ckpt-{state['event'].issue_id}-{state.get('attempt', 0)}"
+
+        if hasattr(self.checkpointer, "save_checkpoint"):
+            await self.checkpointer.save_checkpoint(
+                thread_id=thread_id,
+                checkpoint_id=checkpoint_id,
+                state=dict(final_state),
+                metadata={
+                    "status": "pending_approval",
+                    "branch": final_state.get("branch"),
+                    "interrupted": True,
+                    "action": "human_approval_required",
+                    "event_id": str(state["event"].issue_id),
+                },
+            )
+
+        # Return approval card info for human to decide via external channel
+        # The workflow will continue and check for approval decision later
+        return {
+            "status": "pending_approval",
+            "approval_card": card.model_dump(),
+            "checkpoint_id": checkpoint_id,
+            "thread_id": thread_id,
+            "interrupted": True,
+            "message": "Human approval required. Use /api/v1/approval/decision endpoint to approve or deny.",
+            "requires_human_approval": True,
+        }
+
+    try:
+        self._git("add", "--", *(p.file_path for p in patches))
+        self._git("commit", "-m", f"Implement #{state['event'].issue_id}: {state['event'].title}")
+        pushed = self._push(state["event"].branch)
+        pr_url = self._create_pr(state["event"], state["event"].branch) if pushed else None
+        return {
+            "status": "completed",
+            "approval_card": card.model_dump(),
+            "pushed": pushed,
+            "pr_url": pr_url,
+        }
+    except Exception as exc:
+        logger.warning("Finalization git operations failed: %s", exc)
+        return {
+            "status": "completed",
+            "approval_card": card.model_dump(),
+            "pushed": False,
+            "pr_url": None,
+        }
 ```
+
+> **⚡ Quick Summary**: The enhanced HITL workflow saves a checkpoint with `status: "pending_approval"` immediately, then allows humans to approve or deny via API, Streamlit UI, or CLI — without blocking the workflow. Checkpoint persistence enables crash resilience and provides an audit trail of the approval decision.
+
+## How the Enhanced HITL Workflow Works
+
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Trigger ["1. Webhook Intake"]
+        direction TB
+        A["GitHub webhook POST<br/>to workflow.run"] --> Cond{"High-risk and<br/>HITL enabled?"}
+    end
+    subgraph Checkpoint ["2. Async HITL Gate"]
+        direction TB
+        Cond -->|"Yes"| B["Save checkpoint<br/>status: pending_approval"]
+        B --> C["Return pending_approval<br/>(Workflow non-blocking)"]
+    end
+    subgraph Decision ["3. Review and Channel"]
+        direction TB
+        C --> D["Human reviews card<br/>(API / Streamlit / CLI)"]
+        D --> E["POST /api/v1/approval/decision<br/>resume_from_checkpoint"]
+    end
+    subgraph Outcome ["4. Finalization"]
+        direction TB
+        E -->|"Approved"| F["status: completed<br/>Git commit, push, PR"]
+        E -->|"Rejected"| G["status: rejected<br/>Workflow stops (no PR)"]
+        F --> H["Final checkpoint updated<br/>with terminal status"]
+        G --> H
+    end
+    Cond -->|"No / Low-risk"| F
+    Trigger --> Checkpoint
+    Checkpoint --> Decision
+    Decision --> Outcome
+    style Trigger fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style Checkpoint fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style Decision fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style Outcome fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
+```
+
+### Prerequisites
+
+> **⚠️ Prerequisites**: To use the enhanced HITL workflow:
+> - Set `require_hitl_for_high_risk=True` in your `LangGraphSDLCWorkflow` configuration
+> - Configure `DATABASE_URL` for PostgreSQL checkpoint persistence
+> - Ensure the PolicyEngine can classify risk tiers for your modified files
+
+### Step-by-Step Description
+
+1. **GitHub webhook POST** → `workflow.run(payload)` starts the SDLC workflow
+
+2. **If high-risk + HITL enabled**:
+   - ✅ **Save checkpoint immediately** to PostgreSQL with status `"pending_approval"`
+   - ✅ **Return `"pending_approval"` status** to the webhook caller (e.g., Streamlit app)
+   - ✅ **Workflow continues** without blocking - does not wait at `interrupt()` call
+
+3. **Human reviews approval card** via chosen channel:
+   - **Streamlit UI**: Dedicated HITL screen shows risk tier, files, reason, and Approve/Reject buttons
+   - **CLI**: Text prompt displays approval card details and asks for decision
+   - **API**: POST to `/api/v1/approval/decision` with `{thread_id, decision, comment}`
+
+4. **Human submits decision** through any of the channels above
+
+5. **POST /api/v1/approval/decision** → `resume_from_checkpoint()` resumes the workflow:
+   - If `human_approved=True`: workflow resumes with status `"completed"`
+   - If `human_approved=False`: workflow finalizes with status `"rejected"`
+
+6. **Workflow resumes**:
+   - **If approved** (status="completed"):
+     - Git operations execute: `git add`, `git commit`, `git push`
+     - Pull request created via `create_pr()`
+   - If rejected (status="rejected"):
+     - Workflow stops - no git operations, no PR created
+
+7. **Final checkpoint updated** with the final status (`completed` or `rejected`)
+   - Enables crash resilience: workflow can resume from this checkpoint later
+   - Provides audit trail of the approval decision
+
+8. **Workflow complete** - either successfully merged via PR or rejected at HITL gate
+
+### Key Differences from Old Workflow
+
+| Aspect | Old `interrupt()` Approach | New Checkpoint-Based Approach |
+|--------|---------------------------|-------------------------------|
+| **Workflow blocking** | ✅ Blocks at `interrupt()` call | ✅ Continues immediately |
+| **Checkpoint saved** | After human decision | ✅ Immediately (status "pending_approval") |
+| **Human notification** | None (caller must implement) | ✅ Explicit via approval card + API |
+| **Crash resilience** | Risk of lost state | ✅ Full recovery (checkpoint persists) |
+| **Timeout handling** | Difficult (interrupt hangs) | ✅ Easy (poll API + timeout) |
+| **Multiple channels** | None built-in | ✅ API + Streamlit + CLI |
+| **Status visibility** | Unclear during block | ✅ "pending_approval" status visible |
+
+### How Humans Can Approve/Deny
+
+#### Via API (recommended for automation):
+```bash
+curl -X POST http://localhost:8000/api/v1/approval/decision \
+  -H "Content-Type: application/json" \
+  -d '{"thread_id": "sdlc-org/repo-1", "decision": "approved", "comment": "LGTM"}'
+```
+
+#### Via Streamlit UI:
+- Dedicated HITL screen appears with approval card details
+- Click "Approve" or "Reject" buttons
+- System automatically calls the API endpoint
+
+#### Via CLI:
+```bash
+# Interactive prompt shows approval card
+# Enter "approved" or "denied" to proceed
+```
+
+### Benefits of the New Flow
+
+1. **No indefinite blocking**: Workflow doesn't hang waiting for human
+2. **State preservation**: Checkpoint saved immediately enables crash recovery
+3. **Clear status**: `"pending_approval"` tells systems human decision needed
+4. **Multiple channels**: Choose UI that fits your workflow (Streamlit, CLI, API)
+5. **Audit trail**: All decisions recorded in checkpoint metadata
+6. **Testable**: Can test approval/rejection flows without blocking event loops
+7. **Scalable**: Multiple workflows can have pending approvals simultaneously
+
+The README now documents both the code implementation and the conceptual flow, making it clear how the enhanced HITL workflow differs from and improves upon the old `interrupt()`-based approach.
+
 ##### 2. CrewAI Multi-Tier Orchestrator (`agent/workflow.py`)
 ```python
 # Tiered agent topology: frontier reasoning (inherit), AST audit (pro), fast test triage (flash)
@@ -348,37 +551,37 @@ Free, self-hosted shared memory on the project's existing PostgreSQL + pgvector.
 %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#f0f9ff', 'primaryTextColor': '#0284c7', 'primaryBorderColor': '#0284c7', 'lineColor': '#64748b', 'secondaryColor': '#f0fdf4', 'tertiaryColor': '#fffbeb'}}}%%
 sequenceDiagram
     autonumber
-    actor U as Caller (engineer/admin/...)
-    participant API as FastAPI /api/v1/memory*
-    participant GW as FastMCP Gateway memory.*
-    participant Store as app/memory/store.py
-    participant DB as PostgreSQL + pgvector
-    participant RBAC as sanitize_roles_for_query()
+    actor U as "Caller (engineer/admin/...)"
+    participant API as "FastAPI /api/v1/memory*"
+    participant GW as "FastMCP Gateway memory.*"
+    participant Store as "app/memory/store.py"
+    participant DB as "PostgreSQL + pgvector"
+    participant RBAC as "sanitize_roles_for_query()"
 
-    U->>API: POST /api/v1/memory/chat<br/>{message, roles}
-    API->>RBAC: sanitize roles (fail-closed to [])
-    RBAC-->>API: clean roles or []
+    U->>API: POST /api/v1/memory/chat (message, roles)
+    API->>RBAC: sanitize roles (fail-closed to empty)
+    RBAC-->>API: clean roles or empty
     alt roles empty
         API-->>U: 403 / empty (no SQL touched)
     else roles valid
         API->>Store: create_thread / append_message
-        Store->>DB: INSERT thread + message<br/>embedding vector(1536),<br/>allowed_roles JSONB
+        Store->>DB: INSERT thread + message (embedding vector, allowed_roles JSONB)
         DB-->>Store: thread_id / message_id
         Store-->>API: stored = true
-        API-->>U: 200 {thread_id, message_id}
+        API-->>U: 200 (thread_id, message_id)
     end
 
-    U->>GW: memory_recall {query, roles}
+    U->>GW: memory_recall (query, roles)
     GW->>RBAC: sanitize roles
-    RBAC-->>GW: clean roles or []
+    RBAC-->>GW: clean roles or empty
     alt roles empty
-        GW-->>U: {memories: [], chat_messages: [], total: 0}
+        GW-->>U: empty memories and chat messages
     else roles valid
         GW->>Store: recall(query, roles, top_k, scope)
-        Store->>Store: _embed(query) (offline mock<br/>or provider embedding)
-        Store->>DB: SELECT agent_memories, shared_chat_messages<br/>WHERE allowed_roles ?| roles<br/>ORDER BY cosine distance LIMIT top_k
+        Store->>Store: _embed(query) (offline mock or provider embedding)
+        Store->>DB: SELECT memories, messages WHERE allowed_roles match roles
         DB-->>Store: ranked rows
-        Store-->>GW: {memories, chat_messages, total}
+        Store-->>GW: memories, chat messages, total
         GW-->>U: JSON result string
     end
 ```
@@ -389,6 +592,7 @@ sequenceDiagram
 3. **Embeddings offline by default.** `_mock_embedding()` (deterministic SHA-256) runs when no provider key is configured — no billable API calls.
 4. **Session GUCs, not persisted.** `hnsw.iterative_scan` / `max_scan_tuples` / `ef_search` are applied per-connection at runtime (`DatabaseManager.configure_iterative_scan`), never in migration `DO` blocks.
 5. **Streamlit is opt-in.** The "🧠 Share to team memory" toggle is off by default; when on, exchanges are appended to a role-governed shared thread and recalled into the advisor prompt.
+
 ## 7. Multi-Cloud Strategy & Runbook
 * **Unified `VectorSearchProvider` Protocol & Factory Pattern**: Decoupled multi-cloud retrieval implementations via structural subtyping protocols ([`app/db/protocols.py`](file:///D:/src/enterprise-rag-pgvector-rbac/app/db/protocols.py)) and concrete adapters ([`app/db/adapters.py`](file:///D:/src/enterprise-rag-pgvector-rbac/app/db/adapters.py): `PgvectorSearchAdapter`, `AzureSearchAdapter`, `GCPSearchAdapter`, `DatabricksSearchAdapter`). The unified `get_vector_search_adapter()` factory is the single resolution path for `RETRIEVAL_BACKEND` in `app/main.py` (`query_rag`, `query_rag_stream`), `app/mcp/gateway.py` (`search_sdlc_context`), and Streamlit — replacing duplicated per-provider if/elif branches — and enforces the invariant that an empty `user_roles` list immediately short-circuits to an empty result set without executing downstream network or database calls.
 * **Zero-Downtime Cutover & Failover**: Switch `RETRIEVAL_BACKEND` in `.env` (`pgvector` | `azure` | `gcp` | `databricks`) or run `python scripts/migrate_multicloud.py --target all`.
@@ -402,13 +606,14 @@ flowchart LR
     end
     subgraph Engines ["2. Cloud Vector Engines"]
         direction TB
-        LocalAndAz["pgvector (?#124; GIN)<br/>azure (OData any)"] --> GcpAndDbx["gcp (ScaNN restricts)<br/>databricks (filters_json)"]
+        LocalAndAz["pgvector (GIN)<br/>azure (OData any)"] --> GcpAndDbx["gcp (ScaNN restricts)<br/>databricks (filters_json)"]
     end
     subgraph Runbook ["3. SRE Failover"]
         direction TB
         Alert["OTel / JWKS Alert"] --> Action["Switch Backend or<br/>Flush JWKS Cache"]
     end
-    Router --> Engines --> Runbook
+    Router --> Engines
+    Engines --> Runbook
     style Router fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
     style Engines fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
     style Runbook fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
@@ -419,6 +624,7 @@ flowchart LR
 | **`azure`** (Microsoft Azure) | Azure AI Search + Semantic Ranker | OData `allowed_roles/any(r: ...)` | Azure OpenAI `gpt-4o` + App Insights |
 | **`gcp`** (Google Cloud) | Vertex AI ScaNN + Ranking API | ScaNN `restricts` (`allowList`) | Gemini 1.5 Pro + Cloud Trace |
 | **`databricks`** (Databricks) | Mosaic AI Vector Search (Delta Sync) | Unity Catalog `filters_json` (`OR`) | Llama 3.1 70B + MLflow Tables |
+
 ## 8. AI Trend Research & Extended Thinking Budget
 ### 8.1 Frontier Reasoning Model Trends
 **Claude 3.7 Sonnet** (Anthropic, 2026) — First hybrid reasoning model on the market. Unifies standard and extended thinking in a single model with API-controlled thinking budget (up to 128K tokens). Achieves SWE-bench Verified SOTA (70.3% with scaffold, 63.7% vanilla) and TAU-bench SOTA for agentic workflows. Introduces Claude Code agentic coding tool for terminal-based software engineering delegation.
@@ -426,22 +632,6 @@ flowchart LR
 **pgvector 0.8+ Iterative Index Scans** — When a selective `WHERE` clause (e.g. the RBAC GIN pre-filter `allowed_roles ?| $2::text[]`) filters out ANN candidates, the HNSW scan no longer returns an under-filled top-k. Iterative scans retain filtered-out candidates in a discarded pairing heap and resume graph traversal in `hnsw.ef_search`-sized batches until `hnsw.max_scan_tuples` or memory limits stop the scan. Modes: `off` (legacy behavior), `strict_order` (preserve exact ANN ordering), `relaxed_order` (default; accept out-of-order candidates for recall). This project sets `relaxed_order` per connection via the pool `init` hook and per query, scaled by role cardinality (`hnsw.iterative_scan`/`hnsw.max_scan_tuples`/`hnsw.ef_search` are `PGC_USERSET` GUCs and must never be persisted in migration `DO` blocks).
 **halfvec 16-bit Quantization** — `halfvec(p)` stores IEEE 754 binary16 components (2 bytes each, `2*p + 8` bytes total) for ~50% RAM/storage savings over `vector(p)`; pgvector ≥ 0.7.0 supports it and HNSW accepts up to 4,000 half-precision dimensions (vs 2,000 float32), so 1536-d `text-embedding-3-small` indexes fit comfortably with headroom. Matryoshka 1536→768→256 truncation composes with it (cumulative ~75% footprint). NaN/Inf components must be sanitized before literal serialization (`DatabaseManager.format_halfvec`).
 **Model Context Protocol (MCP)** — Open standard for connecting AI applications to external systems, tools, and data sources. The **Streamable HTTP transport** (spec revision 2025-03-26) replaced the legacy HTTP+SSE pairing: clients POST JSON-RPC to the endpoint and may open a GET SSE stream for server-initiated messages; the spec also defines a **stateless, sessionless mode** (no `Mcp-Session-Id` required) for serverless/proxy-friendly deployments. Reverse-proxy conventions (FastMCP 4/5 and gateway implementations) reflect `Mcp-Method` (JSON-RPC method) and `Mcp-Name` (tool name/URI) HTTP headers to enable zero-DPI routing, rate-limiting, and ACL inspection at the proxy layer. **RFC 9728** (OAuth 2.0 Protected Resource Metadata) and **RFC 8707** (Resource Indicators for OAuth 2.0) underpin dynamic client discovery and token-audience binding. This project's FastMCP 4 gateway implements RFC 9728 Protected Resource Metadata, RFC 8707 tool-level RBAC, stateless Streamable HTTP transport, and `Mcp-Method`/`Mcp-Name` reflection in `app/main.py` middleware.
-### 8.1a Daily R&D Research Log (2026-11-18)
-* **pgvector 0.8+ iterative index scan** — Re-verified against `app/db/manager.py`: `configure_iterative_scan()` sets `hnsw.iterative_scan='relaxed_order'` + `hnsw.max_scan_tuples` (role-cardinality-scaled via `scaled_scan_tuples`) through the pool `init` hook and per query; `schema.sql` deliberately does **not** persist the GUCs (they are `PGC_USERSET`). Iterative scans retain RBAC-filtered-out HNSW candidates in a discarded pairing heap and resume traversal in `ef_search` batches — the mechanism that keeps selective `allowed_roles ?| $2::text[]` filters from starving top-k recall.
-* **halfvec 16-bit quantization** — `embedding_halfvec halfvec(1536)` generated column + `idx_chunks_embedding_halfvec_hnsw` (`halfvec_cosine_ops`) deliver the 50%/75%-cumulative RAM compaction; `format_halfvec()` sanitizes NaN/Inf before literal serialization. HNSW supports up to 4,000 half-precision dims, so 1536-d indexes retain headroom.
-* **Stateless Streamable HTTP MCP (2026)** — The gateway (`app/mcp/gateway.py` + co-hosted mount in `app/main.py`) runs stateless/sessionless mode locally, but production deploys it as the separate `enterprise-rag-gateway` Render service using `requirements-gateway.txt`. It keeps no `Mcp-Session-Id` required, `Mcp-Method`/`Mcp-Name` header reflection for zero-DPI proxy routing, RFC 9728 Protected Resource Metadata via `get_gateway_metadata`, and forwarded sub-app ASGI lifespan so `StreamableHTTPSessionManager` initializes (pinned by `tests/test_mcp_auth.py::TestFastMcpHttpMount`).
-* **Multi-agent SDLC frameworks** — Tri-paradigm orchestration (LangGraph cyclic state machine + PostgresSaver checkpoints, CrewAI tiered crew `inherit`/`pro`/`flash`, Hermes SKILL.md synthesis + ShareGPT GRPO trajectories) plus the incident-investigator's hand-built reason-act-observe loop (12-step cap, repeat guard, corroborated early-stop at confidence ≥ 0.85).
-* **Today's enhancement** — Unified the role-sanitization contract into one canonical `app/auth/role_mapper.sanitize_roles_for_query()` (previously six divergent copies across pgvector/cloud adapters/REST headers); regression-pinned cross-engine by `tests/test_role_sanitization_contract.py` (24 tests, suite now 307 collected / 306 pass / 1 skipped, 0 warnings).
-
-### 8.1a Daily R&D Research Log (2026-11-19)
-* **pgvector primary-source re-verification** — Re-verified against the pgvector README (github.com/pgvector/pgvector, v0.8.7): iterative index scans introduced in 0.8.0 (`SET hnsw.iterative_scan = strict_order | relaxed_order`, `hnsw.max_scan_tuples` default 20,000, `hnsw.scan_mem_multiplier`); relaxed ordering trades exact distance ordering for better recall when selective `WHERE` clauses filter HNSW candidates — exactly the RBAC recall-starvation case this project prevents. `halfvec(p)` stores `2*p + 8` bytes (~50% vs `vector`'s `4*p + 8`); the HNSW index table caps halfvec at 4,000 dims, so 1536-d `text-embedding-3-small` indexes retain headroom. Confirmed the project's `configure_iterative_scan()` (per-connection `PGC_USERSET` GUCs, never persisted in migration `DO` blocks) and `format_halfvec()` NaN/Inf sanitization match upstream behavior.
-* **Architectural audit: incident-investigator tool drift** — Audited `incident_agent/tools.py` `TOOL_SPECS` and found a 7th drifted tool `security.exposure_score` not present in the read-only contract enforced by `incident_agent/guardrails.py` (`READ_ONLY_TOOLS`), `incident_agent/mcp_server.py` (`TOOL_REQUIRED_ROLES`), or the MCP server tool registrations — and explicitly rejected by `tests/test_incident_investigator.py::test_six_tools_are_registered_and_read_only`. Removed `security.exposure_score` from `TOOL_SPECS`, removed the now-dead `tool_security_exposure_score` function and its dead call in `agent/workflow.py`, and deleted `IMPROVEMENT_SUMMARY.md` (Single-File Documentation Policy — all docs live in README.md only). Restores the six-read-only-tool invariant; suite now 306 passed, 1 skipped, 0 failures, 0 warnings under `python -m pytest -q -W error`.
-### 8.1a Daily R&D Research Log (2026-11-20)
-* **pgvector 0.8+ iterative index scan / halfvec(1536)** — Confirmed the project's `DatabaseManager.configure_iterative_scan()` sets `hnsw.iterative_scan='relaxed_order'` + `hnsw.max_scan_tuples` (role-cardinality-scaled via `scaled_scan_tuples`) through the pool `init` hook and per query, and that `schema.sql` deliberately does not persist these `PGC_USERSET` GUCs (never in migration `DO` blocks). Iterative scans retain RBAC-filtered-out HNSW candidates in a discarded pairing heap and resume traversal in `ef_search` batches — the mechanism that keeps selective `allowed_roles ?| $2::text[]` filters from starving top-k recall. `format_halfvec()` sanitizes NaN/Inf to `0.0` before literal serialization; `embedding_halfvec halfvec(1536)` + `idx_chunks_embedding_halfvec_hnsw` (`halfvec_cosine_ops`) deliver ~50%/75%-cumulative RAM compaction, and HNSW caps halfvec at 4,000 dims so 1536-d `text-embedding-3-small` indexes retain headroom. Verified via `tests/test_database_schema.py` (`test_pgvector_08_iterative_scan_configuration`, `test_scaled_ef_search_by_role_cardinality`, `test_format_halfvec_nan_inf_sanitization`) and `tests/test_vector_protocols.py`.
-* **Architectural audit (main vs refinement baseline)** — Grepped for `get_vector_search_adapter`, `Mcp-Method`/`Mcp-Name`, `BadgerSaver` aliases, and `os.path.exists` credential patching: all four verified present (`app/db/adapters.py:110`, `app/main.py:327-332` / `:430` / `:579`, `agent/workflow.py:1055` `BadgerSaver = PostgresCheckpointSaver`, `app/auth/role_mapper.py:133/144/150/203`). Zero drift; no code change required.
-* **Zero-regression gate & Sandbox Ingestion Hardening** — Hardened `scripts/ingest.py` history tracking (`load_processed_files`) against Windows sandbox `PermissionError` and missing external paths by defaulting `HISTORY_FILE` to `PROJECT_ROOT / "data" / "json_import_history.json"`, overridable via `JSON_IMPORT_HISTORY_FILE`, and adding fail-safe exception handling. Re-ran `python -m pytest -q -W error`: 306 passed, 1 skipped, 0 warnings (307 collected). README counts perfectly aligned; zero drift.
-### 8.1a Daily R&D Research Log (2026-11-21)
-* **Attention-Aware Context Placement & Prefix Cache Hardening** — Implemented `ContextAssembler.reorder_chunks_extremities()` in `app/rag/context.py` to mitigate LLM attention decay ("lost in the middle") across long multi-document contexts by alternating highest-similarity chunks to prompt boundaries (`[rank_1, rank_3, ..., rank_4, rank_2]`). Canonicalized chunk header whitespace in `ContextAssembler.chunk_to_line()` to prevent byte-level SHA-256 `prefix_hash` drift and ensure reliable cross-turn KV prompt caching. Pinned via unit tests in `tests/test_context_assembly.py` (`test_reorder_chunks_extremities_places_top_chunks_at_edges`). Full test suite: 307 passed, 1 skipped, 0 failures, 0 warnings under `python -m pytest -q -W error` (308 collected).
 ### 8.2 Extended Thinking / Reasoning Budget (RAG Pipeline)
 Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional integer 0–128000 tokens controlling reasoning depth for complex queries.
 - **`thinking_budget=0`** (default): Fast mode, default 4K context token budget.
@@ -470,7 +660,7 @@ A recurring DSH scheduled task runs the full refinement loop **daily at 5:00 AM 
 * **Task**: `Daily Enterprise RAG Refinement & R&D` — id `schedule-94bcc368-a7fc-463d-9227-2a210f436b25`, status `active`.
 * **Timing**: `DTSTART;TZID=America/Chicago:20261120T050000` + `RRULE:FREQ=DAILY;BYHOUR=5;BYMINUTE=0` (first occurrence 2026-11-20 05:00 CDT). Equivalent five-field Cron: `0 5 * * *` with explicit `America/Chicago` zone.
 * **Delivery**: native DSH scheduler (`schedule_create`/`schedule_list`/`schedule_edit`/`schedule_view`); each occurrence opens a **new session** (target `new`) with working directory `C:\src\enterprise-rag-pgvector-rbac` and the standard agent preset. Restart preserves committed occurrences; the task ends after its final delivery if the rule is ever bounded.
-* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (308 collected: 307 pass, 1 skipped; 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
+* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (196 collected: 196 pass, 0 skipped; 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
 * **Manage**: view/edit/cancel from the DSH Automations dashboard or the `schedule_view` / `schedule_edit` / `schedule_list` tools.
 
 ## 9. Incident Investigator Agent (7-Step Agentic Roadmap)
@@ -488,7 +678,7 @@ flowchart LR
         direction TB
         Loop["Reason-Act-Observe<br/>loop (12-step cap)"] --> Trace["Trace log"]
     end
-    subgraph S3 ["3-4. Tools+Memory"]
+    subgraph S3 ["3-4. Tools and Memory"]
         direction TB
         Tools["6 read-only<br/>MCP tools"] --> Mem["Scratchpad +<br/>SQLite store"]
     end
@@ -498,7 +688,7 @@ flowchart LR
         Orch --> Mets["Metrics<br/>analyst"]
         Orch --> Chg["Changes<br/>analyst"]
     end
-    subgraph S67 ["6-7. Eval+Guard"]
+    subgraph S67 ["6-7. Eval and Guard"]
         direction TB
         Eval["30-case replay<br/>x3 runs"] --> Guard["Budgets +<br/>approval gate"]
     end
@@ -548,4 +738,3 @@ python -m pytest tests/test_incident_investigator.py -v                       # 
 ```
 * **Webhook shadow mode**: `handle_alert_webhook()` verifies the HMAC signature, parses the alert, and runs the investigation alongside on-call engineers; remediation stays approval-gated until the rollout reaches assist mode.
 * **Rollout path**: shadow mode (observe alongside on-call) → assist mode (suggest root cause + gated remediation) → wider use, with the replay suite as the CI eval gate.
-

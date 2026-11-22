@@ -45,6 +45,9 @@ To prevent font measurement mismatches from truncating text across viewers:
 - **Maximum 20-22 characters per line**: Never allow a single line of text in any node to exceed 22 characters.
 - **Explicit `<br/>` Line Breaks**: Break phrases manually at logical boundaries.
 - **Universal Double Quoting**: Always wrap node text in double quotes: `id["Line 1<br/>Line 2"]` and decision nodes in `id{"Condition<br/>Line 2?"}`.
+- **Edge Label Quoting**: Always quote edge labels: `-->|"Yes"|`, `-->|"Retry &lt; 3"|`. Never write unquoted edge labels like `-->|Yes|`.
+- **Entity Escaping**: Inside double-quoted labels, escape XML/HTML characters (`<` → `&lt;`, `>` → `&gt;`, `&` → `&amp;`, `"` → `&quot;`).
+- **MDHero / Mermaid 11.17.2 Parser Rules**: Single-line `%%{init}%%` with single-quoted keys, quote participant/actor aliases in `sequenceDiagram`, avoid bare reserved words as node IDs (`end`, `graph`, `subgraph`, `style`, `class`, `direction`), and place `style`/`classDef` statements at the bottom.
 - **Diamond Node Care**: Diamond decision shapes (`{...}`) lose 50% of their horizontal area to the 45° angled corners. Keep diamond text exceptionally concise (e.g., `{"Inactivity<br/>> 15 min?"}` rather than `{"Has user been idle for more than 15 minutes?"}`).
 
 ### 4. Avoiding Dagre Rank Splaying (No Backward Subgraph Edges)

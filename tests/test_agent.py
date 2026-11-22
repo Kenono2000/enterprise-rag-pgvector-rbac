@@ -480,6 +480,47 @@ async def test_production_rollback_judge_healing_and_hitl(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_hitl_rejection_resume_flow(tmp_path):
+    """High-risk HITL gate: human rejection resumes from the PostgresSaver checkpoint and finalizes as rejected."""
+    git(tmp_path, "init")
+    git(tmp_path, "config", "user.email", "test@example.com")
+    git(tmp_path, "config", "user.name", "Test")
+    (tmp_path / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-m", "initial")
+
+    payload = {
+        "issue": {"number": 204, "title": "Update auth token rotation", "body": "High-risk auth token rotation proposal"},
+        "repository": {"full_name": "org/repo"},
+        "patches": [{"file_path": "app/auth/config.py", "content": "AUTH_TOKEN_TTL = 900\n"}],
+    }
+    wf_hitl = LangGraphSDLCWorkflow(
+        sandbox_root=str(tmp_path),
+        test_command="python -c \"assert True\"",
+        push=False,
+        require_hitl_for_high_risk=True,
+    )
+    hitl_result = await wf_hitl.run(payload)
+    assert hitl_result["status"] == "pending_approval"
+    assert hitl_result["interrupted"] is True
+    assert hitl_result["approval_card"]["risk_tier"] == "high_risk"
+    assert hitl_result["approval_card"]["requires_human_approval"] is True
+    original_checkpoint_id = hitl_result["checkpoint_id"]
+
+    # Human reviewer rejects the high-risk patch proposal at the HITL gate
+    rejected = await wf_hitl.resume_from_checkpoint(
+        thread_id=hitl_result["thread_id"],
+        human_approved=False,
+    )
+    assert rejected["status"] == "rejected"
+    assert rejected["checkpoint_backend"] == "PostgresSaver"
+    assert rejected["resumed_from"] == original_checkpoint_id
+    assert rejected["approval_card"]["status"] == "rejected"
+    assert rejected["approval_card"]["requires_human_approval"] is False
+    assert rejected["resumed_natively"] is True
+
+
+@pytest.mark.asyncio
 async def test_langgraph_workflow_parallel_verify(tmp_path):
     git(tmp_path, "init")
     git(tmp_path, "config", "user.email", "test@example.com")
