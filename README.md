@@ -78,6 +78,31 @@ ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 * **🧹 Unified Role Sanitization (single source of truth)**: One canonical `sanitize_roles_for_query()` in `app/auth/role_mapper.py` is delegated to by every retrieval path — pgvector (`DatabaseManager`), the Azure / GCP / Databricks cloud adapters, and the REST `X-User-Roles` legacy-header paths in `app/main.py` and `app/api/rag.py` — so the role grammar cannot drift between engines. Only non-empty strings that are known application roles (`KNOWN_ROLES`) or valid identifiers survive; injection payloads, empty strings, and non-string claims are dropped and fail closed to `[]`. Pinned cross-engine by `tests/test_role_sanitization_contract.py` (24 tests).
 * **🗂️ RBAC GIN Operator Class**: `idx_documents_allowed_roles_gin` uses the default `jsonb_ops` GIN class (not `jsonb_path_ops`), because the key-existence operator `?|` is only served by `jsonb_ops` (`jsonb_path_ops` accelerates `@>`, `@?`, `@@` exclusively). The index is therefore genuinely Bitmap-index-accelerated for the role pre-filter.
 * **📦 Matryoshka 1536-d + 16-Bit Compaction**: 75% cumulative RAM reduction with >98% recall. Matryoshka Representation Learning (MRL) truncates 3072-d vectors to 1536-d with L2 re-normalization (50% RAM reduction), composed with pgvector `halfvec(1536)` IEEE 754 binary16 quantization (additional 50% savings; max HNSW dimension doubles to 4,000). Numerical integrity is enforced by `DatabaseManager.format_halfvec()`, scrubbing `NaN`, `+Inf`, and `-Inf` to `0.0` before writing literal strings to prevent corrupted distance calculations and SQL parser failures.
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Raw ["1. Raw Vector"]
+        direction TB
+        V3072["text-embedding-3-large<br/>(3072-d float32, 12.28 KB)"]
+    end
+    subgraph MRL ["2. Matryoshka Truncation"]
+        direction TB
+        V1536["Truncate to 1536-d<br/>L2 Re-normalization<br/>(50% RAM reduction, &gt;98% recall)"]
+    end
+    subgraph Halfvec ["3. 16-bit Quantization"]
+        direction TB
+        VHalf["pgvector halfvec(1536)<br/>IEEE 754 binary16<br/>(additional 50% savings)"]
+    end
+    subgraph Store ["4. Storage & Index"]
+        direction TB
+        Sanitize["Sanitize NaN and Inf<br/>HNSW Indexing (3.08 KB)<br/>75% Cumulative Reduction"]
+    end
+    Raw --> MRL --> Halfvec --> Store
+    style Raw fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style MRL fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style Halfvec fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style Store fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+```
 * **💰 Token Budget Controls**: `token_consumption_ledger` tracks usage; `token_managed_limits` provides emergency kill-switch (`is_blocked`).
 
 **Schema Query**: The core retrieval query with RBAC pre-filtering:
@@ -184,6 +209,40 @@ flowchart LR
 * **Adaptive Hybrid Search (Semantic + Keyword RRF)**: Combines 16-bit `halfvec(1536)` cosine search with robust full-text search (`plainto_tsquery` + `websearch_to_tsquery` fallback) using parameterized Reciprocal Rank Fusion (`dense_weight / (k + rank) + sparse_weight / (k + rank)`, default `k=60`), pre-filtered by user role in PostgreSQL. Fusion runs as a **single-pass SQL CTE** (`ROW_NUMBER() OVER (...)` dense + sparse ranks, `FULL OUTER JOIN`, in-database RRF score) with automatic Python RRF fallback, and `hnsw.max_scan_tuples` auto-scales per caller via `DatabaseManager.scaled_scan_tuples` (1 role 2x, 2 roles 1x, 3+ roles 0.5x).
 * **Embedding & Re-Ranking Models (`libs/utilities.py`)**: Uses OpenAI / Azure OpenAI `text-embedding-3-small` (1536-d) for chunk embeddings and optional `CrossEncoder` (`ms-marco-MiniLM-L-6-v2`) for secondary re-ranking; `GroundingGuardrail` verifies source citations (`[Doc: <Title>, Chunk <Index>]`) and gracefully refuses ungrounded responses.
 * **Adaptive Hybrid RRF + Grounding Guard**: Couples in-database single-pass RRF with post-generation deterministic citation verification (`GroundingGuardrail`). Formats context into deterministic prefix-cached structures with SHA-256 hashes to accelerate KV cache hits across multi-turn queries, enforcing that every answer claims traceable references to authorized chunks and mandating explicit admissions of unknown information when context is silent.
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Query ["1. User Intent"]
+        direction TB
+        Q["User Query<br/>+ JWT Allowed Roles"]
+    end
+    subgraph Fusion ["2. In-DB Single-Pass SQL CTE"]
+        direction TB
+        Dense["Dense HNSW<br/>(halfvec 1536)"]
+        Sparse["Sparse GIN<br/>(tsvector/ts_rank)"]
+        Dense --> Fused["FULL OUTER JOIN<br/>In-DB RRF (k=60)"]
+        Sparse --> Fused
+    end
+    subgraph PromptTier ["3. Prompt Assembly"]
+        direction TB
+        Asm["Prefix-Cached Assembly<br/>SHA-256 KV Hash"] --> Gen["LLM Generation<br/>(gpt-4o / gemini)"]
+    end
+    subgraph GuardTier ["4. GroundingGuardrail"]
+        direction TB
+        Val{"Verify Citations<br/>and Admissions"}
+        Pass["Return Answer<br/>+ Audit Metadata"]
+        Block["Reject Ungrounded<br/>Response"]
+        Val -->|"Valid Doc & Chunk"| Pass
+        Val -->|"Hallucination/Missing"| Block
+    end
+    Query --> Fusion --> PromptTier --> GuardTier
+    style Query fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style Fusion fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style PromptTier fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
+    style GuardTier fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style Pass fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+    style Block fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
+```
 ### 📚 Context Engineering Pipeline (`app/rag/context.py`)
 Formalizes the retrieve → assemble → compact → reorder → cache discipline:
 * **ContextAssembler.assemble()**: Converts authorized chunks into citation-formatted context text (`[Doc: <Title>, Chunk <N>]`).
@@ -192,6 +251,35 @@ Formalizes the retrieve → assemble → compact → reorder → cache disciplin
 * **Attention-Aware Context Placement**: `ContextAssembler.reorder_chunks_extremities` places highest-similarity chunks at prompt extremities (`[rank_1, rank_3, ..., rank_4, rank_2]`) to mitigate LLM attention decay ("lost in the middle").
 * **Static-Prefix Prompt Caching**: Builds deterministic static-prefix prompt (`[STATIC SYSTEM + CONTEXT] -> [DYNAMIC QUESTION]`) with `prefix_hash` and `static_prefix_tokens` for cross-turn KV prefix caching on OpenAI and Gemini APIs (reducing latency up to 80%).
 Both `/api/v1/query` and `/api/v1/query/stream` endpoints route through this optimized pipeline.
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Norm ["1. Normalization"]
+        direction TB
+        Chunks["Authorized Chunks"] --> Fmt["Format Citations<br/>Whitespace Trim"]
+    end
+    subgraph Budget ["2. Budget Check"]
+        direction TB
+        Check{"&gt; 4,000 Tokens?"}
+        Compact["Compact: Keep Top-K<br/>by Similarity"]
+        Keep["Keep All Chunks"]
+        Check -->|"Yes"| Compact
+        Check -->|"No"| Keep
+    end
+    subgraph Attention ["3. Attention Placement"]
+        direction TB
+        Reorder["Reorder Extremities<br/>[r1, r3, ..., r4, r2]"]
+    end
+    subgraph Cache ["4. KV Caching"]
+        direction TB
+        Prefix["Prefix Prompt Assembly<br/>SHA-256 prefix_hash"] --> Output["ContextAssemblyResult"]
+    end
+    Norm --> Budget --> Attention --> Cache
+    style Norm fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style Budget fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style Attention fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style Cache fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+```
 
 ### 📐 RAG Triad Evaluation Engine (`app/rag/evaluator.py`)
 Deterministic, fully offline quality evaluator for the RAG Triad (no LLM/network calls — sub-millisecond keyword-overlap + vector-similarity heuristics), exported from `app/rag/__init__.py` and pinned by `tests/test_deep_eval.py`:
@@ -200,6 +288,47 @@ Deterministic, fully offline quality evaluator for the RAG Triad (no LLM/network
 * **Answer Relevance** — 80% question/answer keyword overlap + 20% conciseness penalty against prompt drift.
 * **Asymmetric Composite & Strict Gate** — Weighted composite gives `faithfulness` a 1.5× multiplier (`composite = (1.0*CR + 1.5*Faith + 1.0*AR)/3.5`) to penalize hallucination. Verdict is `PASS` (composite ≥ 0.70 AND faithfulness ≥ 0.70), `WARNING` (≥ 0.45), else `FAIL`.
 * **Observability Integration** — `ObservabilityManager.record_rag_triad()` (`app/observability.py`) persists scorecards to the thread-safe ring buffer and emits `rag_triad_evaluation` OTel spans with `rag.triad.*` attributes.
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Input ["1. RAG Artifacts"]
+        direction TB
+        Q["User Query"]
+        C["Retrieved Chunks"]
+        A["Generated Answer"]
+    end
+    subgraph Metrics ["2. Triad Scoring"]
+        direction TB
+        CR["Context Relevance<br/>70% Coverage + 30% Sim"]
+        Faith["Faithfulness (1.5x)<br/>40% Citations + 60% Claims"]
+        AR["Answer Relevance<br/>80% Overlap + 20% Conciseness"]
+    end
+    subgraph Gate ["3. Composite &amp; Status Gate"]
+        direction TB
+        Comp["Composite Score<br/>(1.0*CR + 1.5*F + 1.0*AR)/3.5"]
+        Pass["PASS (Comp &gt;= 0.70<br/>&amp; Faith &gt;= 0.70)"]
+        Warn["WARNING (&gt;= 0.45)"]
+        Fail["FAIL (&lt; 0.45)"]
+        Comp --> Pass
+        Comp --> Warn
+        Comp --> Fail
+    end
+    Q --> CR
+    C --> CR
+    C --> Faith
+    A --> Faith
+    Q --> AR
+    A --> AR
+    CR --> Comp
+    Faith --> Comp
+    AR --> Comp
+    style Input fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style Metrics fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style Gate fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
+    style Pass fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+    style Warn fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style Fail fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
+```
 
 ## 6. Gateways, Observability & Autonomous SDLC (`app/`, `agent/`)
 ### 🔐 Zero-Trust FastMCP Gateway & Observability (`app/mcp/gateway.py`, `app/main.py`)
@@ -246,6 +375,40 @@ flowchart LR
 - **CrewAI**: Role-based agent crew with multi-model tiering: `arch-synthesizer` (Staff Architect, `inherit` frontier reasoning model), `cross-model-judge` (Lead Security Auditor, Gemini Pro `pro`), and `test-triager` (SRE & Pytest Diagnostician, Gemini Flash `flash`), lowering inference costs by ~65%.
 - **Hermes**: Lifelong learning loop: distills verified successful patches into reusable `.agent/skills/hermes-*/SKILL.md` playbooks for instant future recall, and exports ShareGPT RL training trajectories with Atropos GRPO step rewards.
 - **Policy**: `never_ask_approval` - Workflow operates autonomously without human-in-the-loop approval gates; auto-times out via `asyncio.wait_for` (bounded by `SDLC_WEBHOOK_TIMEOUT_SECONDS`) with full audit logs.
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Intake ["1. Issue Ingestion"]
+        direction TB
+        Issue["GitHub Webhook<br/>Issue #ID"]
+    end
+    subgraph TieredCrew ["2. Tiered Agent Crew"]
+        direction TB
+        Arch["arch-synthesizer (inherit)<br/>Staff Architect: Diff Plan"]
+        Judge["cross-model-judge (pro)<br/>AST &amp; Security Auditor"]
+        Arch -->|"Propose Diff"| Judge
+    end
+    subgraph Execution ["3. Sandboxed Execution"]
+        direction TB
+        Pytest["Run Test Suite<br/>(30s Timeout)"]
+        SRE["test-triager (flash)<br/>Compress &amp; Classify Errors"]
+        Judge -->|"Pass AST"| Pytest
+        Pytest -->|"Fails"| SRE
+        SRE -->|"Triage Summary"| Arch
+    end
+    subgraph HermesTier ["4. Hermes Lifelong Learning"]
+        direction TB
+        Skill["Distill SKILL.md<br/>(.agent/skills/)"]
+        GRPO["Export Atropos GRPO<br/>RL Trajectory Record"]
+        Pytest -->|"All Passed"| Skill
+        Pytest -->|"All Passed"| GRPO
+    end
+    Intake --> Arch
+    style Intake fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style TieredCrew fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style Execution fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
+    style HermesTier fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+```
 
 **Managed Token Budget API**:
 - Usage monitoring: `/api/v1/tokens/usage`
@@ -466,6 +629,30 @@ Pins the six platform invariants so silent regressions fail CI first:
 
 #### 4. Tri-Paradigm SDLC Workflow (`agent/workflow.py`)
 - **LangGraph Checkpointing & Container Restart Resilience**: `PostgresCheckpointSaver` extends LangGraph state persistence, committing graph steps to PostgreSQL (`sdlc_workflow_checkpoints`) with time-travel inspection and multi-worker resume support. If a container or worker restarts mid-investigation, `load_workflow_checkpoint()` restores `AgentState` without conversation loss, while Git feature branches (`feature/AGENT-<ID>-<slug>`) and in-memory `file_snapshots` reconnect file state seamlessly.
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph PreCrash ["1. In-Flight Turn"]
+        direction TB
+        Node["LangGraph Transition"] --> Save["save_checkpoint()<br/>sdlc_workflow_checkpoints"]
+        Snap["Snapshot file state<br/>&amp; feature branch"]
+    end
+    subgraph Event ["2. Pod Event"]
+        direction TB
+        Crash["💥 Preemption / Restart<br/>Memory Erased"]
+    end
+    subgraph PostResume ["3. Resume Lifecycle"]
+        direction TB
+        Boot["New Container Boots"] --> Load["load_workflow_checkpoint()<br/>SELECT latest by thread_id"]
+        Git["git checkout branch<br/>Verify file_snapshots"]
+        Load --> Resume["Resume from parent_checkpoint_id<br/>Zero State Loss"]
+        Git --> Resume
+    end
+    PreCrash --> Event --> PostResume
+    style PreCrash fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style Event fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
+    style PostResume fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+```
 - **CrewAI Role Specialization & Multi-Model Tiering**: Orchestrates specialized agents across tiered LLMs: `arch-synthesizer` (Staff Architect, `inherit` frontier reasoning model), `cross-model-judge` (Lead Security Auditor, Gemini Pro `pro`), and `test-triager` (SRE & Pytest Diagnostician, Gemini Flash `flash`). Operates via zero-overhead `native_pydantic` models by default, with `USE_CREWAI_SDK=true` dynamically activating upstream `crewai.Crew` orchestration.
 - **Hermes Agent Lifelong Learning & GRPO Trajectories**: Automatically distills verified successful patches into portable `SKILL.md` files in `.agent/skills/hermes-*/` for single-shot retrieval on future runs (`recall_relevant_skills`). Exports ShareGPT-formatted RL trajectories with Atropos GRPO step rewards calculated from judge scores penalized by repair attempts (`reward = max(0.0, score - 0.25 * repairs)`).
 - **Autonomous Governance (`never_ask_approval`)**: Executes unattended without blocking at interrupt approval cards; execution is constrained by `asyncio.wait_for()` timeouts with deterministic error classification.
