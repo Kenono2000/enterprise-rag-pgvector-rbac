@@ -77,7 +77,7 @@ ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 * **🔒 SQL Injection Protection**: Parameterized `$2::text[]` array with empty-role guard (returns `[]` before DB execution).
 * **🧹 Unified Role Sanitization (single source of truth)**: One canonical `sanitize_roles_for_query()` in `app/auth/role_mapper.py` is delegated to by every retrieval path — pgvector (`DatabaseManager`), the Azure / GCP / Databricks cloud adapters, and the REST `X-User-Roles` legacy-header paths in `app/main.py` and `app/api/rag.py` — so the role grammar cannot drift between engines. Only non-empty strings that are known application roles (`KNOWN_ROLES`) or valid identifiers survive; injection payloads, empty strings, and non-string claims are dropped and fail closed to `[]`. Pinned cross-engine by `tests/test_role_sanitization_contract.py` (24 tests).
 * **🗂️ RBAC GIN Operator Class**: `idx_documents_allowed_roles_gin` uses the default `jsonb_ops` GIN class (not `jsonb_path_ops`), because the key-existence operator `?|` is only served by `jsonb_ops` (`jsonb_path_ops` accelerates `@>`, `@?`, `@@` exclusively). The index is therefore genuinely Bitmap-index-accelerated for the role pre-filter.
-* **📦 Matryoshka 1536-d + 16-Bit Compaction**: 75% cumulative RAM reduction with >98% recall. IEEE 754 sanitization across normalized tables.
+* **📦 Matryoshka 1536-d + 16-Bit Compaction**: 75% cumulative RAM reduction with >98% recall. Matryoshka Representation Learning (MRL) truncates 3072-d vectors to 1536-d with L2 re-normalization (50% RAM reduction), composed with pgvector `halfvec(1536)` IEEE 754 binary16 quantization (additional 50% savings; max HNSW dimension doubles to 4,000). Numerical integrity is enforced by `DatabaseManager.format_halfvec()`, scrubbing `NaN`, `+Inf`, and `-Inf` to `0.0` before writing literal strings to prevent corrupted distance calculations and SQL parser failures.
 * **💰 Token Budget Controls**: `token_consumption_ledger` tracks usage; `token_managed_limits` provides emergency kill-switch (`is_blocked`).
 
 **Schema Query**: The core retrieval query with RBAC pre-filtering:
@@ -127,11 +127,11 @@ python -m agent checkpoints "<thread_id>"                                # 7. In
 - Streamlit UI (`http://localhost:8501`) · Swagger Docs (`http://localhost:8000/docs`) · FastMCP 4 Streamable HTTP Gateway (`http://localhost:8001/mcp`, deployed as `enterprise-rag-gateway`) · SSE Stream (`/api/v1/query/stream`) · Document Catalog (`/api/v1/documents`) · Health Probes (`/healthz`, `/readyz`) · Token Budget Controls (`/api/v1/tokens/usage`, `/api/v1/tokens/limit`) · Telemetry (`/api/v1/metrics/observability`) · Jaeger UI (`http://localhost:16686`) · Local co-hosted gateway for development only (`http://localhost:8000/mcp` via `python -m app.mcp --transport http`)
 
 **Key Optimizations**:
-- **Loop-Scoped Async Concurrency**: `DatabaseManager` and `get_openai_client()` scope connection pools to `asyncio.get_running_loop()`, preventing `RuntimeError: Event loop is closed` across Streamlit threads.
+* **Loop-Scoped Async Concurrency**: `DatabaseManager` and `get_openai_client()` scope connection pools and HTTP clients to `asyncio.get_running_loop()`. Because Streamlit executes user script reruns inside separate worker threads with transient event loops, caching connection pools globally causes `RuntimeError: Event loop is closed` when subsequent requests access a dead loop. Binding singletons per active running loop automatically evicts stale pools and re-creates clean pools on loop turnover.
 - **Centralized Pool Sizing Under Settings**: `DB_POOL_MIN_SIZE` (default 5), `DB_POOL_MAX_SIZE` (default 20), `DB_POOL_COMMAND_TIMEOUT` (default 60) configured via `app/config.Settings` and exposed through `get_db_pool_config()` — replaces hard-coded `min_size=1, max_size=5` literals so pool sizing is centrally governed by environment.
 - **Hermetic Testing**: `conftest.py` pins deterministic environment (`OTEL_ENABLED=false`, blank `DATABASE_URL` / `GITHUB_TOKEN`, `SDLC_PUSH=false`, `USE_CREWAI_SDK=false`) *before* application import, ensuring CI/CI override safety with 12-factor precedence.
 - **Strict Warning Gate**: the suite is verified under `python -m pytest -W error` — zero warnings tolerated. The event-loop recreation invariant (`test_pool_is_recreated_across_event_loops`) creates and closes its loops explicitly (never `asyncio.run()`) so no `ProactorEventLoop` is left to garbage-collection finalization, which would leak `ResourceWarning: unclosed event loop` and trip the gate.
-- **Opt-in CrewAI**: Heavyweight SDK strictly opt-in via `USE_CREWAI_SDK=true`, maintaining deterministic `native_pydantic` adapter by default.
+- **Opt-in CrewAI**: Heavyweight SDK strictly opt-in via `USE_CREWAI_SDK=true`. Importing the real CrewAI SDK initiates disk probes under `~/.crewai` and uninvited background telemetry; the zero-overhead `native_pydantic` adapter executes pure in-memory Pydantic V2 models by default with sub-millisecond validation and zero side effects.
 
 ## 4. Identity & OAuth 2.0 PKCE Security (`app/auth/`)
 ```mermaid
@@ -183,23 +183,23 @@ flowchart LR
 * **Contextual Chunk Headers & Table-Safe Splitting**: `split_chunks()` (`libs/utilities.py`) extracts parent document summaries (`summarize_document_context`) and prepends `[Document Context: <id> | Section: <sec> | Summary: <summary>]` headers (`build_contextual_chunk_header`) to 800-token chunks without breaking Markdown tables—elevating **Context Precision > 0.90** while embedding in 64-chunk batches with exponential backoff (`tenacity`).
 * **Adaptive Hybrid Search (Semantic + Keyword RRF)**: Combines 16-bit `halfvec(1536)` cosine search with robust full-text search (`plainto_tsquery` + `websearch_to_tsquery` fallback) using parameterized Reciprocal Rank Fusion (`dense_weight / (k + rank) + sparse_weight / (k + rank)`, default `k=60`), pre-filtered by user role in PostgreSQL. Fusion runs as a **single-pass SQL CTE** (`ROW_NUMBER() OVER (...)` dense + sparse ranks, `FULL OUTER JOIN`, in-database RRF score) with automatic Python RRF fallback, and `hnsw.max_scan_tuples` auto-scales per caller via `DatabaseManager.scaled_scan_tuples` (1 role 2x, 2 roles 1x, 3+ roles 0.5x).
 * **Embedding & Re-Ranking Models (`libs/utilities.py`)**: Uses OpenAI / Azure OpenAI `text-embedding-3-small` (1536-d) for chunk embeddings and optional `CrossEncoder` (`ms-marco-MiniLM-L-6-v2`) for secondary re-ranking; `GroundingGuardrail` verifies source citations (`[Doc: <Title>, Chunk <Index>]`) and gracefully refuses ungrounded responses.
+* **Adaptive Hybrid RRF + Grounding Guard**: Couples in-database single-pass RRF with post-generation deterministic citation verification (`GroundingGuardrail`). Formats context into deterministic prefix-cached structures with SHA-256 hashes to accelerate KV cache hits across multi-turn queries, enforcing that every answer claims traceable references to authorized chunks and mandating explicit admissions of unknown information when context is silent.
 ### 📚 Context Engineering Pipeline (`app/rag/context.py`)
-Formalizes the retrieve → assemble → cache → compact discipline:
+Formalizes the retrieve → assemble → compact → reorder → cache discipline:
 * **ContextAssembler.assemble()**: Converts authorized chunks into citation-formatted context text (`[Doc: <Title>, Chunk <N>]`).
 * **Canonical Header Normalization**: Enforces strict title/content whitespace stripping and canonical header formatting across all chunks to stabilize byte-level SHA-256 `prefix_hash` across multi-turn queries.
+* **Token-Bounded Compaction (`_compact`)**: Evaluates `DEFAULT_MAX_CONTEXT_TOKENS=4000`. When context exceeds budget, chunks are sorted by similarity and accumulated greedily until budget is saturated, dropping low-confidence tail chunks and setting `compacted: True`.
 * **Attention-Aware Context Placement**: `ContextAssembler.reorder_chunks_extremities` places highest-similarity chunks at prompt extremities (`[rank_1, rank_3, ..., rank_4, rank_2]`) to mitigate LLM attention decay ("lost in the middle").
-* **Static-Prefix Prompt Caching**: Builds deterministic static-prefix prompt (`prefix_hash`, `static_prefix_tokens`) for cross-turn KV prefix caching on OpenAI and Gemini APIs.
-* **Token-Bounded Compaction**: Applies deterministic compaction (`DEFAULT_MAX_CONTEXT_TOKENS=4000`) when authorized context exceeds budget, keeping highest-similarity chunks.
+* **Static-Prefix Prompt Caching**: Builds deterministic static-prefix prompt (`[STATIC SYSTEM + CONTEXT] -> [DYNAMIC QUESTION]`) with `prefix_hash` and `static_prefix_tokens` for cross-turn KV prefix caching on OpenAI and Gemini APIs (reducing latency up to 80%).
 Both `/api/v1/query` and `/api/v1/query/stream` endpoints route through this optimized pipeline.
 
 ### 📐 RAG Triad Evaluation Engine (`app/rag/evaluator.py`)
-Deterministic, fully offline quality evaluator for the RAG Triad (no LLM/network calls — keyword-overlap + vector-similarity heuristics), exported from `app/rag/__init__.py` and pinned by `tests/test_deep_eval.py`:
-
-* **Context Relevance** — 70% query-term coverage in retrieved chunks + 30% average vector similarity
-* **Faithfulness (Groundedness)** — fraction of answer claims traceable to authorized context citations
-* **Answer Relevance** — question/answer keyword alignment against the retrieved context
-* **Composite & verdict** — weighted composite (`faithfulness` weighted 1.5× to penalize hallucination), `PASS ≥ 0.70`, `WARNING ≥ 0.45`, else `FAIL` (faithfulness must independently clear the threshold to `PASS`)
-* **Observability integration** — `ObservabilityManager.record_rag_triad()` (`app/observability.py`) persists scorecards to the ring buffer and emits `rag_triad_evaluation` OTel spans with `rag.triad.*` attributes
+Deterministic, fully offline quality evaluator for the RAG Triad (no LLM/network calls — sub-millisecond keyword-overlap + vector-similarity heuristics), exported from `app/rag/__init__.py` and pinned by `tests/test_deep_eval.py`:
+* **Context Relevance** — 70% query-term coverage in retrieved chunks + 30% average vector similarity. Measures signal-to-noise ratio in retrieval.
+* **Faithfulness (Groundedness)** — 40% valid citation index matching (`[Doc: <Title>, Chunk <Index>]`) + 60% sentence-level keyword claim support in context. Graceful refusal on silent context automatically receives 1.0.
+* **Answer Relevance** — 80% question/answer keyword overlap + 20% conciseness penalty against prompt drift.
+* **Asymmetric Composite & Strict Gate** — Weighted composite gives `faithfulness` a 1.5× multiplier (`composite = (1.0*CR + 1.5*Faith + 1.0*AR)/3.5`) to penalize hallucination. Verdict is `PASS` (composite ≥ 0.70 AND faithfulness ≥ 0.70), `WARNING` (≥ 0.45), else `FAIL`.
+* **Observability Integration** — `ObservabilityManager.record_rag_triad()` (`app/observability.py`) persists scorecards to the thread-safe ring buffer and emits `rag_triad_evaluation` OTel spans with `rag.triad.*` attributes.
 
 ## 6. Gateways, Observability & Autonomous SDLC (`app/`, `agent/`)
 ### 🔐 Zero-Trust FastMCP Gateway & Observability (`app/mcp/gateway.py`, `app/main.py`)
@@ -236,16 +236,16 @@ flowchart LR
 ```
 
 **Zero-Trust Protections**:
-- **🛡️ RFC 9728 & RFC 8707**: Protected Resource Metadata discovery + tool-level RBAC
-- **🔒 AST Security**: Blocks `eval`, `exec`, `__import__`, `compile`, dynamic attribute access
-- **⚡ Rate Limiting**: 60 req/min per caller via `SlidingWindowRateLimiter`
-- **💰 Token Controls**: 8K/50K limits via `TokenCircuitBreaker`
+- **🛡️ RFC 9728 & RFC 8707**: Machine-readable Protected Resource Metadata discovery (`get_gateway_metadata`) declaring OAuth authorities, supported transports (`streamable-http`), reverse-proxy reflection headers (`Mcp-Method`, `Mcp-Name`), and fail-closed tool-level RBAC (`check_tool_permission`).
+- **🔒 AST Security**: Inspects syntax trees via `PolicyEngine.verify_ast` to block `eval()`, `exec()`, `compile()`, `__import__()`, dynamic reflection (`getattr` on `system`/`popen`), directory-traversal in `open()`, and `subprocess(shell=True)`.
+- **⚡ Rate Limiting**: In-memory `SlidingWindowRateLimiter` enforces 60 req/min per caller identity via deque eviction, preventing automated scraping and agent loop storms with zero database roundtrips.
+- **💰 Token Controls**: Two-tiered budget limits via `TokenCircuitBreaker` (8,000 tokens/request, 50,000 tokens/issue) with an administrative emergency shutoff kill-switch (`is_blocked`).
 
 **Tri-Paradigm SDLC Workflow**:
-- **LangGraph**: Cyclic state machine with autonomous execution + `PostgresSaver` checkpoint persistence
-- **CrewAI**: Role-based crew (Staff Architect `inherit`, Security Auditor `pro`, SRE Triager `flash`)
-- **Hermes**: Skill synthesis, `SKILL.md` distillation, Atropos GRPO trajectory export
-- **Policy**: `never_ask_approval` - Workflow never pauses for human-in-the-loop approval; all decisions automated
+- **LangGraph**: Cyclic state machine (`initialize` -> `synthesize` -> `audit` -> `test` -> `repair`) with crash-resilient `PostgresSaver` checkpoint persistence (`sdlc_workflow_checkpoints`), enabling seamless container restart resumption and parent-checkpoint time-travel recovery.
+- **CrewAI**: Role-based agent crew with multi-model tiering: `arch-synthesizer` (Staff Architect, `inherit` frontier reasoning model), `cross-model-judge` (Lead Security Auditor, Gemini Pro `pro`), and `test-triager` (SRE & Pytest Diagnostician, Gemini Flash `flash`), lowering inference costs by ~65%.
+- **Hermes**: Lifelong learning loop: distills verified successful patches into reusable `.agent/skills/hermes-*/SKILL.md` playbooks for instant future recall, and exports ShareGPT RL training trajectories with Atropos GRPO step rewards.
+- **Policy**: `never_ask_approval` - Workflow operates autonomously without human-in-the-loop approval gates; auto-times out via `asyncio.wait_for` (bounded by `SDLC_WEBHOOK_TIMEOUT_SECONDS`) with full audit logs.
 
 **Managed Token Budget API**:
 - Usage monitoring: `/api/v1/tokens/usage`
@@ -465,14 +465,16 @@ Pins the six platform invariants so silent regressions fail CI first:
 - **Ring Buffer Fallback**: Maintains a thread-safe 1,000-event in-memory ring buffer for metrics and traces, ensuring observability telemetry works even when external exporters are offline.
 
 #### 4. Tri-Paradigm SDLC Workflow (`agent/workflow.py`)
-- **LangGraph Checkpointing**: `PostgresCheckpointSaver` extends LangGraph state persistence, committing graph steps to PostgreSQL (`sdlc_workflow_checkpoints`) with time-travel inspection and multi-worker resume support.
-- **CrewAI Role Specialization & Multi-Model Tiering**: Orchestrates specialized agents across tiered LLMs: `arch-synthesizer` (Staff Architect, `inherit` frontier reasoning model), `cross-model-judge` (Lead Security Auditor, Gemini Pro `pro`), and `test-triager` (SRE & Pytest Diagnostician, Gemini Flash `flash`).
-- **Hermes Agent Lifelong Learning**: Automatically distills verified successful patches into portable `SKILL.md` files in `.agent/skills/` and exports ShareGPT-formatted RL trajectories weighted by Atropos GRPO step rewards.
+- **LangGraph Checkpointing & Container Restart Resilience**: `PostgresCheckpointSaver` extends LangGraph state persistence, committing graph steps to PostgreSQL (`sdlc_workflow_checkpoints`) with time-travel inspection and multi-worker resume support. If a container or worker restarts mid-investigation, `load_workflow_checkpoint()` restores `AgentState` without conversation loss, while Git feature branches (`feature/AGENT-<ID>-<slug>`) and in-memory `file_snapshots` reconnect file state seamlessly.
+- **CrewAI Role Specialization & Multi-Model Tiering**: Orchestrates specialized agents across tiered LLMs: `arch-synthesizer` (Staff Architect, `inherit` frontier reasoning model), `cross-model-judge` (Lead Security Auditor, Gemini Pro `pro`), and `test-triager` (SRE & Pytest Diagnostician, Gemini Flash `flash`). Operates via zero-overhead `native_pydantic` models by default, with `USE_CREWAI_SDK=true` dynamically activating upstream `crewai.Crew` orchestration.
+- **Hermes Agent Lifelong Learning & GRPO Trajectories**: Automatically distills verified successful patches into portable `SKILL.md` files in `.agent/skills/hermes-*/` for single-shot retrieval on future runs (`recall_relevant_skills`). Exports ShareGPT-formatted RL trajectories with Atropos GRPO step rewards calculated from judge scores penalized by repair attempts (`reward = max(0.0, score - 0.25 * repairs)`).
+- **Autonomous Governance (`never_ask_approval`)**: Executes unattended without blocking at interrupt approval cards; execution is constrained by `asyncio.wait_for()` timeouts with deterministic error classification.
 
 #### 5. Defense-in-Depth Guardrails (`agent/guardrails.py`)
 - **PolicyEngine AST & STRIDE Threat Modeling**: Detects dangerous Python constructs (`exec`, `eval`, `__import__`, `subprocess` with `shell=True`, unauthorized path traversals) and maps security checks directly to STRIDE categories (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege) as required by Factory.ai Pillar 8.
 - **Secret Regex Filtering**: Automatically catches exposed API keys, private keys, and credential patterns.
-- **GroundingGuardrail**: Enforces the RAG Triad by requiring explicit source citations (`[Doc: <Title>, Chunk <Index>]`) and verifying that cited chunks exist in authorized context.
+- **GroundingGuardrail**: Enforces the RAG Triad by requiring explicit source citations (`[Doc: <Title>, Chunk <Index>]`), checking that cited documents exist in authorized context, and mandating explicit admissions when context is silent.
+- **SlidingWindowRateLimiter & TokenCircuitBreaker**: Contains caller blast radius via 60 req/min sliding windows and limits token consumption to 8,000 tokens/request and 50,000 tokens/issue with an administrative emergency shutoff kill-switch (`is_blocked`).
 
 #### 6. Factory.ai Autonomy Maturity Model (AMM) Evaluator
 - **Eight Technical Pillars Scorecard**: Built-in automated evaluator (`AutonomyMaturityEvaluator.evaluate_repository`) assessing the repository against Style & Validation, Build System, Testing, Documentation, Dev Environment, Code Quality, Observability, and Security & Governance.
