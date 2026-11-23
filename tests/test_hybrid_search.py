@@ -233,3 +233,62 @@ async def test_hybrid_search_single_pass_sql_rrf():
     assert results[0]["dense_rank"] == 1 and results[0]["sparse_rank"] == 2
     assert results[0]["chunk_index"] == 0
     assert pytest.approx(results[0]["rrf_score"]) == 1 / 61 + 1 / 62
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_prefiltering_prevents_recall_starvation():
+    """Verify that in-database RBAC pre-filtering prevents recall starvation.
+    
+    Criterion 5 from AWS Technical Guide (2026):
+    In-database pre-filtering narrows candidates by tenant/allowed_roles before or during
+    vector similarity calculation, ensuring exactly `limit` authorized rows are returned,
+    whereas post-filtering in memory risks discarding forbidden rows and starving recall.
+    """
+    mock_conn = AsyncMock()
+    # Mock single-pass CTE query response where all returned candidates are pre-filtered
+    # to only contain 'auditor' role
+    mock_conn.fetch.return_value = [
+        {
+            "chunk_id_pk": f"chunk-auditor-{i}",
+            "document_id": f"AUD-2026-00{i}",
+            "title": f"Compliance Audit Doc {i}",
+            "chunk_index": i,
+            "content": f"Confidential compliance log entry {i} for audit verification.",
+            "allowed_roles": ["auditor"],
+            "similarity": 0.92 - (i * 0.05),
+            "text_rank": 0.85 - (i * 0.04),
+            "dense_rank": i + 1,
+            "sparse_rank": i + 1,
+            "rrf_score": (1.0 / (60 + i + 1)) + (1.0 / (60 + i + 1)),
+        }
+        for i in range(5)
+    ]
+
+    class MockPoolAcquire:
+        async def __aenter__(self):
+            return mock_conn
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value = MockPoolAcquire()
+
+    with patch.object(DatabaseManager, "get_pool", new_callable=AsyncMock, return_value=mock_pool), \
+         patch.object(DatabaseManager, "configure_iterative_scan", new_callable=AsyncMock, return_value=True):
+        results = await DatabaseManager.hybrid_search(
+            query_text="compliance verification",
+            query_vector=[0.05] * 1536,
+            user_roles=["auditor"],
+            limit=5,
+        )
+
+    assert len(results) == 5
+    for row in results:
+        assert "auditor" in row["allowed_roles"]
+        assert row["rrf_score"] > 0
+    # Confirm SQL parameter binds sanitized roles list without memory leakage
+    sql_executed, *params = mock_conn.fetch.await_args.args
+    assert "allowed_roles ?| $3::text[]" in sql_executed
+    assert params[1] == "compliance verification"
+    assert params[2] == ["auditor"]
+

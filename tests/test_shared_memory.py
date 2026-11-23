@@ -406,3 +406,48 @@ async def test_rest_store_fact_persists_and_rows_are_present(mock_db):
     fact_args_str = json.dumps([str(c) for c in fact_calls])
     assert "shared_integration_fact" in fact_args_str
 
+
+@pytest.mark.asyncio
+async def test_agentic_memory_persistent_cross_session_context(mock_db):
+    """Verify Pattern 2 from AWS Technical Guide (2026): Agentic Memory.
+
+    AI agents reasoning across multi-step tasks require persistent semantic context
+    across distinct user sessions: short-term context handles session thread state,
+    while vector database semantic memory provides persistent recall of past decisions
+    and user preferences across sessions with Zero-Trust RBAC pre-filtering.
+    """
+    mock_db.fetch = AsyncMock(
+        return_value=[
+            {
+                "memory_id": "mem-cost-opt-uuid",
+                "memory_key": "user_pref:cost_optimization_scaling",
+                "value": "User selected HNSW 16-bit halfvec compaction with dynamic ef_search scaling for AWS Bedrock RAG pipeline.",
+                "source": "architect_agent",
+                "allowed_roles": ["cloud_architect", "engineer"],
+                "created_at": None,
+                "similarity": 0.94,
+            }
+        ]
+    )
+
+    # Perform cross-session semantic lookup of prior architecture decisions
+    recalled = await SharedMemoryStore.recall_facts(
+        query="What scaling approach did the agent recommend for our RAG pipeline?",
+        user_roles=["cloud_architect"],
+        top_k=3,
+        ef_search=64,
+    )
+
+    assert len(recalled) == 1
+    top_memory = recalled[0]
+    assert top_memory["key"] == "user_pref:cost_optimization_scaling"
+    assert "halfvec" in top_memory["value"]
+    assert "cloud_architect" in top_memory["allowed_roles"]
+    assert top_memory["similarity"] == 0.94
+
+    # Verify query parameters bound in-database with GIN pre-filtering
+    sql = str(mock_db.fetch.call_args.args[0])
+    assert "allowed_roles ?| $2::text[]" in sql
+    assert "<=>" in sql
+
+

@@ -630,3 +630,43 @@ async def test_autonomous_github_webhook():
         assert data["policy"] == "never_ask_approval"
         assert "timed out" in data["message"]
 
+
+def test_low_precision_vs_high_precision_framework_routing():
+    """Verify 2026 Mindstream Playbook Framework: Low-Precision vs High-Precision Task Routing.
+
+    Low-Precision tasks (documentation, test triage, research) allow autonomous execution.
+    High-Precision tasks (schema, RBAC, auth, Docker infrastructure) require HITL oversight
+    and strict AST validation.
+    """
+    from agent.guardrails import PolicyEngine
+
+    # 1. Low-precision autonomous candidate
+    low_res = PolicyEngine.evaluate_task_precision_routing(
+        task_type="documentation_update",
+        target_files=["docs/guide.md", "README.md"],
+    )
+    assert low_res["precision_tier"] == "LOW_PRECISION"
+    assert low_res["requires_hitl"] is False
+    assert low_res["autonomous_allowed"] is True
+    assert low_res["target_accuracy"] == ">=90.0%"
+
+    # 2. High-precision candidate due to target surface (schema.sql)
+    high_res_schema = PolicyEngine.evaluate_task_precision_routing(
+        task_type="vector_index_tuning",
+        target_files=["schema.sql"],
+    )
+    assert high_res_schema["precision_tier"] == "HIGH_PRECISION"
+    assert high_res_schema["requires_hitl"] is True
+    assert high_res_schema["autonomous_allowed"] is False
+    assert "schema.sql" in high_res_schema["high_risk_targets"]
+
+    # 3. High-precision candidate due to task type (rbac_modification)
+    high_res_rbac = PolicyEngine.evaluate_task_precision_routing(
+        task_type="rbac_modification",
+        target_files=["app/auth/role_mapper.py"],
+    )
+    assert high_res_rbac["precision_tier"] == "HIGH_PRECISION"
+    assert high_res_rbac["requires_hitl"] is True
+    assert high_res_rbac["autonomous_allowed"] is False
+
+

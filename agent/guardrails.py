@@ -233,8 +233,10 @@ class PolicyEngine:
     @classmethod
     def classify_autonomy_risk(cls, file_paths: Iterable[str]) -> Tuple[str, List[str]]:
         """
-        OpenCrew-style Autonomy Ladder: classify patch targets into 'low_risk' (autonomous)
-        or 'high_risk' (requires human-in-the-loop sign-off for auth, DB, or container infra).
+        OpenCrew-style Autonomy Ladder & Mindstream 2026 Playbook Framework:
+        Classifies task targets into 'low_risk' (autonomous execution, 90% accuracy acceptable)
+        or 'high_risk' (near-100% precision required; mandates human-in-the-loop sign-off,
+        AST policy gate validation, and automated regression suite before execution).
         """
         high_risk_files: List[str] = []
         for path in file_paths:
@@ -243,6 +245,66 @@ class PolicyEngine:
                 high_risk_files.append(path)
         tier = "high_risk" if high_risk_files else "low_risk"
         return tier, high_risk_files
+
+    @classmethod
+    def evaluate_task_precision_routing(
+        cls,
+        task_type: str,
+        target_files: Optional[Iterable[str]] = None,
+        estimated_impact: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate task against the 2026 Low-Precision vs. High-Precision Task Framework.
+        
+        Low-Precision Tasks:
+          - Content drafting, chunking, documentation, data compilation, research.
+          - 90% accuracy is acceptable, high frequency, background processes.
+          - Fully autonomous execution.
+          
+        High-Precision Tasks:
+          - Database schema (schema.sql), RBAC permissions, auth, secrets, payment/financial logic.
+          - Near-100% accuracy required, high-stakes decisions.
+          - Gated with Human-in-the-Loop (HITL) approval, AST audits, and test rollback protection.
+        """
+        files = list(target_files or [])
+        risk_tier, high_risk_files = cls.classify_autonomy_risk(files)
+
+        high_precision_task_types = {
+            "schema_migration", "rbac_modification", "auth_configuration",
+            "security_patch", "production_deployment", "secret_rotation"
+        }
+
+        is_high_precision = (
+            risk_tier == "high_risk"
+            or task_type.lower() in high_precision_task_types
+            or (estimated_impact and estimated_impact.lower() in ("high", "critical", "catastrophic"))
+        )
+
+        if is_high_precision:
+            return {
+                "precision_tier": "HIGH_PRECISION",
+                "requires_hitl": True,
+                "autonomous_allowed": False,
+                "target_accuracy": ">=99.9%",
+                "oversight_mechanism": "Human-in-the-Loop Approval Gate + AST Policy Audit + Pytest Regression",
+                "high_risk_targets": high_risk_files,
+                "reason": (
+                    f"Task '{task_type}' touches high-risk surfaces ({high_risk_files}) or requires near-100% precision."
+                    if high_risk_files
+                    else f"Task '{task_type}' requires strict human oversight under high-precision governance."
+                ),
+            }
+
+        return {
+            "precision_tier": "LOW_PRECISION",
+            "requires_hitl": False,
+            "autonomous_allowed": True,
+            "target_accuracy": ">=90.0%",
+            "oversight_mechanism": "Automated Linting + Grounding Guardrail Validation",
+            "high_risk_targets": [],
+            "reason": f"Task '{task_type}' qualifies for autonomous execution with minimal consequence under failure.",
+        }
+
 
     @classmethod
     def verify_ast(cls, content: str) -> List[str]:
