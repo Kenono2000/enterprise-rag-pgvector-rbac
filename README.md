@@ -1,7 +1,9 @@
 # 🛡️ Enterprise Zero-Trust RAG & Autonomous SDLC
-**Navigation**: [1. Arch](#1-system-architecture-overview) | [Pillars](#architectural-pillars-overview) | [2. In-DB RBAC](#2-in-database-rbac-vector-storage-schemasql-appdb) | [4. Identity](#4-identity-oauth-20-pkce-security-appauth) | [5. Ingestion & RAG](#5-ingestion-pipeline-and-hybrid-rag-quality-scriptsingestpy-libs) | [6. Gateways & SDLC](#6-gateways-observability-autonomous-sdlc-app-agent)
+**Navigation**: [1. Arch](#1-system-architecture-overview) | [Pillars](#architectural-pillars-overview) | [2. In-DB RBAC](#2-in-database-rbac-vector-storage-schemasql-appdb) | [3. Identity](#3-identity-oauth-20-pkce-security-appauth) | [4. Ingestion & RAG](#4-ingestion-pipeline-and-hybrid-rag-quality-scriptsingestpy-libs) | [5. Gateways & SDLC](#5-gateways-observability-autonomous-sdlc-app-agent)
+**Diagrams**: [1. High-Level RAG & SDLC](#diagram-1-high-level-rag--sdlc-architecture) | [2. In-DB RBAC & Compaction](#diagram-2-in-db-rbac--vector-compaction) | [3. OAuth 2.0 PKCE](#diagram-3-oauth-20-pkce--jwks-flow) | [4. Hybrid RAG & Triad](#diagram-4-end-to-end-hybrid-rag--triad-pipeline) | [5. Gateway & OTel Overview](#diagram-5-zero-trust-fastmcp-gateway--otel) | [6. FastMCP Gateway](#1-zero-trust-fastmcp-gateway-appmcpgatewaypy) | [7. Token Budget & Shutoff](#2-managed-token-budget--administrative-shutoff-api-appmainpy) | [8. Invariant Suite](#3-architectural-invariant-regression-suite-teststest_architectural_invariantspy) | [9. OpenTelemetry](#4-full-stack-opentelemetry-appobservabilitypy) | [10. Autonomous SDLC & Resume](#diagram-6-autonomous-sdlc--crash-resume) | [11. Guardrails](#6-defense-in-depth-guardrails-agentguardrailspy) | [12. Shared Memory](#diagram-7-shared-chat--agent-memory)
 
 ## 1. System Architecture Overview
+#### Diagram 1: High-Level RAG & SDLC Architecture
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
@@ -48,20 +50,21 @@ flowchart LR
 | **6** | **Multi-Cloud & Runbook** | Quad-mode strategy (pgvector, Azure, GCP, Databricks) | Zero-downtime .env switching, native pre-filtering across 4 engines |
 
 ## 2. In-Database RBAC & Vector Storage (`schema.sql`, `app/db/`)
+#### Diagram 2: In-DB RBAC & Vector Compaction
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
-    subgraph PostFilter ["Standard Post-Filtering"]
+    subgraph PreFilter ["1. Shift-Left In-DB RBAC"]
         direction TB
-        PF1["Unfiltered Vector Top-K"] --> PF2["Python RAM Filter<br/>(0 Hits and Memory Leak)"]
+        GIN["GIN Role Pre-Filter<br/>(allowed_roles ?| roles)"] --> HNSW["HNSW Iterative Scan<br/>(relaxed_order, halfvec)"]
     end
-    subgraph PreFilter ["Shift-Left In-DB RBAC"]
+    subgraph Compaction ["2. Vector Compaction (75% RAM Saved)"]
         direction TB
-        GIN["1. GIN Role Pre-Filter<br/>(allowed_roles contains roles)"] --> HNSW["2. HNSW Iterative Scan<br/>(halfvec, relaxed_order)"]
+        V3072["3072-d float32<br/>(12.28 KB)"] --> MRL["Matryoshka 1536-d<br/>+ L2 Norm (50% saved)"] --> Half["halfvec(1536) binary16<br/>NaN/Inf Scrub (3.08 KB)"]
     end
-    PostFilter -.->|"Replaced By"| PreFilter
-    style PostFilter fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
+    PreFilter --> Compaction
     style PreFilter fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+    style Compaction fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
 ```
 ```sql
 SELECT d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
@@ -76,31 +79,6 @@ ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 * **🧹 Unified Role Sanitization (single source of truth)**: One canonical `sanitize_roles_for_query()` in `app/auth/role_mapper.py` is delegated to by every retrieval path — pgvector (`DatabaseManager`), the Azure / GCP / Databricks cloud adapters, and the REST `X-User-Roles` legacy-header paths in `app/main.py` and `app/api/rag.py` — so the role grammar cannot drift between engines. Only non-empty strings that are known application roles (`KNOWN_ROLES`) or valid identifiers survive; injection payloads, empty strings, and non-string claims are dropped and fail closed to `[]`. Pinned cross-engine by `tests/test_role_sanitization_contract.py` (24 tests).
 * **🗂️ RBAC GIN Operator Class**: `idx_documents_allowed_roles_gin` uses the default `jsonb_ops` GIN class (not `jsonb_path_ops`), because the key-existence operator `?|` is only served by `jsonb_ops` (`jsonb_path_ops` accelerates `@>`, `@?`, `@@` exclusively). The index is therefore genuinely Bitmap-index-accelerated for the role pre-filter.
 * **📦 Matryoshka 1536-d + 16-Bit Compaction**: 75% cumulative RAM reduction with >98% recall. Matryoshka Representation Learning (MRL) truncates 3072-d vectors to 1536-d with L2 re-normalization (50% RAM reduction), composed with pgvector `halfvec(1536)` IEEE 754 binary16 quantization (additional 50% savings; max HNSW dimension doubles to 4,000). Numerical integrity is enforced by `DatabaseManager.format_halfvec()`, scrubbing `NaN`, `+Inf`, and `-Inf` to `0.0` before writing literal strings to prevent corrupted distance calculations and SQL parser failures.
-```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
-flowchart LR
-    subgraph Raw ["1. Raw Vector"]
-        direction TB
-        V3072["text-embedding-3-large<br/>(3072-d float32, 12.28 KB)"]
-    end
-    subgraph MRL ["2. Matryoshka Truncation"]
-        direction TB
-        V1536["Truncate to 1536-d<br/>L2 Re-normalization<br/>(50% RAM reduction, &gt;98% recall)"]
-    end
-    subgraph Halfvec ["3. 16-bit Quantization"]
-        direction TB
-        VHalf["pgvector halfvec(1536)<br/>IEEE 754 binary16<br/>(additional 50% savings)"]
-    end
-    subgraph Store ["4. Storage & Index"]
-        direction TB
-        Sanitize["Sanitize NaN and Inf<br/>HNSW Indexing (3.08 KB)<br/>75% Cumulative Reduction"]
-    end
-    Raw --> MRL --> Halfvec --> Store
-    style Raw fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style MRL fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
-    style Halfvec fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
-    style Store fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
-```
 * **💰 Token Budget Controls**: `token_consumption_ledger` tracks usage; `token_managed_limits` provides emergency kill-switch (`is_blocked`).
 
 **Schema Query**: The core retrieval query with RBAC pre-filtering:
@@ -112,7 +90,8 @@ WHERE d.allowed_roles ?| $2::text[] AND (c.embedding_model = 'text-embedding-3-s
 ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 ```
 
-## 4. Identity & OAuth 2.0 PKCE Security (`app/auth/`)
+## 3. Identity & OAuth 2.0 PKCE Security (`app/auth/`)
+#### Diagram 3: OAuth 2.0 PKCE & JWKS Flow
 ```mermaid
 %%{init: {'sequence': {'mirrorActors': false, 'actorMargin': 18, 'boxMargin': 4, 'messageMargin': 22}}}%%
 sequenceDiagram
@@ -133,70 +112,33 @@ sequenceDiagram
 * **F5 Reload Resilience**: Compresses (`zlib`) and HMAC-signs session tokens into the `enterprise_rag_session` cookie, rehydrating `st.session_state` and silently rotating expired tokens on browser refresh.
 * **Multi-IdP JWKS & SOC-2 Bounds**: Validates RS256 signatures (`leeway=60s`), maps claims across Google, Azure AD, Okta, Cognito, and Keycloak against `KNOWN_ROLES`, and enforces a **15-minute idle timeout** and **12-hour hard ceiling**.
 
-## 5. Ingestion Pipeline and Hybrid RAG Quality (`scripts/ingest.py`, `libs/`)
+## 4. Ingestion Pipeline and Hybrid RAG Quality (`scripts/ingest.py`, `libs/`)
+#### Diagram 4: End-to-End Hybrid RAG & Triad Pipeline
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
-    subgraph Stage1 ["1. SHA-256 Intake"]
+    subgraph Ingest ["1. Contextual Ingest"]
         direction TB
-        Hash["64KB SHA-256 Hash"] --> Check{"Unchanged?"}
-        Check -->|"Yes"| Skip["Skip (O(1) Bypass)"]
+        Doc["SHA-256 De-dup<br/>(64KB Streaming)"] --> Chunk["Contextual Header<br/>+ halfvec(1536)"]
     end
-    subgraph Stage2 ["2. Contextual Split and Embed"]
+    subgraph Search ["2. Adaptive Hybrid RRF"]
         direction TB
-        Split["Contextual Header<br/>+ Tiktoken (800)"] --> Embed["Batch Embed (64)<br/>+ halfvec Upsert"]
+        Vec["Vector + BM25<br/>(Dynamic Weights)"] --> RRF["RRF Top-K +<br/>Cross-Encoder Rerank"]
     end
-    subgraph Stage3 ["3. Hybrid RAG and Guard"]
+    subgraph Context ["3. Context &amp; Triad Gate"]
         direction TB
-        RRF["Dense + Sparse RRF"] --> Guard["Cross-Encoder and<br/>GroundingGuardrail"]
+        Pack["Budget Pack<br/>(4K-32K Tokens)"] --> Triad["RAG Triad Gate<br/>(PASS &gt;= 0.70, Faith 1.5x)"]
     end
-    Check -->|"Modified"| Split
-    Embed --> RRF
-    style Stage1 fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style Stage2 fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
-    style Stage3 fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
-    style Skip fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
-    style Guard fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+    Ingest --> Search --> Context
+    style Ingest fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style Search fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style Context fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
 ```
 * **Skip Unchanged Files (SHA-256 Hashing)**: Hashes files in 64KB blocks (`O(1)` lookup) to skip unchanged documents with zero API calls, and automatically replaces old chunks when a file is updated.
 * **Contextual Chunk Headers & Table-Safe Splitting**: `split_chunks()` (`libs/utilities.py`) extracts parent document summaries (`summarize_document_context`) and prepends `[Document Context: <id> | Section: <sec> | Summary: <summary>]` headers (`build_contextual_chunk_header`) to 800-token chunks without breaking Markdown tables—elevating **Context Precision > 0.90** while embedding in 64-chunk batches with exponential backoff (`tenacity`).
 * **Adaptive Hybrid Search (Semantic + Keyword RRF)**: Combines 16-bit `halfvec(1536)` cosine search with robust full-text search (`plainto_tsquery` + `websearch_to_tsquery` fallback) using parameterized Reciprocal Rank Fusion (`dense_weight / (k + rank) + sparse_weight / (k + rank)`, default `k=60`), pre-filtered by user role in PostgreSQL. Fusion runs as a **single-pass SQL CTE** (`ROW_NUMBER() OVER (...)` dense + sparse ranks, `FULL OUTER JOIN`, in-database RRF score) with automatic Python RRF fallback, and `hnsw.max_scan_tuples` auto-scales per caller via `DatabaseManager.scaled_scan_tuples` (1 role 2x, 2 roles 1x, 3+ roles 0.5x).
 * **Embedding & Re-Ranking Models (`libs/utilities.py`)**: Uses OpenAI / Azure OpenAI `text-embedding-3-small` (1536-d) for chunk embeddings and optional `CrossEncoder` (`ms-marco-MiniLM-L-6-v2`) for secondary re-ranking; `GroundingGuardrail` verifies source citations (`[Doc: <Title>, Chunk <Index>]`) and gracefully refuses ungrounded responses.
 * **Adaptive Hybrid RRF + Grounding Guard**: Couples in-database single-pass RRF with post-generation deterministic citation verification (`GroundingGuardrail`). Formats context into deterministic prefix-cached structures with SHA-256 hashes to accelerate KV cache hits across multi-turn queries, enforcing that every answer claims traceable references to authorized chunks and mandating explicit admissions of unknown information when context is silent.
-```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
-flowchart LR
-    subgraph Query ["1. User Intent"]
-        direction TB
-        Q["User Query<br/>+ JWT Allowed Roles"]
-    end
-    subgraph Fusion ["2. In-DB Single-Pass SQL CTE"]
-        direction TB
-        Dense["Dense HNSW<br/>(halfvec 1536)"]
-        Sparse["Sparse GIN<br/>(tsvector/ts_rank)"]
-        Dense --> Fused["FULL OUTER JOIN<br/>In-DB RRF (k=60)"]
-        Sparse --> Fused
-    end
-    subgraph PromptTier ["3. Prompt Assembly"]
-        direction TB
-        Asm["Prefix-Cached Assembly<br/>SHA-256 KV Hash"] --> Gen["LLM Generation<br/>(gpt-4o / gemini)"]
-    end
-    subgraph GuardTier ["4. GroundingGuardrail"]
-        direction TB
-        Val{"Verify Citations<br/>and Admissions"}
-        Pass["Return Answer<br/>+ Audit Metadata"]
-        Block["Reject Ungrounded<br/>Response"]
-        Val -->|"Valid Doc & Chunk"| Pass
-        Val -->|"Hallucination/Missing"| Block
-    end
-    Query --> Fusion --> PromptTier --> GuardTier
-    style Query fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style Fusion fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
-    style PromptTier fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
-    style GuardTier fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
-    style Pass fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
-    style Block fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
-```
 ### 📚 Context Engineering Pipeline (`app/rag/context.py`)
 Formalizes the retrieve → assemble → compact → reorder → cache discipline:
 * **ContextAssembler.assemble()**: Converts authorized chunks into citation-formatted context text (`[Doc: <Title>, Chunk <N>]`).
@@ -205,35 +147,6 @@ Formalizes the retrieve → assemble → compact → reorder → cache disciplin
 * **Attention-Aware Context Placement**: `ContextAssembler.reorder_chunks_extremities` places highest-similarity chunks at prompt extremities (`[rank_1, rank_3, ..., rank_4, rank_2]`) to mitigate LLM attention decay ("lost in the middle").
 * **Static-Prefix Prompt Caching**: Builds deterministic static-prefix prompt (`[STATIC SYSTEM + CONTEXT] -> [DYNAMIC QUESTION]`) with `prefix_hash` and `static_prefix_tokens` for cross-turn KV prefix caching on OpenAI and Gemini APIs (reducing latency up to 80%).
 Both `/api/v1/query` and `/api/v1/query/stream` endpoints route through this optimized pipeline.
-```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
-flowchart LR
-    subgraph Norm ["1. Normalization"]
-        direction TB
-        Chunks["Authorized Chunks"] --> Fmt["Format Citations<br/>Whitespace Trim"]
-    end
-    subgraph Budget ["2. Budget Check"]
-        direction TB
-        Check{"&gt; 4,000 Tokens?"}
-        Compact["Compact: Keep Top-K<br/>by Similarity"]
-        Keep["Keep All Chunks"]
-        Check -->|"Yes"| Compact
-        Check -->|"No"| Keep
-    end
-    subgraph Attention ["3. Attention Placement"]
-        direction TB
-        Reorder["Reorder Extremities<br/>[r1, r3, ..., r4, r2]"]
-    end
-    subgraph Cache ["4. KV Caching"]
-        direction TB
-        Prefix["Prefix Prompt Assembly<br/>SHA-256 prefix_hash"] --> Output["ContextAssemblyResult"]
-    end
-    Norm --> Budget --> Attention --> Cache
-    style Norm fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style Budget fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
-    style Attention fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
-    style Cache fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
-```
 
 ### 📐 RAG Triad Evaluation Engine (`app/rag/evaluator.py`)
 Deterministic, fully offline quality evaluator for the RAG Triad (no LLM/network calls — sub-millisecond keyword-overlap + vector-similarity heuristics), aligning with AWS Vector DB Evaluation Criteria (2026) and Mindstream AI Playbook standards, exported from `app/rag/__init__.py` and pinned by `tests/test_deep_eval.py`:
@@ -243,122 +156,30 @@ Deterministic, fully offline quality evaluator for the RAG Triad (no LLM/network
 * **Asymmetric Composite & Strict Gate** — Weighted composite gives `faithfulness` a 1.5× multiplier (`composite = (1.0*CR + 1.5*Faith + 1.0*AR)/3.5`) to penalize hallucination. Verdict is `PASS` (composite ≥ 0.70 AND faithfulness ≥ 0.70), `WARNING` (≥ 0.45), else `FAIL`.
 * **Precision-Tiered Task Routing** — Evaluates task risk against the 2026 Low vs. High Precision framework (`PolicyEngine.evaluate_task_precision_routing`): Low-Precision tasks (documentation, test triage, draft compilation) execute autonomously (≥90% accuracy target); High-Precision tasks (schema modifications, RBAC policy changes, auth credentials) enforce HITL approval gates, AST policy passes, and test rollback protection (≥99.9% accuracy target).
 * **Observability Integration** — `ObservabilityManager.record_rag_triad()` (`app/observability.py`) persists scorecards to the thread-safe ring buffer and emits `rag_triad_evaluation` OTel spans with `rag.triad.*` attributes.
-```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
-flowchart LR
-    subgraph Input ["1. RAG Artifacts"]
-        direction TB
-        Q["User Query"]
-        C["Retrieved Chunks"]
-        A["Generated Answer"]
-    end
-    subgraph Metrics ["2. Triad Scoring"]
-        direction TB
-        CR["Context Relevance<br/>70% Coverage + 30% Sim"]
-        Faith["Faithfulness (1.5x)<br/>40% Citations + 60% Claims"]
-        AR["Answer Relevance<br/>80% Overlap + 20% Conciseness"]
-    end
-    subgraph Gate ["3. Composite &amp; Status Gate"]
-        direction TB
-        Comp["Composite Score<br/>(1.0*CR + 1.5*F + 1.0*AR)/3.5"]
-        Pass["PASS (Comp &gt;= 0.70<br/>&amp; Faith &gt;= 0.70)"]
-        Warn["WARNING (&gt;= 0.45)"]
-        Fail["FAIL (&lt; 0.45)"]
-        Comp --> Pass
-        Comp --> Warn
-        Comp --> Fail
-    end
-    Q --> CR
-    C --> CR
-    C --> Faith
-    A --> Faith
-    Q --> AR
-    A --> AR
-    CR --> Comp
-    Faith --> Comp
-    AR --> Comp
-    style Input fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style Metrics fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
-    style Gate fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
-    style Pass fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
-    style Warn fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
-    style Fail fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
-```
 
-## 6. Gateways, Observability & Autonomous SDLC (`app/`, `agent/`)
+## 5. Gateways, Observability & Autonomous SDLC (`app/`, `agent/`)
 ### 🔐 Zero-Trust FastMCP Gateway & Observability (`app/mcp/gateway.py`, `app/main.py`)
 **Security-First Architecture**:
+#### Diagram 5: Zero-Trust FastMCP Gateway & OTel
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
-    subgraph Intake ["1. Webhook and Recall"]
+    subgraph Gateway ["1. FastMCP Gateway (/mcp)"]
         direction TB
-        Hook["HMAC Webhook"] --> Init["Init and Recall<br/>Hermes Skills"]
+        Auth["RFC 9728 / 8707<br/>+ Fail-Closed RBAC"] --> Guard["Rate Limit (60/m)<br/>+ Token Breaker"]
     end
-    subgraph Gen ["2. CrewAI Architect"]
+    subgraph OTel ["2. OpenTelemetry &amp; Storage"]
         direction TB
-        Propose["Propose Patch<br/>(model: inherit)"] --> Apply["Snapshot and Apply<br/>(Path Guard)"]
+        Span["OTel Spans +<br/>1K Ring Buffer"] --> Export["Jaeger Badger LSM<br/>+ Azure App Insights"]
     end
-    subgraph Audit ["3. CrewAI Pro Judge"]
-        direction TB
-        Inspect["Deep AST + Judge<br/>(model: pro)"] -->|"Secret/Max"| Reject["Atomic Rollback"]
-    end
-    subgraph Verify ["4. Flash Triage and PostgresSaver"]
-        direction TB
-        Test{"test-triager<br/>(30s Timeout)"} -->|"Retry &lt; 3"| Repair["Repair (max 3x)"]
-        Test -->|"Passed"| Hermes["PostgresSaver Lineage<br/>+ SKILL.md + HITL / PR"]
-    end
-    Intake --> Gen
-    Gen --> Audit
-    Audit -->|"Pass"| Verify
-    style Intake fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style Gen fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
-    style Audit fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
-    style Verify fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
-    style Reject fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
-    style Hermes fill:#dcfce7,stroke:#22c55e,stroke-width:1.5px
+    Gateway --> OTel
+    style Gateway fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style OTel fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
 ```
 
 **Zero-Trust Protections**:
 - **🛡️ RFC 9728 & RFC 8707**: Machine-readable Protected Resource Metadata discovery (`get_gateway_metadata`) declaring OAuth authorities, supported transports (`streamable-http`), reverse-proxy reflection headers (`Mcp-Method`, `Mcp-Name`), and fail-closed tool-level RBAC (`check_tool_permission`).
 - **🔒 AST Security**: Inspects syntax trees via `PolicyEngine.verify_ast` to block `eval()`, `exec()`, `compile()`, `__import__()`, dynamic reflection (`getattr` on `system`/`popen`), directory-traversal in `open()`, and `subprocess(shell=True)`.
-```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
-flowchart LR
-    subgraph PatchInput ["1. Proposed Patch"]
-        direction TB
-        Code["Code Diff / Patch Content"] --> Parse["ast.parse(code)"]
-    end
-    subgraph ASTChecks ["2. Syntax Tree Policy Gates"]
-        direction TB
-        EvalCheck{"Call node in<br/>eval/exec/compile/__import__?"}
-        GetattrCheck{"getattr() targeting<br/>system/popen/loads?"}
-        ShellCheck{"subprocess with<br/>shell=True?"}
-        PathCheck{"open() with directory<br/>traversal '../'?"}
-    end
-    subgraph Outcomes ["3. Audit Verdict"]
-        direction TB
-        Violate["Block Patch &amp;<br/>Record AST Violation"]
-        PassGate["Pass to Independent<br/>Judge &amp; Pytest Suite"]
-    end
-    Parse --> EvalCheck
-    Parse --> GetattrCheck
-    Parse --> ShellCheck
-    Parse --> PathCheck
-    EvalCheck -->|"Match"| Violate
-    GetattrCheck -->|"Match"| Violate
-    ShellCheck -->|"Match"| Violate
-    PathCheck -->|"Match"| Violate
-    EvalCheck -->|"Clear"| PassGate
-    GetattrCheck -->|"Clear"| PassGate
-    ShellCheck -->|"Clear"| PassGate
-    PathCheck -->|"Clear"| PassGate
-    style PatchInput fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style ASTChecks fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
-    style Outcomes fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
-    style Violate fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
-    style PassGate fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
-```
 - **⚡ Rate Limiting**: In-memory `SlidingWindowRateLimiter` enforces 60 req/min per caller identity via deque eviction, preventing automated scraping and agent loop storms with zero database roundtrips.
 - **💰 Token Controls**: Two-tiered budget limits via `TokenCircuitBreaker` (8,000 tokens/request, 50,000 tokens/issue) with an administrative emergency shutoff kill-switch (`is_blocked`).
 
@@ -367,39 +188,21 @@ flowchart LR
 - **CrewAI**: Role-based agent crew with multi-model tiering: `arch-synthesizer` (Staff Architect, `inherit` frontier reasoning model), `cross-model-judge` (Lead Security Auditor, Gemini Pro `pro`), and `test-triager` (SRE & Pytest Diagnostician, Gemini Flash `flash`), lowering inference costs by ~65%.
 - **Hermes**: Lifelong learning loop: distills verified successful patches into reusable `.agent/skills/hermes-*/SKILL.md` playbooks for instant future recall, and exports ShareGPT RL training trajectories with Atropos GRPO step rewards.
 - **Policy**: `never_ask_approval` - Workflow operates autonomously without human-in-the-loop approval gates; auto-times out via `asyncio.wait_for` (bounded by `SDLC_WEBHOOK_TIMEOUT_SECONDS`) with full audit logs.
+#### Diagram 6: Autonomous SDLC & Crash-Resume
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
-    subgraph Intake ["1. Issue Ingestion"]
+    subgraph SDLC ["1. Autonomous SDLC (never_ask_approval)"]
         direction TB
-        Issue["GitHub Webhook<br/>Issue #ID"]
+        Hook["GitHub Webhook<br/>(60s Timeout)"] --> Crew["Patch + AST Audit<br/>+ Judge (&gt;= 0.70)"]
     end
-    subgraph TieredCrew ["2. Tiered Agent Crew"]
+    subgraph Resume ["2. LangGraph Crash-Resume"]
         direction TB
-        Arch["arch-synthesizer (inherit)<br/>Staff Architect: Diff Plan"]
-        Judge["cross-model-judge (pro)<br/>AST &amp; Security Auditor"]
-        Arch -->|"Propose Diff"| Judge
+        Ckpt["PostgresCheckpointSaver<br/>(sdlc_workflow_checkpoints)"] --> Recover["Pod Restart:<br/>Load Latest + Git Branch"]
     end
-    subgraph Execution ["3. Sandboxed Execution"]
-        direction TB
-        Pytest["Run Test Suite<br/>(30s Timeout)"]
-        SRE["test-triager (flash)<br/>Compress &amp; Classify Errors"]
-        Judge -->|"Pass AST"| Pytest
-        Pytest -->|"Fails"| SRE
-        SRE -->|"Triage Summary"| Arch
-    end
-    subgraph HermesTier ["4. Hermes Lifelong Learning"]
-        direction TB
-        Skill["Distill SKILL.md<br/>(.agent/skills/)"]
-        GRPO["Export Atropos GRPO<br/>RL Trajectory Record"]
-        Pytest -->|"All Passed"| Skill
-        Pytest -->|"All Passed"| GRPO
-    end
-    Intake --> Arch
-    style Intake fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style TieredCrew fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
-    style Execution fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
-    style HermesTier fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+    SDLC --> Resume
+    style SDLC fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
+    style Resume fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
 ```
 
 **Managed Token Budget API**:
@@ -417,6 +220,21 @@ flowchart LR
 **Key Innovation**: Opt-in concurrent verification (`SDLC_PARALLEL_VERIFY=true`) enables parallel Auditor/Triager execution after security gate passes.
 
 ### 1. Zero-Trust FastMCP Gateway (`app/mcp/gateway.py`)
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Auth ["1. Discovery &amp; RBAC"]
+        direction TB
+        Meta["RFC 9728 / 8707<br/>Metadata &amp; Scopes"] --> RBAC["check_tool_permission()<br/>(Fail-Closed Claims)"]
+    end
+    subgraph Guard ["2. Blast Radius &amp; Dispatch"]
+        direction TB
+        Rate["SlidingWindow (60/m)<br/>+ TokenCircuitBreaker"] --> Adapter["get_vector_search_adapter()<br/>(pgvector/Azure/GCP/DBX)"]
+    end
+    Auth --> Guard
+    style Auth fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style Guard fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+```
 - **Blast Radius Controls**: Configures module-level `SlidingWindowRateLimiter` (default 60 req/min per caller) and `TokenCircuitBreaker` (8,000 tokens/request, 50,000 tokens/issue) to protect downstream LLMs.
 - **Strict Pydantic Schemas (`extra="forbid"`)**: Every tool request (`MCPSearchRequest`, `MCPPatchRequest`, `MCPSDLCCrewRequest`, `MCPHermesSkillRequest`, `MCPListDocumentsRequest`, `MCPAutonomyMaturityRequest`) explicitly rejects unknown fields.
 - **Fail-Closed RBAC (`check_tool_permission`)**: Maps tools to required roles (`TOOL_REQUIRED_ROLES`). If a token is authenticated but has zero claims, it is **denied** for restricted tools, preventing confused deputy attacks.
@@ -425,10 +243,40 @@ flowchart LR
 - **FastAPI Co-Hosted Mount (`app/main.py`)**: The main app still mounts the shared MCP gateway at `/mcp` for local co-hosted development via `mcp.http_app(path="/mcp")` mounted at `"/"` **after every REST route** (Starlette matches in registration order, so the catch-all Mount must be last or it shadows `/api/v1/*`). The parent `lifespan` enters `mcp_http_app.router.lifespan_context` so FastMCP's `StreamableHTTPSessionManager` task group initializes — a plain `app.mount("/mcp", http_app())` both mis-routes the endpoint to `/mcp/mcp` (bare `/mcp` 307-redirects to a 404) and skips the sub-app lifespan ("Task group is not initialized", HTTP 500), which MCP hosts surface as a 30s connection timeout. Pinned by `tests/test_mcp_auth.py::TestFastMcpHttpMount`. The gateway is installed separately via `requirements-gateway.txt` so the CrewAI app install path stays free of the FastMCP dependency surface.
 
 ### 2. Managed Token Budget & Administrative Shutoff API (`app/main.py`)
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Ledger ["1. Token Accounting"]
+        direction TB
+        Event["LLM Call Event"] --> DB["token_consumption_ledger<br/>&amp; token_managed_limits"]
+    end
+    subgraph Shutoff ["2. Kill-Switch Control"]
+        direction TB
+        API["REST /api/v1/tokens/limit<br/>or MCP policy://sdlc-budget"] --> Flag["enforce_limit /<br/>is_blocked = true"]
+    end
+    Ledger --> Shutoff
+    style Ledger fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style Shutoff fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
+```
 - **Database-Backed Ledgers**: Tracks every token consumption event via `token_consumption_ledger` and enforces limits through `token_managed_limits`.
 - **Kill-Switching**: Allows administrators or authorized engineers to toggle `enforce_limit` or trip the emergency `is_blocked` kill-switch instantly via REST endpoints (`/api/v1/tokens/limit`) or the MCP `policy://sdlc-budget` resource.
 
-### 2a. Architectural Invariant Regression Suite (`tests/test_architectural_invariants.py`)
+### 3. Architectural Invariant Regression Suite (`tests/test_architectural_invariants.py`)
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph DBInv ["1. Data &amp; Pool Invariants"]
+        direction TB
+        SQL["allowed_roles ?| $N<br/>+ Empty-Role Short-Circuit"] --> Pool["Loop-Scoped Pools<br/>&amp; VectorSearchProvider"]
+    end
+    subgraph SecInv ["2. Schema &amp; AST Invariants"]
+        direction TB
+        Pyd["Pydantic V2<br/>(extra=forbid)"] --> AST["Zero eval/exec/compile<br/>or os.system/pickle"]
+    end
+    DBInv --> SecInv
+    style DBInv fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+    style SecInv fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
+```
 Pins the six platform invariants so silent regressions fail CI first:
 1. **In-DB RBAC pre-filter**: every retrieval SQL contains `allowed_roles ?| $N::text[]` with roles bound as parameters (never inlined); `schema.sql` GIN index uses default `jsonb_ops`.
 2. **Empty-role short-circuit**: `secure_search` / `hybrid_search` / `list_documents` / all four adapters return `[]` without touching the pool when roles resolve to nothing.
@@ -437,50 +285,59 @@ Pins the six platform invariants so silent regressions fail CI first:
 5. **Strict Pydantic V2**: `extra='forbid'` on all REST request/response models and all five MCP tool request models (422 on unknown fields).
 6. **Zero AST dynamic execution**: no builtin `eval`/`exec`/`compile`/`__import__` call sites and no `os.system`/`pickle.loads` attribute calls across `app/`, `agent/`, `libs/`, `sdlc_harness/`.
 
-### 3. Full-Stack OpenTelemetry (`app/observability.py`)
-- **Dual Exporters**: Integrates with Azure Application Insights (`APPLICATIONINSIGHTS_CONNECTION_STRING`) and OTLP gRPC (`http://localhost:4317`) for Jaeger Badger LSM storage.
-- **Ring Buffer Fallback**: Maintains a thread-safe 1,000-event in-memory ring buffer for metrics and traces, ensuring observability telemetry works even when external exporters are offline.
-
-### 4. Tri-Paradigm SDLC Workflow (`agent/workflow.py`)
-- **LangGraph Checkpointing & Container Restart Resilience**: `PostgresCheckpointSaver` extends LangGraph state persistence, committing graph steps to PostgreSQL (`sdlc_workflow_checkpoints`) with time-travel inspection and multi-worker resume support. If a container or worker restarts mid-investigation, `load_workflow_checkpoint()` restores `AgentState` without conversation loss, while Git feature branches (`feature/AGENT-<ID>-<slug>`) and in-memory `file_snapshots` reconnect file state seamlessly.
+### 4. Full-Stack OpenTelemetry (`app/observability.py`)
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
-    subgraph PreCrash ["1. In-Flight Turn"]
+    subgraph Trace ["1. Span &amp; Metric Capture"]
         direction TB
-        Node["LangGraph Transition"] --> Save["save_checkpoint()<br/>sdlc_workflow_checkpoints"]
-        Snap["Snapshot file state<br/>&amp; feature branch"]
+        App["FastAPI / RAG / MCP<br/>OTel Spans"] --> Ring["1,000-Event In-Memory<br/>Ring Buffer Fallback"]
     end
-    subgraph Event ["2. Pod Event"]
+    subgraph Export ["2. Dual Exporters"]
         direction TB
-        Crash["💥 Preemption / Restart<br/>Memory Erased"]
+        OTLP["OTLP gRPC (:4317)<br/>Jaeger Badger LSM"]
+        Azure["Azure App Insights<br/>(Connection String)"]
     end
-    subgraph PostResume ["3. Resume Lifecycle"]
-        direction TB
-        Boot["New Container Boots"] --> Load["load_workflow_checkpoint()<br/>SELECT latest by thread_id"]
-        Git["git checkout branch<br/>Verify file_snapshots"]
-        Load --> Resume["Resume from parent_checkpoint_id<br/>Zero State Loss"]
-        Git --> Resume
-    end
-    PreCrash --> Event --> PostResume
-    style PreCrash fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style Event fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
-    style PostResume fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+    Trace --> OTLP
+    Trace --> Azure
+    style Trace fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style Export fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
 ```
+- **Dual Exporters**: Integrates with Azure Application Insights (`APPLICATIONINSIGHTS_CONNECTION_STRING`) and OTLP gRPC (`http://localhost:4317`) for Jaeger Badger LSM storage.
+- **Ring Buffer Fallback**: Maintains a thread-safe 1,000-event in-memory ring buffer for metrics and traces, ensuring observability telemetry works even when external exporters are offline.
+
+### 5. Tri-Paradigm SDLC Workflow (`agent/workflow.py`)
+- **LangGraph Checkpointing & Container Restart Resilience**: `PostgresCheckpointSaver` extends LangGraph state persistence, committing graph steps to PostgreSQL (`sdlc_workflow_checkpoints`) with time-travel inspection and multi-worker resume support. If a container or worker restarts mid-investigation, `load_workflow_checkpoint()` restores `AgentState` without conversation loss, while Git feature branches (`feature/AGENT-<ID>-<slug>`) and in-memory `file_snapshots` reconnect file state seamlessly.
 - **CrewAI Role Specialization & Multi-Model Tiering**: Orchestrates specialized agents across tiered LLMs: `arch-synthesizer` (Staff Architect, `inherit` frontier reasoning model), `cross-model-judge` (Lead Security Auditor, Gemini Pro `pro`), and `test-triager` (SRE & Pytest Diagnostician, Gemini Flash `flash`). Operates via zero-overhead `native_pydantic` models by default, with `USE_CREWAI_SDK=true` dynamically activating upstream `crewai.Crew` orchestration.
 - **Hermes Agent Lifelong Learning & GRPO Trajectories**: Automatically distills verified successful patches into portable `SKILL.md` files in `.agent/skills/hermes-*/` for single-shot retrieval on future runs (`recall_relevant_skills`). Exports ShareGPT-formatted RL trajectories with Atropos GRPO step rewards calculated from judge scores penalized by repair attempts (`reward = max(0.0, score - 0.25 * repairs)`).
 - **Autonomous Governance (`never_ask_approval`)**: Executes unattended without blocking at interrupt approval cards; execution is constrained by `asyncio.wait_for()` timeouts with deterministic error classification.
 
-### 5. Defense-in-Depth Guardrails (`agent/guardrails.py`)
+### 6. Defense-in-Depth Guardrails (`agent/guardrails.py`)
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Static ["1. Code &amp; Secret Scan"]
+        direction TB
+        AST["PolicyEngine AST<br/>(STRIDE Mapping)"] --> Secret["Secret Regex Filter<br/>(Keys &amp; Tokens)"]
+    end
+    subgraph Runtime ["2. Output &amp; Blast Radius"]
+        direction TB
+        Ground["GroundingGuardrail<br/>([Doc: Title, Chunk N])"] --> Limit["Rate Limit (60/m)<br/>+ 8K/50K Token Cap"]
+    end
+    Static --> Runtime
+    style Static fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style Runtime fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+```
 - **PolicyEngine AST & STRIDE Threat Modeling**: Detects dangerous Python constructs (`exec`, `eval`, `__import__`, `subprocess` with `shell=True`, unauthorized path traversals) and maps security checks directly to STRIDE categories (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege) as required by Factory.ai Pillar 8.
 - **Secret Regex Filtering**: Automatically catches exposed API keys, private keys, and credential patterns.
 - **GroundingGuardrail**: Enforces the RAG Triad by requiring explicit source citations (`[Doc: <Title>, Chunk <Index>]`), checking that cited documents exist in authorized context, and mandating explicit admissions when context is silent.
 - **SlidingWindowRateLimiter & TokenCircuitBreaker**: Contains caller blast radius via 60 req/min sliding windows and limits token consumption to 8,000 tokens/request and 50,000 tokens/issue with an administrative emergency shutoff kill-switch (`is_blocked`).
 
-### 6. Shared Chat + Agent Memory Workflow (`app/memory/store.py`)
+### 7. Shared Chat + Agent Memory Workflow (`app/memory/store.py`)
 
 Free, self-hosted shared memory on the project's existing PostgreSQL + pgvector. Every message/fact is stored with an `allowed_roles` JSONB tag; every read is pre-filtered through the canonical `sanitize_roles_for_query()` and fails closed to empty when the caller resolves to zero roles.
 
+#### Diagram 7: Shared Chat & Agent Memory
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
