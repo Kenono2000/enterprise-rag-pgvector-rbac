@@ -12,3 +12,5 @@ SELECT * FROM public.token_consumption_ledger;
 SELECT * FROM public.token_managed_limits;
 
 SELECT version();
+
+---

@@ -157,6 +157,33 @@ python -m agent checkpoints "<thread_id>"                                # 7. In
 - **Hermetic Testing**: `conftest.py` pins deterministic environment (`OTEL_ENABLED=false`, blank `DATABASE_URL` / `GITHUB_TOKEN`, `SDLC_PUSH=false`, `USE_CREWAI_SDK=false`) *before* application import, ensuring CI/CI override safety with 12-factor precedence.
 - **Strict Warning Gate**: the suite is verified under `python -m pytest -W error` — zero warnings tolerated. The event-loop recreation invariant (`test_pool_is_recreated_across_event_loops`) creates and closes its loops explicitly (never `asyncio.run()`) so no `ProactorEventLoop` is left to garbage-collection finalization, which would leak `ResourceWarning: unclosed event loop` and trip the gate.
 - **Opt-in CrewAI**: Heavyweight SDK strictly opt-in via `USE_CREWAI_SDK=true`. Importing the real CrewAI SDK initiates disk probes under `~/.crewai` and uninvited background telemetry; the zero-overhead `native_pydantic` adapter executes pure in-memory Pydantic V2 models by default with sub-millisecond validation and zero side effects.
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Trigger ["1. Request Dispatch"]
+        direction TB
+        Call["SDLCCrewOrchestrator<br/>build_crewai_crew()"]
+    end
+    subgraph Decision ["2. Runtime Selection"]
+        direction TB
+        Check{"USE_CREWAI_SDK<br/>== 'true'?"}
+    end
+    subgraph DefaultPath ["3. native_pydantic (Default)"]
+        direction TB
+        Native["Zero Third-Party SDK<br/>Pure Pydantic v2 Models<br/>Instant Start &lt;1ms (RAM only)"]
+    end
+    subgraph HeavyPath ["4. crewai_sdk (Opt-in)"]
+        direction TB
+        SDK["Dynamic import crewai<br/>Autonomous Crew.kickoff()<br/>Platform Discovery &amp; Telemetry"]
+    end
+    Trigger --> Decision
+    Decision -->|"No (Default)"| DefaultPath
+    Decision -->|"Yes (Opt-in)"| HeavyPath
+    style Trigger fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style Decision fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style DefaultPath fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+    style HeavyPath fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+```
 
 ## 4. Identity & OAuth 2.0 PKCE Security (`app/auth/`)
 ```mermaid
@@ -368,6 +395,43 @@ flowchart LR
 **Zero-Trust Protections**:
 - **🛡️ RFC 9728 & RFC 8707**: Machine-readable Protected Resource Metadata discovery (`get_gateway_metadata`) declaring OAuth authorities, supported transports (`streamable-http`), reverse-proxy reflection headers (`Mcp-Method`, `Mcp-Name`), and fail-closed tool-level RBAC (`check_tool_permission`).
 - **🔒 AST Security**: Inspects syntax trees via `PolicyEngine.verify_ast` to block `eval()`, `exec()`, `compile()`, `__import__()`, dynamic reflection (`getattr` on `system`/`popen`), directory-traversal in `open()`, and `subprocess(shell=True)`.
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph PatchInput ["1. Proposed Patch"]
+        direction TB
+        Code["Code Diff / Patch Content"] --> Parse["ast.parse(code)"]
+    end
+    subgraph ASTChecks ["2. Syntax Tree Policy Gates"]
+        direction TB
+        EvalCheck{"Call node in<br/>eval/exec/compile/__import__?"}
+        GetattrCheck{"getattr() targeting<br/>system/popen/loads?"}
+        ShellCheck{"subprocess with<br/>shell=True?"}
+        PathCheck{"open() with directory<br/>traversal '../'?"}
+    end
+    subgraph Outcomes ["3. Audit Verdict"]
+        direction TB
+        Violate["Block Patch &amp;<br/>Record AST Violation"]
+        PassGate["Pass to Independent<br/>Judge &amp; Pytest Suite"]
+    end
+    Parse --> EvalCheck
+    Parse --> GetattrCheck
+    Parse --> ShellCheck
+    Parse --> PathCheck
+    EvalCheck -->|"Match"| Violate
+    GetattrCheck -->|"Match"| Violate
+    ShellCheck -->|"Match"| Violate
+    PathCheck -->|"Match"| Violate
+    EvalCheck -->|"Clear"| PassGate
+    GetattrCheck -->|"Clear"| PassGate
+    ShellCheck -->|"Clear"| PassGate
+    PathCheck -->|"Clear"| PassGate
+    style PatchInput fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style ASTChecks fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style Outcomes fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
+    style Violate fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
+    style PassGate fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+```
 - **⚡ Rate Limiting**: In-memory `SlidingWindowRateLimiter` enforces 60 req/min per caller identity via deque eviction, preventing automated scraping and agent loop storms with zero database roundtrips.
 - **💰 Token Controls**: Two-tiered budget limits via `TokenCircuitBreaker` (8,000 tokens/request, 50,000 tokens/issue) with an administrative emergency shutoff kill-switch (`is_blocked`).
 
