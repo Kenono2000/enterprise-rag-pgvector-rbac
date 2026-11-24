@@ -1,5 +1,5 @@
 # 🛡️ Enterprise Zero-Trust RAG & Autonomous SDLC
-**Navigation**: [1. Arch](#1-system-architecture-overview) | [Pillars](#architectural-pillars-overview) | [2. In-DB RBAC](#2-in-database-rbac-vector-storage-schemasql-appdb) | [3. Quickstart](#3-5-minute-quickstart-runtime-stack) | [4. Identity](#4-identity-oauth-20-pkce-security-appauth) | [5. Ingestion & RAG](#5-ingestion-pipeline-and-hybrid-rag-quality-scriptsingestpy-libs) | [6. Gateways & SDLC](#6-gateways-observability-autonomous-sdlc-app-agent) | [7. Multi-Cloud](#7-multi-cloud-strategy-runbook) | [8. AI Trends](#8-ai-trend-research-extended-thinking-budget) | [9. Incident Investigator](#9-incident-investigator-agent-7-step-agentic-roadmap)
+**Navigation**: [1. Arch](#1-system-architecture-overview) | [Pillars](#architectural-pillars-overview) | [2. In-DB RBAC](#2-in-database-rbac-vector-storage-schemasql-appdb) | [3. Quickstart](#3-5-minute-quickstart-runtime-stack) | [4. Identity](#4-identity-oauth-20-pkce-security-appauth) | [5. Ingestion & RAG](#5-ingestion-pipeline-and-hybrid-rag-quality-scriptsingestpy-libs) | [6. Gateways & SDLC](#6-gateways-observability-autonomous-sdlc-app-agent) | [7. Multi-Cloud](#7-multi-cloud-strategy-runbook)
 
 ## 1. System Architecture Overview
 ```mermaid
@@ -70,10 +70,8 @@ FROM document_chunks c JOIN documents d ON c.document_id = d.id
 WHERE d.allowed_roles ?| $2::text[] AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
 ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 ```
-### 🔧 Technical Implementation
-* **🎯 Zero Recall Starvation**: GIN Index + `hnsw.iterative_scan = 'relaxed_order'` eliminates ANN overfiltering on selective roles. Dynamic candidate depth scales per role cardinality: **80** for single role, **40** for dual, **20** for broad roles. `hnsw.ef_search` and `hnsw.max_scan_tuples` are configured per connection in `DatabaseManager.configure_iterative_scan()` rather than globally, so each request can apply the right scan budget at runtime.
 ### 🔧 Key RBAC & Storage Innovations
-* **🎯 Zero Recall Starvation**: GIN Index + `hnsw.iterative_scan = 'relaxed_order'` eliminates ANN overfiltering on selective roles. pgvector 0.8+ iterative scans retain filtered-out HNSW candidates in a `discarded` pairing heap and resume traversal in `hnsw.ef_search` batches until `hnsw.max_scan_tuples` (20000) or memory limits stop the scan — so high-selectivity `WHERE d.allowed_roles ?| $2::text[]` clauses no longer exhaust the top-k candidate list. Dynamic candidate depth scales per role cardinality: **80** for single role, **40** for dual, **20** for broad roles.
+* **🎯 Zero Recall Starvation**: GIN Index + `hnsw.iterative_scan = 'relaxed_order'` eliminates ANN overfiltering on selective roles. pgvector 0.8+ iterative scans retain filtered-out HNSW candidates in a `discarded` pairing heap and resume traversal in `hnsw.ef_search` batches until `hnsw.max_scan_tuples` (20000) or memory limits stop the scan — so high-selectivity `WHERE d.allowed_roles ?| $2::text[]` clauses no longer exhaust the top-k candidate list. Dynamic candidate depth scales per role cardinality: **80** for single role, **40** for dual, **20** for broad roles, configured per connection in `DatabaseManager.configure_iterative_scan()`.
 * **🔒 SQL Injection Protection**: Parameterized `$2::text[]` array with empty-role guard (returns `[]` before DB execution).
 * **🧹 Unified Role Sanitization (single source of truth)**: One canonical `sanitize_roles_for_query()` in `app/auth/role_mapper.py` is delegated to by every retrieval path — pgvector (`DatabaseManager`), the Azure / GCP / Databricks cloud adapters, and the REST `X-User-Roles` legacy-header paths in `app/main.py` and `app/api/rag.py` — so the role grammar cannot drift between engines. Only non-empty strings that are known application roles (`KNOWN_ROLES`) or valid identifiers survive; injection payloads, empty strings, and non-string claims are dropped and fail closed to `[]`. Pinned cross-engine by `tests/test_role_sanitization_contract.py` (24 tests).
 * **🗂️ RBAC GIN Operator Class**: `idx_documents_allowed_roles_gin` uses the default `jsonb_ops` GIN class (not `jsonb_path_ops`), because the key-existence operator `?|` is only served by `jsonb_ops` (`jsonb_path_ops` accelerates `@>`, `@?`, `@@` exclusively). The index is therefore genuinely Bitmap-index-accelerated for the role pre-filter.
@@ -530,10 +528,7 @@ async def run_autonomous_sdlc(workflow: LangGraphSDLCWorkflow, payload: dict) ->
         }
 ```
 
-> **⚡ Quick Summary**: The autonomous SDLC workflow operates under the `never_ask_approval` policy: it executes end-to-end without pausing for human-in-the-loop approvals, auto-classifies test timeouts with bounded execution (`SDLC_WEBHOOK_TIMEOUT_SECONDS`), and persists terminal checkpoints with full audit trails.
-
-## How the Autonomous SDLC Workflow Works
-
+> **⚡ Quick Summary**: The autonomous SDLC workflow operates under `never_ask_approval` (enforced at `app/main.py` via `asyncio.wait_for()` with `SDLC_WEBHOOK_TIMEOUT_SECONDS`, default 60s, and `approval_card: None`): it runs end-to-end without HITL gates, auto-classifies test timeouts (`SDLC_TEST_TIMEOUT_SECONDS`), and persists terminal checkpoints (`completed`, `rejected`, `timeout`, `error`) to PostgreSQL (`DATABASE_URL`).
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
@@ -568,68 +563,6 @@ flowchart LR
     style Decision fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
     style Outcome fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
 ```
-
-### Prerequisites
-
-> **⚠️ Prerequisites**: To use the autonomous SDLC workflow:
-> - Configure `DATABASE_URL` for PostgreSQL checkpoint persistence
-> - Set `SDLC_WEBHOOK_TIMEOUT_SECONDS` for webhook timeout (default 60s)
-> - The workflow operates in `never_ask_approval` mode - no HITL configuration needed
-
-### Step-by-Step Description
-
-1. **GitHub webhook POST** → `workflow.run(payload)` starts the SDLC workflow in autonomous mode
-
-2. **Workflow executes autonomously** (no HITL approval gates):
-   - ✅ Parses GitHub issue payload
-   - ✅ Creates feature branch
-   - ✅ Generates code patches
-   - ✅ Runs tests with configurable timeout (`SDLC_TEST_TIMEOUT_SECONDS`)
-   - ✅ Classifies test failures (timeout, compilation_error, assertion_failure)
-   - ✅ Judge verdict: PASS/FAIL with scoring
-   - ✅ All decisions automated - no human approval required
-
-3. **Workflow completes** with autonomous decision:
-   - ✅ **status: "completed"** - git ops execute automatically
-   - ✅ **status: "timeout"** - workflow timed out, no PR created
-   - ✅ **status: "error"** - workflow exception, no PR created
-
-4. **Results returned** to webhook caller:
-   - `status`: "completed" / "timeout" / "error"
-   - `approval_card`: `None` (no HITL in autonomous mode)
-   - `triage_summary`: failure classification if applicable
-   - `judge_verdict`: PASS/FAIL with score
-   - `branch`: feature branch name
-   - `pull_request_url`: if completed
-   - `policy_applied`: "never_ask_approval"
-
-5. **Checkpoint saved** autonomously with terminal status
-   - Enables crash resilience: workflow can resume from checkpoint later
-   - Provides audit trail of the autonomous decision
-   - No human decision trail needed (policy: never_ask_approval)
-
-### Key Policy Changes: Autonomous vs HITL
-
-| Aspect | Old HITL Approach | New Autonomous (`never_ask_approval`) |
-|--------|-------------------|--------------------------------------|
-| **Approval Required** | `requires_human_approval: True` for high-risk changes | ❌ **Never** - all decisions automated |
-| **Timeout Handling** | Could hang at `interrupt()` indefinitely | ✅ **Auto-timeout** via `asyncio.wait_for()` (configurable) |
-| **Test Timeouts** | May pause at HITL gate | ✅ **Classified as "timeout"**, workflow continues autonomously |
-| **Status on Timeout** | Unclear (stuck at interrupt) | ✅ Returns `"timeout"` status explicitly |
-| **Approval Card** | `requires_human_approval: True`, `status: "pending_human_approval"` | ❌ **None** - `approval_card: None` always |
-| **Human Decision** | Required via `/api/v1/approval/decision` | ❌ **Not needed** - policy: never ask user |
-| **Checkpoint Purpose** | Save state for human decision later | Save state for crash resilience + audit trail |
-| **Policy Configuration** | `require_hitl_for_high_risk=True/False` | `never_ask_approval: True` (set once, stays) |
-
-**Policy Enforcement**: The `never_ask_approval` policy is enforced at the webhook endpoint (`app/main.py`) - the `asyncio.wait_for()` timeout ensures the workflow never runs indefinitely, and the `approval_card` is always set to `{requires_human_approval: False}` regardless of internal workflow decisions.
-
-### Benefits of Autonomous Execution
-
-1. **No indefinite blocking**: Workflow never hangs waiting for human intervention
-2. **Deterministic SLA**: `SDLC_WEBHOOK_TIMEOUT_SECONDS` guarantees prompt response
-3. **State preservation**: PostgreSQL checkpoint persists terminal states and metrics
-4. **Audit trail**: Every patch, judge verdict, and error is tracked in checkpoint metadata
-5. **Zero overhead**: High-throughput automated triage and remediation on GitHub issue events
 
 ##### 2. CrewAI Multi-Tier Orchestrator (`agent/workflow.py`)
 ```python
@@ -737,42 +670,30 @@ flowchart LR
 Free, self-hosted shared memory on the project's existing PostgreSQL + pgvector. Every message/fact is stored with an `allowed_roles` JSONB tag; every read is pre-filtered through the canonical `sanitize_roles_for_query()` and fails closed to empty when the caller resolves to zero roles.
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#f0f9ff', 'primaryTextColor': '#0284c7', 'primaryBorderColor': '#0284c7', 'lineColor': '#64748b', 'secondaryColor': '#f0fdf4', 'tertiaryColor': '#fffbeb'}}}%%
-sequenceDiagram
-    autonumber
-    actor U as "Caller (engineer/admin/...)"
-    participant API as "FastAPI /api/v1/memory*"
-    participant GW as "FastMCP Gateway memory.*"
-    participant Store as "app/memory/store.py"
-    participant DB as "PostgreSQL + pgvector"
-    participant RBAC as "sanitize_roles_for_query()"
-
-    U->>API: POST /api/v1/memory/chat (message, roles)
-    API->>RBAC: sanitize roles (fail-closed to empty)
-    RBAC-->>API: clean roles or empty
-    alt roles empty
-        API-->>U: 403 / empty (no SQL touched)
-    else roles valid
-        API->>Store: create_thread / append_message
-        Store->>DB: INSERT thread + message (embedding vector, allowed_roles JSONB)
-        DB-->>Store: thread_id / message_id
-        Store-->>API: stored = true
-        API-->>U: 200 (thread_id, message_id)
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Gate ["1. Entry & RBAC Gate"]
+        direction TB
+        Caller["Caller<br/>(REST /api/v1/memory*<br/>or FastMCP memory.*)"] --> Sanitize["sanitize_roles_for_query()<br/>(Fail-closed)"]
+        Sanitize -->|"Empty roles"| Deny["403 / []<br/>(Zero SQL touched)"]
     end
-
-    U->>GW: memory_recall (query, roles)
-    GW->>RBAC: sanitize roles
-    RBAC-->>GW: clean roles or empty
-    alt roles empty
-        GW-->>U: empty memories and chat messages
-    else roles valid
-        GW->>Store: recall(query, roles, top_k, scope)
-        Store->>Store: _embed(query) (offline mock or provider embedding)
-        Store->>DB: SELECT memories, messages WHERE allowed_roles match roles
-        DB-->>Store: ranked rows
-        Store-->>GW: memories, chat messages, total
-        GW-->>U: JSON result string
+    subgraph Store ["2. Memory Store (app/memory/store.py)"]
+        direction TB
+        Write["Write: create_thread /<br/>append_message"]
+        Read["Recall: _embed(query)<br/>(Offline mock or provider)"]
     end
+    subgraph DB ["3. PostgreSQL + pgvector"]
+        direction TB
+        Insert["INSERT thread + message<br/>(halfvec + allowed_roles JSONB)"]
+        Select["SELECT WHERE allowed_roles ?| $N<br/>(GIN pre-filter + HNSW)"]
+    end
+    Sanitize -->|"Valid roles"| Write
+    Sanitize -->|"Valid roles"| Read
+    Write --> Insert
+    Read --> Select
+    style Gate fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    style Store fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
+    style DB fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
 ```
 
 **Key invariants enforced in this flow:**
@@ -813,117 +734,3 @@ flowchart LR
 | **`azure`** (Microsoft Azure) | Azure AI Search + Semantic Ranker | OData `allowed_roles/any(r: ...)` | Azure OpenAI `gpt-4o` + App Insights |
 | **`gcp`** (Google Cloud) | Vertex AI ScaNN + Ranking API | ScaNN `restricts` (`allowList`) | Gemini 1.5 Pro + Cloud Trace |
 | **`databricks`** (Databricks) | Mosaic AI Vector Search (Delta Sync) | Unity Catalog `filters_json` (`OR`) | Llama 3.1 70B + MLflow Tables |
-
-## 8. AI Trend Research & Extended Thinking Budget
-### 8.1 Frontier Reasoning Model Trends
-**Claude 3.7 Sonnet** (Anthropic, 2026) — First hybrid reasoning model on the market. Unifies standard and extended thinking in a single model with API-controlled thinking budget (up to 128K tokens). Achieves SWE-bench Verified SOTA (70.3% with scaffold, 63.7% vanilla) and TAU-bench SOTA for agentic workflows. Introduces Claude Code agentic coding tool for terminal-based software engineering delegation.
-**OpenAI o3-mini** (2025) — Cost-effective reasoning model optimized for STEM; now deprecated in the API in favor of newer reasoning variants.
-**pgvector 0.8+ Iterative Index Scans** — When a selective `WHERE` clause (e.g. the RBAC GIN pre-filter `allowed_roles ?| $2::text[]`) filters out ANN candidates, the HNSW scan no longer returns an under-filled top-k. Iterative scans retain filtered-out candidates in a discarded pairing heap and resume graph traversal in `hnsw.ef_search`-sized batches until `hnsw.max_scan_tuples` or memory limits stop the scan. Modes: `off` (legacy behavior), `strict_order` (preserve exact ANN ordering), `relaxed_order` (default; accept out-of-order candidates for recall). This project sets `relaxed_order` per connection via the pool `init` hook and per query, scaled by role cardinality (`hnsw.iterative_scan`/`hnsw.max_scan_tuples`/`hnsw.ef_search` are `PGC_USERSET` GUCs and must never be persisted in migration `DO` blocks).
-**halfvec 16-bit Quantization** — `halfvec(p)` stores IEEE 754 binary16 components (2 bytes each, `2*p + 8` bytes total) for ~50% RAM/storage savings over `vector(p)`; pgvector ≥ 0.7.0 supports it and HNSW accepts up to 4,000 half-precision dimensions (vs 2,000 float32), so 1536-d `text-embedding-3-small` indexes fit comfortably with headroom. Matryoshka 1536→768→256 truncation composes with it (cumulative ~75% footprint). NaN/Inf components must be sanitized before literal serialization (`DatabaseManager.format_halfvec`).
-**Model Context Protocol (MCP)** — Open standard for connecting AI applications to external systems, tools, and data sources. The **Streamable HTTP transport** (spec revision 2025-03-26) replaced the legacy HTTP+SSE pairing: clients POST JSON-RPC to the endpoint and may open a GET SSE stream for server-initiated messages; the spec also defines a **stateless, sessionless mode** (no `Mcp-Session-Id` required) for serverless/proxy-friendly deployments. Reverse-proxy conventions (FastMCP 4/5 and gateway implementations) reflect `Mcp-Method` (JSON-RPC method) and `Mcp-Name` (tool name/URI) HTTP headers to enable zero-DPI routing, rate-limiting, and ACL inspection at the proxy layer. **RFC 9728** (OAuth 2.0 Protected Resource Metadata) and **RFC 8707** (Resource Indicators for OAuth 2.0) underpin dynamic client discovery and token-audience binding. This project's FastMCP 4 gateway implements RFC 9728 Protected Resource Metadata, RFC 8707 tool-level RBAC, stateless Streamable HTTP transport, and `Mcp-Method`/`Mcp-Name` reflection in `app/main.py` middleware.
-### 8.2 Extended Thinking / Reasoning Budget (RAG Pipeline)
-Added `thinking_budget` parameter to `RAGQueryRequest` (`app/main.py`): optional integer 0–128000 tokens controlling reasoning depth for complex queries.
-- **`thinking_budget=0`** (default): Fast mode, default 4K context token budget.
-- **`thinking_budget>0`**: Extended reasoning mode scales context budget linearly (`4000 + budget/4`, capped at 32K tokens) so the Context Assembler retains more high-similarity chunks for deep reasoning.
-- **Observability**: Thinking budget is recorded in OpenTelemetry/Jaeger spans as `mode=<mode>:thinking-<budget>` and retrieval span queries are tagged with `[thinking_budget=N]`.
-### 8.3 Actionable Innovations for This Project
-| Innovation | Relevance | Implementation Status |
-| :--- | :--- | :--- |
-| pgvector 0.8+ iterative index scans (`hnsw.iterative_scan='relaxed_order'`, `hnsw.max_scan_tuples=20000`) | Eliminates top-k recall starvation / ANN overfiltering when selective RBAC GIN pre-filters shrink the HNSW candidate pool; resumed traversal from a discarded-candidate heap | ✅ `app/db/manager.py` `configure_iterative_scan()` (pool init + per-query, role-cardinality-scaled) + `schema.sql` HNSW indexes |
-| 16-bit halfvec(1536) quantization | ~50% vector RAM/storage savings (2 bytes/component vs 4), 75% cumulative with Matryoshka; HNSW max dim doubles to 4,000 | ✅ `embedding_halfvec` generated column + `idx_chunks_embedding_halfvec_hnsw` + `format_halfvec()` NaN/Inf sanitization |
-| Hybrid reasoning with thinking budget | Complex multi-hop RAG queries benefit from extended reasoning | ✅ Implemented in `app/main.py` + `app/rag/context.py` |
-| MCP Streamable HTTP transport & stateless mode (MCP 2025-03-26 spec) | Sessionless proxy-friendly agent tool access; `Mcp-Method`/`Mcp-Name` reflection headers enable zero-DPI reverse-proxy routing, rate-limiting, ACL inspection | ✅ FastMCP 4 gateway co-hosted on FastAPI at `/mcp` (catch-all Mount registered last + forwarded ASGI lifespan so `StreamableHTTPSessionManager` initializes); header reflection in `trace_http_requests` middleware; RFC 9728 metadata declares `stateless_mode_supported` |
-| Decoupled VectorSearchProvider protocols | Multi-cloud engine abstraction adhering to PEP 544/695 subtyping | ✅ Implemented in `app/db/protocols.py`, `app/db/adapters.py`, & `app/main.py` |
-| Shared fail-closed role sanitization | One strict `sanitize_roles_for_query()` contract (KNOWN_ROLES ∪ identifiers) as the single source of truth in `app/auth/role_mapper.py`, delegated to by pgvector + all 3 cloud adapters + both REST header paths; kills the latent `re`-import NameError and the six divergent per-path copies | ✅ `app/auth/role_mapper.py` (canonical), `app/db/manager.py` (delegation), cloud adapters, REST paths; regression-pinned in `tests/test_role_sanitization_contract.py` (24 tests) + `tests/test_architectural_invariants.py` + `tests/test_database_schema.py` |
-| Shared chat + agent memory (pgvector, zero new deps) | Free, self-hosted shared memory: threads + messages + agent facts with halfvec(1536) embeddings, RBAC-pre-filtered GIN/HNSW recall, exposed via FastMCP `memory.*` tools + `/api/v1/memory/*` REST + opt-in Streamlit sharing | ✅ `app/memory/store.py` + `app/memory/__init__.py`, `schema.sql` §5.10, `app/mcp/gateway.py` (`memory_chat`/`memory_recall`/`memory_store_fact`/`memory_list_threads`), `app/main.py` REST, `streamlit_app.py` opt-in share; hermetic suite `tests/test_shared_memory.py` (23 tests) |
-| LangGraph checkpointer resilience (UUIDv6 checkpoint chains, pending-write replay, `parent_checkpoint_id` time-travel) | Crash-resilient agent state-machine recovery and time-travel debugging | ✅ `PostgresCheckpointSaver` on `sdlc_workflow_checkpoints`; `PostgresSaver`/`BadgerSaver`/`BadgerLSMCheckpointSaver` aliases in `agent/workflow.py` (Badger names are compatibility aliases — no upstream LangGraph Badger checkpointer exists; Badger LSM is used for Jaeger OTel storage) |
-| RAG Triad observability (context relevance, faithfulness, answer relevance) | Detects hallucinations and retrieval drift | ✅ `app/rag/evaluator.py` `RAGTriadEvaluator` (offline deterministic scoring, PASS ≥ 0.70 / faithfulness 1.5× weight) + `GroundingGuardrail` + `ObservabilityManager.record_rag_triad()` OTel spans |
-| Agentic SDLC coding (Claude Code pattern) | Autonomous patch proposal, test, and repair | ✅ LangGraph + CrewAI + Hermes workflow in `agent/workflow.py` |
-| Incident investigator agent (KDnuggets 7-step roadmap) | Hand-built reason-act-observe loop, six read-only MCP tools, layered memory, orchestrator-workers, replay eval, deployment guardrails | ✅ `incident_agent/` package; 53-test suite in `tests/test_incident_investigator.py`; 30-case replay at 100% pass |
-| Strict Pydantic v2 UserClaims RBAC validation | Zero-trust typed claims layer on verified JWTs; `extra="forbid"` rejects unknown fields, normalizes roles/email, requires `sub`; prevents malformed or over-privileged claims reaching RBAC filters | ✅ `app/auth/claims.py` `UserClaims` model + `claims_from_payload()`; exported from `app/auth/__init__.py` |
-| Centralized FastAPI async pool sizing under Settings | `DB_POOL_MIN_SIZE`/`DB_POOL_MAX_SIZE`/`DB_POOL_COMMAND_TIMEOUT` governed by `app/config.Settings` via `get_db_pool_config()`; replaces hard-coded pool literals for environment-driven tuning | ✅ `app/config.py` `get_db_pool_config()` + `DB_POOL_*` settings |
-
-### 8.4 Daily Automation (Unattended SDLC Refinement)
-A recurring DSH scheduled task runs the full refinement loop **daily at 5:00 AM America/Chicago** (host timezone), delivering the Principal AI Platform Architect prompt into a fresh session rooted at this repository:
-
-* **Task**: `Daily Enterprise RAG Refinement & R&D` — id `schedule-94bcc368-a7fc-463d-9227-2a210f436b25`, status `active`.
-* **Timing**: `DTSTART;TZID=America/Chicago:20261120T050000` + `RRULE:FREQ=DAILY;BYHOUR=5;BYMINUTE=0` (first occurrence 2026-11-20 05:00 CDT). Equivalent five-field Cron: `0 5 * * *` with explicit `America/Chicago` zone.
-* **Delivery**: native DSH scheduler (`schedule_create`/`schedule_list`/`schedule_edit`/`schedule_view`); each occurrence opens a **new session** (target `new`) with working directory `C:\src\enterprise-rag-pgvector-rbac` and the standard agent preset. Restart preserves committed occurrences; the task ends after its final delivery if the rule is ever bounded.
-* **Scope**: daily AI R&D research (pgvector iterative scans/halfvec, stateless Streamable HTTP MCP, multi-agent SDLC frameworks), architectural audit, zero-regression enhancements, `python -m pytest -q` (196 collected: 196 pass, 0 skipped; 0 warnings), README synchronization with abyssium-studio lint/build verification, and fast-forward merge of clean changes into `main`.
-* **Manage**: view/edit/cancel from the DSH Automations dashboard or the `schedule_view` / `schedule_edit` / `schedule_list` tools.
-
-## 9. Incident Investigator Agent (7-Step Agentic Roadmap)
-A self-study implementation of the KDnuggets 7-step agentic-system-design roadmap (Bala Priya C): build an **incident investigator agent** that finds the root cause of production alerts, learning how agents fail before designing controls for those failures. The whole project lives in `incident_agent/` and is graded by `tests/test_incident_investigator.py` (53 tests) plus a 30-case replay suite.
-```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
-flowchart LR
-    subgraph S1 ["1. Workflow"]
-        direction TB
-        Hook["Webhook<br/>HMAC verify"] --> Triage["Fixed triage<br/>pipeline"]
-        Triage --> Mis{"Misjudged?"}
-        Mis -->|"no: resolved"| Done1["Fixed pipeline<br/>resolves alert"]
-    end
-    subgraph S2 ["2. Loop"]
-        direction TB
-        Loop["Reason-Act-Observe<br/>loop (12-step cap)"] --> Trace["Trace log"]
-    end
-    subgraph S3 ["3-4. Tools and Memory"]
-        direction TB
-        Tools["6 read-only<br/>MCP tools"] --> Mem["Scratchpad +<br/>SQLite store"]
-    end
-    subgraph S5 ["5. Orchestrator"]
-        direction TB
-        Orch["Orchestrator"] --> Logs["Logs<br/>analyst"]
-        Orch --> Mets["Metrics<br/>analyst"]
-        Orch --> Chg["Changes<br/>analyst"]
-    end
-    subgraph S67 ["6-7. Eval and Guard"]
-        direction TB
-        Eval["30-case replay<br/>x3 runs"] --> Guard["Budgets +<br/>approval gate"]
-    end
-    Mis -->|"yes: escalate"| Loop
-    Loop --> Tools
-    Orch --> Tools
-    Eval --> Loop
-    Guard --> Loop
-    style S1 fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style S2 fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
-    style S3 fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
-    style S5 fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
-    style S67 fill:#fdf4ff,stroke:#c026d3,stroke-width:1.5px
-```
-### 9.1 The Seven Steps Mapped to Code
-| Step | Roadmap Concept | Project Addition | Where |
-| :---: | :--- | :--- | :--- |
-| 1 | Workflow vs. agent (autonomy spectrum) | 10 synthetic incidents + fixed triage pipeline that notes where it misjudges | `incident_agent/loop.py::fixed_triage_pipeline` |
-| 2 | Reasoning-action loop | Hand-built reason-act-observe loop, 12-step cap, trace logging | `incident_agent/loop.py::ReasonActLoop` |
-| 3 | Tool design as contracts | Six read-only tools behind a FastMCP server | `incident_agent/tools.py`, `incident_agent/mcp_server.py` |
-| 4 | Memory (working/session/long-term) | Scratchpad, output compaction, SQLite solved-incident store | `incident_agent/memory.py` |
-| 5 | Multi-agent coordination | Orchestrator + 3 parallel analysts (logs/metrics/changes) with explicit briefs | `incident_agent/orchestrator.py` |
-| 6 | Evaluation | 30-incident replay suite x3 runs, 4-dimension grading, scoreboard + failure taxonomy | `incident_agent/eval.py` |
-| 7 | Deployment guardrails | Step/time/token budgets, least-privilege read-only tools, approval-gated remediation, webhook runs | `incident_agent/guardrails.py`, `incident_agent/runner.py` |
-
-### 9.2 Key Design Decisions
-* **Failure modes controlled before the first run**: malformed arguments get actionable errors (registry names the expected parameters); repeated calls trip a per-tool repeat guard; early answers are impossible (the loop only stops on corroborated confidence ≥ 0.85); runaway loops are bounded by the 12-step cap and a token budget.
-* **Simplest shape that works**: a fixed deterministic triage pipeline runs first; only when it misjudges (deploy correlation needed, or multi-change disambiguation) does the run escalate to the costlier orchestrator-workers path — mirroring the autonomy spectrum.
-* **Temporal deploy/config correlation**: change candidates are scored by proximity to alert onset (≤15 min → 0.9), so the flag toggle minutes before the break outranks a deploy hours old. This is the core incident-investigation reasoning, encoded deterministically.
-* **Least privilege**: the deployed toolset is read-only; remediation (rollback/flag-flip/scale) is a separate approval-gated action requiring an `oncall-lead` sign-off, never a default tool.
-* **Hermetic by construction**: the synthetic corpus is anchored to a fixed base time (`BASE_TIME`), the SQLite store defaults to `data/` (gitignored, env-overridable via `INCIDENT_MEMORY_DB`), and no network or LLM calls are made — mirroring the repository's offline-test convention.
-
-### 9.3 Replay Evaluation Scoreboard
-The 30-case replay suite (10 seeded incidents x 3 deterministic permutations) runs 3 times per case and grades four dimensions. Current results (pinned by `test_replay_evaluator_full_suite_passes`):
-| Dimension | Pass Rate |
-| :--- | :---: |
-| Tool selection (changes + logs queried) | 1.000 |
-| Arguments (all dispatches valid) | 1.000 |
-| Final answer (named change == ground truth) | 1.000 |
-| Trajectory (within step cap, no stuck loops) | 1.000 |
-| **Overall** | **1.000** |
-
-### 9.4 Running It
-```powershell
-python -m incident_agent.mcp_server --transport streamable-http --port 8001   # Six read-only incident tools over FastMCP
-python -m pytest tests/test_incident_investigator.py -v                       # 53 hermetic tests
-```
-* **Webhook shadow mode**: `handle_alert_webhook()` verifies the HMAC signature, parses the alert, and runs the investigation alongside on-call engineers; remediation stays approval-gated until the rollout reaches assist mode.
-* **Rollout path**: shadow mode (observe alongside on-call) → assist mode (suggest root cause + gated remediation) → wider use, with the replay suite as the CI eval gate.
