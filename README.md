@@ -1,5 +1,5 @@
 # 🛡️ Enterprise Zero-Trust RAG & Autonomous SDLC
-**Navigation**: [1. Arch](#1-system-architecture-overview) | [Pillars](#architectural-pillars-overview) | [2. In-DB RBAC](#2-in-database-rbac-vector-storage-schemasql-appdb) | [3. Quickstart](#3-5-minute-quickstart-runtime-stack) | [4. Identity](#4-identity-oauth-20-pkce-security-appauth) | [5. Ingestion & RAG](#5-ingestion-pipeline-and-hybrid-rag-quality-scriptsingestpy-libs) | [6. Gateways & SDLC](#6-gateways-observability-autonomous-sdlc-app-agent) | [7. Multi-Cloud](#7-multi-cloud-strategy-runbook)
+**Navigation**: [1. Arch](#1-system-architecture-overview) | [Pillars](#architectural-pillars-overview) | [2. In-DB RBAC](#2-in-database-rbac-vector-storage-schemasql-appdb) | [4. Identity](#4-identity-oauth-20-pkce-security-appauth) | [5. Ingestion & RAG](#5-ingestion-pipeline-and-hybrid-rag-quality-scriptsingestpy-libs) | [6. Gateways & SDLC](#6-gateways-observability-autonomous-sdlc-app-agent)
 
 ## 1. System Architecture Overview
 ```mermaid
@@ -110,77 +110,6 @@ SELECT d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
 FROM document_chunks c JOIN documents d ON c.document_id = d.id
 WHERE d.allowed_roles ?| $2::text[] AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
 ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
-```
-
-## 3. 5-Minute Quickstart & Runtime Stack
-```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
-flowchart LR
-    subgraph DevBootstrap ["1. Bootstrap and Verify"]
-        direction TB
-        Venv["Install .venv and Deps"] --> Pytest["Run 196 Pytest Tests<br/>(196 pass, 0 skipped)"]
-    end
-    subgraph Containers ["2. Docker Infrastructure"]
-        direction TB
-        PG16["PG16 + pgvector (:5432)"] --> Jaeger["Jaeger Badger (:16686)"]
-    end
-    subgraph Services ["3. App Runtime"]
-        direction TB
-        FastAPI["FastAPI (:8000) and FastMCP"] --> Streamlit["Streamlit UI (:8501)"]
-    end
-    DevBootstrap --> Containers
-    Containers --> Services
-    style DevBootstrap fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style Containers fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
-    style Services fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
-```
-```powershell
-git clone https://github.com/Kenono2000/enterprise-rag-pgvector-rbac.git && cd enterprise-rag-pgvector-rbac
-python -m venv .venv && .\.venv\Scripts\Activate.ps1 && python -m pip install -r requirements.txt
-python -m pytest -v                                                     # 1. Run full test suite (196 collected: 196 pass, 0 skipped; 0 warnings)
-docker compose up -d && psql -U postgres -d enterprise_rag -f schema.sql # 2. Start PG16 + pgvector & Jaeger Badger
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload       # 3. Launch FastAPI Backend (:8000)
-python -m streamlit run streamlit_app.py --server.port 8501              # 4. Launch Streamlit UI (:8501)
-python -m app.mcp --transport http                                       # 5. Launch local co-hosted FastMCP Gateway (development only)
-python -m agent status                                                   # 6. Run Hermes + CrewAI + LangGraph SDLC CLI
-python -m agent checkpoints "<thread_id>"                                # 7. Inspect Time-Travel Checkpoint Lineage
-```
-### 🚀 Runtime Environment
-**Local Endpoints**:
-- Streamlit UI (`http://localhost:8501`) · Swagger Docs (`http://localhost:8000/docs`) · FastMCP 4 Streamable HTTP Gateway (`http://localhost:8001/mcp`, deployed as `enterprise-rag-gateway`) · SSE Stream (`/api/v1/query/stream`) · Document Catalog (`/api/v1/documents`) · Health Probes (`/healthz`, `/readyz`) · Token Budget Controls (`/api/v1/tokens/usage`, `/api/v1/tokens/limit`) · Telemetry (`/api/v1/metrics/observability`) · Jaeger UI (`http://localhost:16686`) · Local co-hosted gateway for development only (`http://localhost:8000/mcp` via `python -m app.mcp --transport http`)
-
-**Key Optimizations**:
-* **Loop-Scoped Async Concurrency**: `DatabaseManager` and `get_openai_client()` scope connection pools and HTTP clients to `asyncio.get_running_loop()`. Because Streamlit executes user script reruns inside separate worker threads with transient event loops, caching connection pools globally causes `RuntimeError: Event loop is closed` when subsequent requests access a dead loop. Binding singletons per active running loop automatically evicts stale pools and re-creates clean pools on loop turnover.
-- **Centralized Pool Sizing Under Settings**: `DB_POOL_MIN_SIZE` (default 5), `DB_POOL_MAX_SIZE` (default 20), `DB_POOL_COMMAND_TIMEOUT` (default 60) configured via `app/config.Settings` and exposed through `get_db_pool_config()` — replaces hard-coded `min_size=1, max_size=5` literals so pool sizing is centrally governed by environment.
-- **Hermetic Testing**: `conftest.py` pins deterministic environment (`OTEL_ENABLED=false`, blank `DATABASE_URL` / `GITHUB_TOKEN`, `SDLC_PUSH=false`, `USE_CREWAI_SDK=false`) *before* application import, ensuring CI/CI override safety with 12-factor precedence.
-- **Strict Warning Gate**: the suite is verified under `python -m pytest -W error` — zero warnings tolerated. The event-loop recreation invariant (`test_pool_is_recreated_across_event_loops`) creates and closes its loops explicitly (never `asyncio.run()`) so no `ProactorEventLoop` is left to garbage-collection finalization, which would leak `ResourceWarning: unclosed event loop` and trip the gate.
-- **Opt-in CrewAI**: Heavyweight SDK strictly opt-in via `USE_CREWAI_SDK=true`. Importing the real CrewAI SDK initiates disk probes under `~/.crewai` and uninvited background telemetry; the zero-overhead `native_pydantic` adapter executes pure in-memory Pydantic V2 models by default with sub-millisecond validation and zero side effects.
-```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
-flowchart LR
-    subgraph Trigger ["1. Request Dispatch"]
-        direction TB
-        Call["SDLCCrewOrchestrator<br/>build_crewai_crew()"]
-    end
-    subgraph Decision ["2. Runtime Selection"]
-        direction TB
-        Check{"USE_CREWAI_SDK<br/>== 'true'?"}
-    end
-    subgraph DefaultPath ["3. native_pydantic (Default)"]
-        direction TB
-        Native["Zero Third-Party SDK<br/>Pure Pydantic v2 Models<br/>Instant Start &lt;1ms (RAM only)"]
-    end
-    subgraph HeavyPath ["4. crewai_sdk (Opt-in)"]
-        direction TB
-        SDK["Dynamic import crewai<br/>Autonomous Crew.kickoff()<br/>Platform Discovery &amp; Telemetry"]
-    end
-    Trigger --> Decision
-    Decision -->|"No (Default)"| DefaultPath
-    Decision -->|"Yes (Opt-in)"| HeavyPath
-    style Trigger fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style Decision fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
-    style DefaultPath fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
-    style HeavyPath fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
 ```
 
 ## 4. Identity & OAuth 2.0 PKCE Security (`app/auth/`)
@@ -487,120 +416,7 @@ flowchart LR
 
 **Key Innovation**: Opt-in concurrent verification (`SDLC_PARALLEL_VERIFY=true`) enables parallel Auditor/Triager execution after security gate passes.
 
-#### Code Examples & Implementation Details
-##### 1. Autonomous SDLC Workflow (Never Ask Approval)
-```python
-# Autonomous SDLC workflow - never pauses for human approval
-# Policy: never_ask_approval - all decisions automated
-
-async def run_autonomous_sdlc(workflow: LangGraphSDLCWorkflow, payload: dict) -> dict:
-    """Run SDLC workflow in autonomous mode without HITL interruption."""
-    try:
-        result = await asyncio.wait_for(
-            workflow.run(payload),
-            timeout=60.0,  # Configurable timeout via SDLC_WEBHOOK_TIMEOUT_SECONDS
-        )
-        return {
-            "status": result.get("status", "completed"),
-            "issue_id": result.get("issue_id"),
-            "branch": result.get("branch"),
-            "pushed": result.get("pushed", False),
-            "pull_request_url": result.get("pull_request_url"),
-            "policy_applied": "never_ask_approval",
-            "approval_card": None,  # No HITL approval card in autonomous mode
-            "triage_summary": result.get("triage_summary"),
-            "judge_verdict": result.get("judge_verdict"),
-        }
-    except asyncio.TimeoutError:
-        return {
-            "status": "timeout",
-            "message": "SDLC workflow timed out",
-            "policy": "never_ask_approval",
-            "suggestion": "Increase timeout or simplify the issue",
-            "approval_card": None,
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e),
-            "policy": "never_ask_approval",
-            "approval_card": None,
-        }
-```
-
-> **⚡ Quick Summary**: The autonomous SDLC workflow operates under `never_ask_approval` (enforced at `app/main.py` via `asyncio.wait_for()` with `SDLC_WEBHOOK_TIMEOUT_SECONDS`, default 60s, and `approval_card: None`): it runs end-to-end without HITL gates, auto-classifies test timeouts (`SDLC_TEST_TIMEOUT_SECONDS`), and persists terminal checkpoints (`completed`, `rejected`, `timeout`, `error`) to PostgreSQL (`DATABASE_URL`).
-```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
-flowchart LR
-    subgraph Trigger ["1. Webhook Intake"]
-        direction TB
-        A["GitHub webhook POST<br/>to workflow.run"] --> B["Apply policy:<br/>never_ask_approval"]
-    end
-    subgraph Execution ["2. Autonomous SDLC Pipeline"]
-        direction TB
-        B --> C["Patch Generation<br/>& AST Security Audit"]
-        C --> D["Automated Test Run<br/>& Timeout Watchdog"]
-    end
-    subgraph Decision ["3. Autonomous Evaluation"]
-        direction TB
-        D --> E["Cross-Model Judge<br/>Verdict: PASS / FAIL"]
-        E --> Cond{"Judge score &gt;= 0.70<br/>and tests pass?"}
-    end
-    subgraph Outcome ["4. Terminal Outcome"]
-        direction TB
-        Cond -->|"Yes"| F["status: completed<br/>Git commit, push, PR"]
-        Cond -->|"No / Error"| G["status: rejected / error<br/>Workflow stops (no PR)"]
-        D -->|"Timeout"| H["status: timeout<br/>Bounded watchdog (no PR)"]
-        F --> I["Terminal checkpoint saved<br/>to PostgreSQL"]
-        G --> I
-        H --> I
-    end
-    Trigger --> Execution
-    Execution --> Decision
-    Decision --> Outcome
-    style Trigger fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style Execution fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
-    style Decision fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
-    style Outcome fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
-```
-
-##### 2. CrewAI Multi-Tier Orchestrator (`agent/workflow.py`)
-```python
-# Tiered agent topology: frontier reasoning (inherit), AST audit (pro), fast test triage (flash)
-ARCHITECT = CrewAgentSpec(name="arch-synthesizer", role="Principal Architect", model_tier="inherit")
-AUDITOR = CrewAgentSpec(name="cross-model-judge", role="AST Security Judge", model_tier="pro")
-TRIAGER = CrewAgentSpec(name="test-triager", role="Pytest Diagnostician", model_tier="flash")
-
-def get_crew_runtime() -> dict:
-    if os.getenv("USE_CREWAI_SDK", "false").lower() == "true":
-        return {"runtime": "crewai_sdk", "crew": Crew(agents=[...])}
-    return {"runtime": "native_pydantic", "agents": [ARCHITECT, AUDITOR, TRIAGER]} # Zero-overhead default
-```
-##### 3. Hermes Lifelong Learning & RL Trajectories (`agent/workflow.py`)
-```python
-# Distills verified patches into reusable SKILL.md files & computes Atropos GRPO reward
-def export_rl_trajectory(issue_id: str, patch: str, judge_score: float, repairs: int) -> dict:
-    reward = round(max(0.0, judge_score - (repairs * 0.25)), 3) # Penalize repair cycles
-    return {"format": "sharegpt", "issue_id": issue_id, "reward": reward, "patch": patch}
-```
-##### 4. Defense-in-Depth Guardrails (`agent/guardrails.py`)
-```python
-# Static AST security policy & RAG Triad grounding citation validator
-class PolicyEngine:
-    @classmethod
-    def verify_ast(cls, code: str) -> List[str]:
-        tree = ast.parse(code)
-        return [f"Blocked: {n.func.id}()" for n in ast.walk(tree)
-                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("exec", "eval", "__import__", "compile")]
-
-class GroundingGuardrail:
-    @classmethod
-    def verify_grounding(cls, answer: str) -> bool:
-        return bool(re.search(r"\[Doc:\s*[^,]+,\s*Chunk\s*\d+\]", answer)) # Enforces source grounding
-```
-
-### Deep-Dive: Code Breakdown & Architecture Insights
-#### 1. Zero-Trust FastMCP Gateway (`app/mcp/gateway.py`)
+### 1. Zero-Trust FastMCP Gateway (`app/mcp/gateway.py`)
 - **Blast Radius Controls**: Configures module-level `SlidingWindowRateLimiter` (default 60 req/min per caller) and `TokenCircuitBreaker` (8,000 tokens/request, 50,000 tokens/issue) to protect downstream LLMs.
 - **Strict Pydantic Schemas (`extra="forbid"`)**: Every tool request (`MCPSearchRequest`, `MCPPatchRequest`, `MCPSDLCCrewRequest`, `MCPHermesSkillRequest`, `MCPListDocumentsRequest`, `MCPAutonomyMaturityRequest`) explicitly rejects unknown fields.
 - **Fail-Closed RBAC (`check_tool_permission`)**: Maps tools to required roles (`TOOL_REQUIRED_ROLES`). If a token is authenticated but has zero claims, it is **denied** for restricted tools, preventing confused deputy attacks.
@@ -608,11 +424,11 @@ class GroundingGuardrail:
 - **Centralized Multi-Cloud Dispatch**: `search_sdlc_context` resolves `RETRIEVAL_BACKEND` through `get_vector_search_adapter()` (structural `VectorSearchProvider` subtyping) instead of duplicated per-provider conditional branches; Azure/GCP/Databricks adapters lazy-import their hybrid search functions inside `.search()` to preserve test-mock patching boundaries.
 - **FastAPI Co-Hosted Mount (`app/main.py`)**: The main app still mounts the shared MCP gateway at `/mcp` for local co-hosted development via `mcp.http_app(path="/mcp")` mounted at `"/"` **after every REST route** (Starlette matches in registration order, so the catch-all Mount must be last or it shadows `/api/v1/*`). The parent `lifespan` enters `mcp_http_app.router.lifespan_context` so FastMCP's `StreamableHTTPSessionManager` task group initializes — a plain `app.mount("/mcp", http_app())` both mis-routes the endpoint to `/mcp/mcp` (bare `/mcp` 307-redirects to a 404) and skips the sub-app lifespan ("Task group is not initialized", HTTP 500), which MCP hosts surface as a 30s connection timeout. Pinned by `tests/test_mcp_auth.py::TestFastMcpHttpMount`. The gateway is installed separately via `requirements-gateway.txt` so the CrewAI app install path stays free of the FastMCP dependency surface.
 
-#### 2. Managed Token Budget & Administrative Shutoff API (`app/main.py`)
+### 2. Managed Token Budget & Administrative Shutoff API (`app/main.py`)
 - **Database-Backed Ledgers**: Tracks every token consumption event via `token_consumption_ledger` and enforces limits through `token_managed_limits`.
 - **Kill-Switching**: Allows administrators or authorized engineers to toggle `enforce_limit` or trip the emergency `is_blocked` kill-switch instantly via REST endpoints (`/api/v1/tokens/limit`) or the MCP `policy://sdlc-budget` resource.
 
-#### 2a. Architectural Invariant Regression Suite (`tests/test_architectural_invariants.py`)
+### 2a. Architectural Invariant Regression Suite (`tests/test_architectural_invariants.py`)
 Pins the six platform invariants so silent regressions fail CI first:
 1. **In-DB RBAC pre-filter**: every retrieval SQL contains `allowed_roles ?| $N::text[]` with roles bound as parameters (never inlined); `schema.sql` GIN index uses default `jsonb_ops`.
 2. **Empty-role short-circuit**: `secure_search` / `hybrid_search` / `list_documents` / all four adapters return `[]` without touching the pool when roles resolve to nothing.
@@ -621,11 +437,11 @@ Pins the six platform invariants so silent regressions fail CI first:
 5. **Strict Pydantic V2**: `extra='forbid'` on all REST request/response models and all five MCP tool request models (422 on unknown fields).
 6. **Zero AST dynamic execution**: no builtin `eval`/`exec`/`compile`/`__import__` call sites and no `os.system`/`pickle.loads` attribute calls across `app/`, `agent/`, `libs/`, `sdlc_harness/`.
 
-#### 3. Full-Stack OpenTelemetry (`app/observability.py`)
+### 3. Full-Stack OpenTelemetry (`app/observability.py`)
 - **Dual Exporters**: Integrates with Azure Application Insights (`APPLICATIONINSIGHTS_CONNECTION_STRING`) and OTLP gRPC (`http://localhost:4317`) for Jaeger Badger LSM storage.
 - **Ring Buffer Fallback**: Maintains a thread-safe 1,000-event in-memory ring buffer for metrics and traces, ensuring observability telemetry works even when external exporters are offline.
 
-#### 4. Tri-Paradigm SDLC Workflow (`agent/workflow.py`)
+### 4. Tri-Paradigm SDLC Workflow (`agent/workflow.py`)
 - **LangGraph Checkpointing & Container Restart Resilience**: `PostgresCheckpointSaver` extends LangGraph state persistence, committing graph steps to PostgreSQL (`sdlc_workflow_checkpoints`) with time-travel inspection and multi-worker resume support. If a container or worker restarts mid-investigation, `load_workflow_checkpoint()` restores `AgentState` without conversation loss, while Git feature branches (`feature/AGENT-<ID>-<slug>`) and in-memory `file_snapshots` reconnect file state seamlessly.
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
@@ -655,17 +471,13 @@ flowchart LR
 - **Hermes Agent Lifelong Learning & GRPO Trajectories**: Automatically distills verified successful patches into portable `SKILL.md` files in `.agent/skills/hermes-*/` for single-shot retrieval on future runs (`recall_relevant_skills`). Exports ShareGPT-formatted RL trajectories with Atropos GRPO step rewards calculated from judge scores penalized by repair attempts (`reward = max(0.0, score - 0.25 * repairs)`).
 - **Autonomous Governance (`never_ask_approval`)**: Executes unattended without blocking at interrupt approval cards; execution is constrained by `asyncio.wait_for()` timeouts with deterministic error classification.
 
-#### 5. Defense-in-Depth Guardrails (`agent/guardrails.py`)
+### 5. Defense-in-Depth Guardrails (`agent/guardrails.py`)
 - **PolicyEngine AST & STRIDE Threat Modeling**: Detects dangerous Python constructs (`exec`, `eval`, `__import__`, `subprocess` with `shell=True`, unauthorized path traversals) and maps security checks directly to STRIDE categories (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege) as required by Factory.ai Pillar 8.
 - **Secret Regex Filtering**: Automatically catches exposed API keys, private keys, and credential patterns.
 - **GroundingGuardrail**: Enforces the RAG Triad by requiring explicit source citations (`[Doc: <Title>, Chunk <Index>]`), checking that cited documents exist in authorized context, and mandating explicit admissions when context is silent.
 - **SlidingWindowRateLimiter & TokenCircuitBreaker**: Contains caller blast radius via 60 req/min sliding windows and limits token consumption to 8,000 tokens/request and 50,000 tokens/issue with an administrative emergency shutoff kill-switch (`is_blocked`).
 
-#### 6. Factory.ai Autonomy Maturity Model (AMM) Evaluator
-- **Eight Technical Pillars Scorecard**: Built-in automated evaluator (`AutonomyMaturityEvaluator.evaluate_repository`) assessing the repository against Style & Validation, Build System, Testing, Documentation, Dev Environment, Code Quality, Observability, and Security & Governance.
-- **Autonomous Maturity Level**: Measures repository status against Factory.ai thresholds (L1: Functional 5 pts, L2: Documented 19 pts, L3: Standardized 36 pts minimum production bar, L4: Optimized 60 pts, L5: Software Factory 100 pts). The repository scores **106/100 (Level 5 Software Factory)**, clearing the production floor and meeting agent-readiness standards.
-
-#### 7. Shared Chat + Agent Memory Workflow (`app/memory/store.py`)
+### 6. Shared Chat + Agent Memory Workflow (`app/memory/store.py`)
 
 Free, self-hosted shared memory on the project's existing PostgreSQL + pgvector. Every message/fact is stored with an `allowed_roles` JSONB tag; every read is pre-filtered through the canonical `sanitize_roles_for_query()` and fails closed to empty when the caller resolves to zero roles.
 
@@ -702,35 +514,3 @@ flowchart LR
 3. **Embeddings offline by default.** `_mock_embedding()` (deterministic SHA-256) runs when no provider key is configured — no billable API calls.
 4. **Session GUCs, not persisted.** `hnsw.iterative_scan` / `max_scan_tuples` / `ef_search` are applied per-connection at runtime (`DatabaseManager.configure_iterative_scan`), never in migration `DO` blocks.
 5. **Streamlit is opt-in.** The "🧠 Share to team memory" toggle is off by default; when on, exchanges are appended to a role-governed shared thread and recalled into the advisor prompt.
-
-## 7. Multi-Cloud Strategy & Runbook
-* **Unified `VectorSearchProvider` Protocol & Factory Pattern**: Decoupled multi-cloud retrieval implementations via structural subtyping protocols ([`app/db/protocols.py`](file:///D:/src/enterprise-rag-pgvector-rbac/app/db/protocols.py)) and concrete adapters ([`app/db/adapters.py`](file:///D:/src/enterprise-rag-pgvector-rbac/app/db/adapters.py): `PgvectorSearchAdapter`, `AzureSearchAdapter`, `GCPSearchAdapter`, `DatabricksSearchAdapter`). The unified `get_vector_search_adapter()` factory is the single resolution path for `RETRIEVAL_BACKEND` in `app/main.py` (`query_rag`, `query_rag_stream`), `app/mcp/gateway.py` (`search_sdlc_context`), and Streamlit — replacing duplicated per-provider if/elif branches — and enforces the invariant that an empty `user_roles` list immediately short-circuits to an empty result set without executing downstream network or database calls.
-* **Zero-Downtime Cutover & Failover**: Switch `RETRIEVAL_BACKEND` in `.env` (`pgvector` | `azure` | `gcp` | `databricks`) or run `python scripts/migrate_multicloud.py --target all`.
-* **Incident Runbook**: On DB latency alerts in Jaeger (`http://localhost:16686`), fail over `RETRIEVAL_BACKEND` in `.env`; on JWKS key rotation, restart the auth worker to flush `JWKSClient`; verify Badger LSM persistence via `docker compose restart jaeger`. If role-filtered queries regress, confirm `idx_documents_allowed_roles_gin` is a `jsonb_ops` GIN index (serves `?|`) and that EXPLAIN shows a Bitmap Index Scan rather than a sequential scan.
-```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
-flowchart LR
-    subgraph Router ["1. Backend Toggle"]
-        direction TB
-        Toggle["RETRIEVAL_BACKEND<br/>(.env / Zero Downtime)"]
-    end
-    subgraph Engines ["2. Cloud Vector Engines"]
-        direction TB
-        LocalAndAz["pgvector (GIN)<br/>azure (OData any)"] --> GcpAndDbx["gcp (ScaNN restricts)<br/>databricks (filters_json)"]
-    end
-    subgraph Runbook ["3. SRE Failover"]
-        direction TB
-        Alert["OTel / JWKS Alert"] --> Action["Switch Backend or<br/>Flush JWKS Cache"]
-    end
-    Router --> Engines
-    Engines --> Runbook
-    style Router fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
-    style Engines fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
-    style Runbook fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
-```
-| Backend (`RETRIEVAL_BACKEND`) | Vector & Hybrid Engine | In-Database RBAC Pre-Filter | LLM & Observability |
-| :--- | :--- | :--- | :--- |
-| **`pgvector`** (Local) | PG16 `halfvec(1536)` HNSW + `tsvector` RRF | `WHERE allowed_roles ?| $2::text[]` (`jsonb_ops` GIN) | OpenAI `gpt-4o` + Jaeger Badger LSM |
-| **`azure`** (Microsoft Azure) | Azure AI Search + Semantic Ranker | OData `allowed_roles/any(r: ...)` | Azure OpenAI `gpt-4o` + App Insights |
-| **`gcp`** (Google Cloud) | Vertex AI ScaNN + Ranking API | ScaNN `restricts` (`allowList`) | Gemini 1.5 Pro + Cloud Trace |
-| **`databricks`** (Databricks) | Mosaic AI Vector Search (Delta Sync) | Unity Catalog `filters_json` (`OR`) | Llama 3.1 70B + MLflow Tables |
