@@ -158,6 +158,16 @@ class ObservabilityTracer:
             duration_ms,
         )
 
+        if self._otel_tracer:
+            try:
+                with self._otel_tracer.start_span("gen_ai.chat") as span:
+                    span.set_attribute("gen_ai.operation.name", "chat")
+                    span.set_attribute("gen_ai.request.model", model)
+                    span.set_attribute("gen_ai.usage.input_tokens", prompt_tokens)
+                    span.set_attribute("gen_ai.usage.output_tokens", completion_tokens)
+            except Exception as exc:
+                logger.debug("Failed exporting generation to OTel: %s", exc)
+
     def record_chat_interaction(
         self,
         question: str,
@@ -181,14 +191,18 @@ class ObservabilityTracer:
 
         if self._otel_tracer:
             try:
+                capture_content = os.getenv("OTEL_GENAI_CAPTURE_CONTENT", "false").lower() == "true"
                 with self._otel_tracer.start_span("rag_chat_completion") as span:
-                    span.set_attribute("rag.question", question)
-                    span.set_attribute("rag.response", answer)
+                    span.set_attribute("gen_ai.operation.name", "chat")
+                    span.set_attribute("gen_ai.request.model", model)
                     span.set_attribute("rag.roles", ",".join(roles))
                     span.set_attribute("rag.model", model)
                     span.set_attribute("rag.duration_ms", duration_ms)
-                    span.add_event("user_question", {"content": question})
-                    span.add_event("ai_response", {"content": answer})
+                    if capture_content:
+                        span.set_attribute("rag.question", question)
+                        span.set_attribute("rag.response", answer)
+                        span.add_event("user_question", {"content": question})
+                        span.add_event("ai_response", {"content": answer})
             except Exception as exc:
                 logger.debug("Failed exporting chat interaction to OTel: %s", exc)
 
@@ -216,23 +230,24 @@ class ObservabilityTracer:
 
         if self._otel_tracer:
             try:
+                capture_content = os.getenv("OTEL_GENAI_CAPTURE_CONTENT", "false").lower() == "true"
                 span_name = f"mcp_tool.{tool_name}"
                 with self._otel_tracer.start_span(span_name) as span:
+                    span.set_attribute("gen_ai.operation.name", "execute_tool")
+                    span.set_attribute("gen_ai.tool.name", tool_name)
                     span.set_attribute("mcp.tool_name", tool_name)
                     span.set_attribute("mcp.roles", ",".join(roles) if roles else "none")
                     span.set_attribute("mcp.duration_ms", duration_ms)
                     span.set_attribute("mcp.status", data["status"])
                     if error:
                         span.set_attribute("mcp.error", error)
-                    
-                    # Attach specific question/response tags if present in parameters/result
-                    if "question" in parameters:
-                        span.set_attribute("rag.question", str(parameters["question"]))
-                    span.set_attribute("rag.response", result[:1000])
 
-                    # Emit span events
-                    span.add_event("mcp_parameters", {"params": json.dumps({k: str(v) for k, v in parameters.items() if k != "auth_token"})})
-                    span.add_event("mcp_result", {"content": result[:2000]})
+                    if capture_content:
+                        if "question" in parameters:
+                            span.set_attribute("rag.question", str(parameters["question"]))
+                        span.set_attribute("rag.response", result[:1000])
+                        span.add_event("mcp_parameters", {"params": json.dumps({k: str(v) for k, v in parameters.items() if k != "auth_token"})})
+                        span.add_event("mcp_result", {"content": result[:2000]})
             except Exception as exc:
                 logger.debug("Failed exporting MCP tool execution to OTel: %s", exc)
 
