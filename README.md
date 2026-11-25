@@ -329,13 +329,7 @@ flowchart LR
     style Runtime fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
 ```
 ### 5.h AI Code Agent Quality Control & Manual Commit Proving (`agent/quality_control.py`, `scripts/agent_quality_gate.py`)
-- **Pre-Write AST & Security Gates (`QualityControlPipeline`)**: `ASTPolicyGate` (blocks `eval`/`exec`/`shell=True`/SQL f-string interpolation, warns on bare `except:`), `SecretScanner`, `PromptInjectionSanitizer` (OWASP ASI01/ASI06 delimiter fencing), and `ScopeGuard` (blocks path traversal and protected paths).
-- **Open-Source Python Standards (`RuffStandardsGate`)**: Runs `ruff check` (PEP 8 `E`/`W`, Pyflakes `F`, `I`, `B`, `S`) and `ruff format --check`.
-- **Manual Commit Quality Proving**: Run `python -m scripts.agent_quality_gate --staged --prove quality_proof.json` (or `--commit <ref>`) to emit a verifiable `QualityProofAttestation` JSON (`audit_id`, `diff_sha256`, `risk_tier`, `standards`, `timestamp_utc`). Wired into `.pre-commit-config.yaml` and `.git/hooks/pre-commit` to block non-compliant commits automatically. Verified by `tests/test_quality_control.py` (9 tests).
-- **5.g.1 PolicyEngine AST & STRIDE Threat Modeling**: Detects dangerous Python constructs (`exec`, `eval`, `__import__`, `subprocess` with `shell=True`, unauthorized path traversals) and maps security checks directly to STRIDE categories (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege) as required by Factory.ai Pillar 8.
-- **5.g.2 Secret Regex Filtering**: Automatically catches exposed API keys, private keys, and credential patterns.
-- **5.g.3 GroundingGuardrail**: Enforces the RAG Triad by requiring explicit source citations (`[Doc: <Title>, Chunk <Index>]`), checking that cited documents exist in authorized context, and mandating explicit admissions when context is silent.
-- **5.g.4 SlidingWindowRateLimiter & TokenCircuitBreaker**: Contains caller blast radius via 60 req/min sliding windows and limits token consumption to 8,000 tokens/request and 50,000 tokens/issue with an administrative emergency shutoff kill-switch (`is_blocked`).
+- **5.h.1 Pre-Write & Pre-Commit Gates**: `QualityControlPipeline` (`ASTPolicyGate`, `SecretScanner`, `PromptInjectionSanitizer`, `ScopeGuard`, `RuffStandardsGate`) and `python -m scripts.agent_quality_gate --staged --prove quality_proof.json` enforce fail-closed quality proving via `.pre-commit-config.yaml` (`tests/test_quality_control.py`, 9 tests). See [SAFEGUARD_CODE_AGENT.md](SAFEGUARD_CODE_AGENT.md) for full details.
 
 ### 5.i Shared Chat + Agent Memory Workflow (`app/memory/store.py`)
 
