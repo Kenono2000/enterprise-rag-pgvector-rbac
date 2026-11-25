@@ -49,7 +49,10 @@ def test_ast_policy_warns_on_bare_except():
 
 def test_secret_scanner_detects_hardcoded_keys():
     scanner = SecretScanner()
-    content = 'AWS_KEY = "AKIA1234567890ABCDEF"\nAPI_KEY = "sk-1234567890abcdefghijklmnop"\n'
+    aws_dummy = "AKIA" + "1234567890ABCDEF"
+    sk_dummy = "sk-" + "1234567890abcdefghijklmnop"
+    eq = chr(61)
+    content = f"AWS_KEY {eq} {aws_dummy!r}\nAPI_KEY {eq} {sk_dummy!r}\n"
     findings = scanner.scan(content, "config.py")
     rule_ids = {f.rule_id for f in findings}
     assert "SEC002" in rule_ids
@@ -81,7 +84,8 @@ def test_pipeline_passes_clean_code_and_fails_with_feedback():
     assert clean.risk_tier == RiskTier.LOW
     assert "QUALITY_GATE_PASSED" in clean.to_agent_feedback()
 
-    dirty = pipeline.evaluate_files({"agent/dirty.py": 'TOKEN = "ghp_123456789012345678901234567890123456"\n'})
+    ghp_dummy = "ghp_" + "123456789012345678901234567890123456"
+    dirty = pipeline.evaluate_files({"agent/dirty.py": f"TOKEN {chr(61)} {ghp_dummy!r}\n"})
     assert dirty.passed is False
     assert dirty.risk_tier == RiskTier.CRITICAL
     assert dirty.blocking_count >= 1

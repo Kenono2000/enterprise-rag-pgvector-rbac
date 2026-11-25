@@ -475,6 +475,10 @@ class RuffStandardsGate:
             if proc.stdout.strip():
                 for item in json.loads(proc.stdout):
                     code = item.get("code", "RUFF")
+                    filename = item.get("filename") or ""
+                    # `assert` (S101) is standard in pytest test files
+                    if code == "S101" and ("/tests/" in filename.replace("\\", "/") or Path(filename).name.startswith("test_")):
+                        continue
                     loc = item.get("location", {})
                     findings.append(
                         QualityFinding(
