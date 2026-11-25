@@ -1,6 +1,7 @@
 # 🛡️ Enterprise Zero-Trust RAG & Autonomous SDLC
-**Navigation**: [1. Arch](#1-system-architecture-overview) | [Pillars](#1a-architectural-pillars-overview) | [2. In-DB RBAC](#2-in-database-rbac-vector-storage-schemasql-appdb) | [3. Identity](#3-identity-oauth-20-pkce-security-appauth) | [4. Ingestion & RAG](#4-ingestion-pipeline-and-hybrid-rag-quality-scriptsingestpy-libs) | [5. Gateways & SDLC](#5-gateways-observability-autonomous-sdlc-app-agent)
+**Navigation**: [1. Arch](#1-system-architecture-overview) | [Pillars](#1a-architectural-pillars-overview) | [2. In-DB RBAC](#2-in-database-rbac-vector-storage-schemasql-appdb) | [3. Identity](#3-identity-oauth-20-pkce-security-appauth) | [4. Ingestion & RAG](#4-ingestion-pipeline-and-hybrid-rag-quality-scriptsingestpy-libs) | [5. Gateways & SDLC](#5-gateways-observability-autonomous-sdlc-app-agent) | [6. Multi-Cloud](#6-multi-cloud--runbook)
 **Diagrams**: [1. High-Level RAG & SDLC](#diagram-1-high-level-rag-sdlc-architecture) | [2. In-DB RBAC & Compaction](#diagram-2-in-db-rbac-vector-compaction) | [3. OAuth 2.0 PKCE](#diagram-3-oauth-20-pkce-jwks-flow) | [4. Hybrid RAG & Triad](#diagram-4-end-to-end-hybrid-rag-triad-pipeline) | [5. FastMCP Gateway & OTel](#diagram-5-zero-trust-fastmcp-gateway-otel) | [6. Token Budget & Shutoff](#5c-managed-token-budget-administrative-shutoff-api-appmainpy) | [7. Invariant Suite](#5d-architectural-invariant-regression-suite-teststest_architectural_invariantspy) | [8. Autonomous SDLC & Resume](#diagram-6-autonomous-sdlc-crash-resume) | [9. Shared Memory](#diagram-7-shared-chat-agent-memory)
+**Deep-dive**: [SAFEGUARD.md](SAFEGUARD.md)
 
 ## 1. System Architecture Overview
 #### Diagram 1: High-Level RAG & SDLC Architecture
@@ -43,10 +44,10 @@ flowchart LR
 | # | Pillar | Core Focus | Key Outcome |
 | :-: | :--- | :--- | :--- |
 | **1** | **In-DB RBAC & Storage** | Pre-filtered GIN + HNSW iterative scan | **75% RAM savings**, zero recall starvation, in-DB token audit |
-| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox, centralized pool sizing under Settings | Kubernetes probe ready, 316 tests collected (315 passed, 1 skipped, 0 failures), 0 warnings |
+| **2** | **Quickstart & Runtime** | Event-loop-scoped async pools, SKIP LOCKED outbox, centralized pool sizing under Settings | Kubernetes probe ready, 316 tests collected (315 passed, 1 skipped, 0 failures), 0 warnings (as of 2026-11-24) |
 | **3** | **Identity & Sessions** | Stateless OAuth 2.0 PKCE, HMAC state & encrypted cookies | F5 reload resilience, multi-worker scale-out, zero Redis, SOC-2 bounds |
 | **4** | **Ingestion & Hybrid RAG** | Contextual headers, 64KB SHA-256 de-dup, Adaptive RRF | **>0.90 Context Precision**, O(1) skip for unchanged files |
-| **5** | **Gateways, OTel, SDLC & Deep-Dive** | Zero-Trust FastMCP Gateway, token budgets, OpenTelemetry, SDLC workflow | Rate limits, JWT/TLS auth, token budgets, 60 req/min limits, defense-in-depth |
+| **5** | **Gateways, OTel, SDLC & Quality Gates** | Zero-Trust FastMCP Gateway, token budgets, OpenTelemetry, SDLC workflow | Rate limits, JWT/TLS auth, token budgets, 60 req/min limits, defense-in-depth |
 | **6** | **Multi-Cloud & Runbook** | Quad-mode strategy (pgvector, Azure, GCP, Databricks) | Zero-downtime .env switching, native pre-filtering across 4 engines |
 
 ## 2. In-Database RBAC & Vector Storage (`schema.sql`, `app/db/`)
@@ -74,12 +75,12 @@ WHERE d.allowed_roles ?| $2::text[] AND (c.embedding_model = 'text-embedding-3-s
 ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536) LIMIT $3;
 ```
 ### 2.a 🔧 Key RBAC & Storage Innovations
-* **2.a.1 🎯 Zero Recall Starvation**: GIN Index + `hnsw.iterative_scan = 'relaxed_order'` eliminates ANN overfiltering on selective roles. pgvector 0.8+ iterative scans retain filtered-out HNSW candidates in a `discarded` pairing heap and resume traversal in `hnsw.ef_search` batches until `hnsw.max_scan_tuples` (20000) or memory limits stop the scan — so high-selectivity `WHERE d.allowed_roles ?| $2::text[]` clauses no longer exhaust the top-k candidate list. Dynamic candidate depth scales per role cardinality: **80** for single role, **40** for dual, **20** for broad roles, configured per connection in `DatabaseManager.configure_iterative_scan()`.
-* **2.a.2 🔒 SQL Injection Protection**: Parameterized `$2::text[]` array with empty-role guard (returns `[]` before DB execution).
+* **2.a.1 🎯 Zero Recall Starvation**: GIN Index + `hnsw.iterative_scan = 'relaxed_order'` eliminates ANN overfiltering on selective roles. pgvector 0.8+ iterative scans retain filtered-out HNSW candidates in a `discarded` pairing heap and resume traversal in `hnsw.ef_search` batches until `hnsw.max_scan_tuples` (20000) or memory limits stop the scan — so high-selectivity `WHERE d.allowed_roles ?| $2::text[]` clauses no longer exhaust the top-k candidate list. Dynamic candidate depth scales per role cardinality: `hnsw.ef_search` is set to **80** (single role), **40** (dual), or **20** (broad), while `hnsw.max_scan_tuples` scales 2×/1×/0.5× of the 20,000 baseline (see §4.3), configured per connection in `DatabaseManager.configure_iterative_scan()`.
+* **2.a.2 🔒 SQL Injection Protection**: Parameterized `$2::text[]` array with empty-role guard (returns `[]` before DB execution; complements the canonical `sanitize_roles_for_query()` in §2.a.3 — the guard fires after sanitization returns `[]`).
 * **2.a.3 🧹 Unified Role Sanitization (single source of truth)**: One canonical `sanitize_roles_for_query()` in `app/auth/role_mapper.py` is delegated to by every retrieval path — pgvector (`DatabaseManager`), the Azure / GCP / Databricks cloud adapters, and the REST `X-User-Roles` legacy-header paths in `app/main.py` and `app/api/rag.py` — so the role grammar cannot drift between engines. Only non-empty strings that are known application roles (`KNOWN_ROLES`) or valid identifiers survive; injection payloads, empty strings, and non-string claims are dropped and fail closed to `[]`. Pinned cross-engine by `tests/test_role_sanitization_contract.py` (24 tests).
 * **2.a.4 🗂️ RBAC GIN Operator Class**: `idx_documents_allowed_roles_gin` uses the default `jsonb_ops` GIN class (not `jsonb_path_ops`), because the key-existence operator `?|` is only served by `jsonb_ops` (`jsonb_path_ops` accelerates `@>`, `@?`, `@@` exclusively). The index is therefore genuinely Bitmap-index-accelerated for the role pre-filter.
 * **2.a.5 📦 Matryoshka 1536-d + 16-Bit Compaction**: 75% cumulative RAM reduction with >98% recall. Matryoshka Representation Learning (MRL) truncates 3072-d vectors to 1536-d with L2 re-normalization (50% RAM reduction), composed with pgvector `halfvec(1536)` IEEE 754 binary16 quantization (additional 50% savings; max HNSW dimension doubles to 4,000). Numerical integrity is enforced by `DatabaseManager.format_halfvec()`, scrubbing `NaN`, `+Inf`, and `-Inf` to `0.0` before writing literal strings to prevent corrupted distance calculations and SQL parser failures.
-* **2.a.1 💰 Token Budget Controls**: `token_consumption_ledger` tracks usage; `token_managed_limits` provides emergency kill-switch (`is_blocked`).
+* **2.a.6 💰 Token Budget Controls**: `token_consumption_ledger` tracks usage; `token_managed_limits` provides emergency kill-switch (`is_blocked`).
 
 **Schema Query**: The core retrieval query with RBAC pre-filtering:
 ```sql
@@ -149,7 +150,7 @@ Formalizes the retrieve → assemble → compact → reorder → cache disciplin
 Both `/api/v1/query` and `/api/v1/query/stream` endpoints route through this optimized pipeline.
 
 ### 4.b 📐 RAG Triad Evaluation Engine (`app/rag/evaluator.py`)
-Deterministic, fully offline quality evaluator for the RAG Triad (no LLM/network calls — sub-millisecond keyword-overlap + vector-similarity heuristics), aligning with AWS Vector DB Evaluation Criteria (2026) and Mindstream AI Playbook standards, exported from `app/rag/__init__.py` and pinned by `tests/test_deep_eval.py`:
+Deterministic, fully offline quality evaluator for the RAG Triad (no LLM/network calls — sub-millisecond keyword-overlap + vector-similarity heuristics reusing the chunk embeddings already stored by the retriever, with no re-embedding call), exported from `app/rag/__init__.py` and pinned by `tests/test_deep_eval.py`:
 * **4.b.1 Context Relevance** — 70% query-term coverage in retrieved chunks + 30% average vector similarity. Measures signal-to-noise ratio in retrieval and verifies pre-filtering eliminates irrelevant noise.
 * **4.b.2 Faithfulness (Groundedness)** — 40% valid citation index matching (`[Doc: <Title>, Chunk <Index>]`) + 60% sentence-level keyword claim support in context. Graceful refusal on unanswerable or silent context automatically receives 1.0 (anti-hallucination guarantee).
 * **4.b.3 Answer Relevance** — 80% question/answer keyword overlap + 20% conciseness penalty against prompt drift.
@@ -223,7 +224,7 @@ flowchart LR
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
-    subgraph Auth ["1. Discovery &amp; RBAC"]
+    subgraph GatewayAuth ["1. Discovery &amp; RBAC"]
         direction TB
         Meta["RFC 9728 / 8707<br/>Metadata &amp; Scopes"] --> RBAC["check_tool_permission()<br/>(Fail-Closed Claims)"]
     end
@@ -231,8 +232,8 @@ flowchart LR
         direction TB
         Rate["SlidingWindow (60/m)<br/>+ TokenCircuitBreaker"] --> Adapter["get_vector_search_adapter()<br/>(pgvector/Azure/GCP/DBX)"]
     end
-    Auth --> Guard
-    style Auth fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
+    GatewayAuth --> Guard
+    style GatewayAuth fill:#fefce8,stroke:#ca8a04,stroke-width:1.5px
     style Guard fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px
 ```
 - **5.b.1 Blast Radius Controls**: Configures module-level `SlidingWindowRateLimiter` (default 60 req/min per caller) and `TokenCircuitBreaker` (8,000 tokens/request, 50,000 tokens/issue) to protect downstream LLMs.
@@ -329,7 +330,7 @@ flowchart LR
     style Runtime fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
 ```
 ### 5.h AI Code Agent Quality Control & Manual Commit Proving (`agent/quality_control.py`, `scripts/agent_quality_gate.py`)
-- **5.h.1 Pre-Write & Pre-Commit Gates**: `QualityControlPipeline` (`ASTPolicyGate`, `SecretScanner`, `PromptInjectionSanitizer`, `ScopeGuard`, `RuffStandardsGate`) and `python -m scripts.agent_quality_gate --staged --prove quality_proof.json` enforce fail-closed quality proving via `.pre-commit-config.yaml` (`tests/test_quality_control.py`, 9 tests). See [SAFEGUARD_CODE_AGENT.md](SAFEGUARD_CODE_AGENT.md) for full details.
+- **5.h.1 Pre-Write & Pre-Commit Gates**: `QualityControlPipeline` (`ASTPolicyGate`, `SecretScanner`, `PromptInjectionSanitizer`, `ScopeGuard`, `RuffStandardsGate`) and `python -m scripts.agent_quality_gate --staged --prove quality_proof.json` enforce fail-closed quality proving via `.pre-commit-config.yaml` (`tests/test_quality_control.py`, 9 tests). See [SAFEGUARD.md](SAFEGUARD.md) for full details.
 
 ### 5.i Shared Chat + Agent Memory Workflow (`app/memory/store.py`)
 
@@ -369,3 +370,22 @@ flowchart LR
 3. **Embeddings offline by default.** `_mock_embedding()` (deterministic SHA-256) runs when no provider key is configured — no billable API calls.
 4. **Session GUCs, not persisted.** `hnsw.iterative_scan` / `max_scan_tuples` / `ef_search` are applied per-connection at runtime (`DatabaseManager.configure_iterative_scan`), never in migration `DO` blocks.
 5. **Streamlit is opt-in.** The "🧠 Share to team memory" toggle is off by default; when on, exchanges are appended to a role-governed shared thread and recalled into the advisor prompt.
+
+## 6. Multi-Cloud & Runbook
+### 6.a 🌐 Quad-Mode Retrieval Strategy
+`RETRIEVAL_BACKEND` selects one of four engines at runtime; all four satisfy the same `VectorSearchProvider` protocol (§5.d.3) and route through the canonical `sanitize_roles_for_query()` (§2.a.3), so RBAC semantics do not drift across clouds.
+| Backend | `RETRIEVAL_BACKEND` | Pre-filter mechanism | Native hybrid? |
+| :--- | :--- | :--- | :--- |
+| **pgvector** | `pgvector` (default) | GIN `allowed_roles ?| $N::text[]` + HNSW iterative scan | ✅ single-pass SQL CTE RRF (§4.3) |
+| **Azure AI Search** | `azure` | OData `search.in(allowed_roles, ...)` filter pre-applied | ✅ native semantic + BM25 |
+| **GCP Vertex AI** | `gcp` | `restricts` / namespace filter on the index | ✅ native hybrid |
+| **Databricks Vector Search** | `databricks` | `filters_json` on the index query | ✅ native hybrid |
+### 6.b 🔁 Zero-Downtime `.env` Switching
+- `get_vector_search_adapter()` (§5.b.5) resolves the adapter from `RETRIEVAL_BACKEND` at call time, not import time, so flipping the variable and restarting workers is enough — no code change, no schema migration.
+- Each adapter lazy-imports its provider SDK inside `.search()`, so a process configured for pgvector never loads the Azure/GCP/Databricks SDKs.
+- The `.env` contract: only `RETRIEVAL_BACKEND` plus that backend's credentials (`AZURE_SEARCH_*`, `GOOGLE_*`, `DATABRICKS_*`) are required; unknown keys are ignored.
+### 6.c 📋 Runbook Checklist
+1. **Cutover**: set `RETRIEVAL_BACKEND` → restart workers → hit `/api/v1/query` with a role-scoped smoke query → confirm the `retrieval.backend` OTel span attribute (§5.e) matches.
+2. **Rollback**: revert `RETRIEVAL_BACKEND` and restart — no data migration is needed because all four backends are read-only over the same ingested corpus.
+3. **RBAC verification**: run `pytest tests/test_role_sanitization_contract.py tests/test_architectural_invariants.py` after any backend change.
+4. **Token budget sanity**: confirm `/api/v1/tokens/usage` (§5.c) still records events after the switch.

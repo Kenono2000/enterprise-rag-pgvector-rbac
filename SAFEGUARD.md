@@ -1,7 +1,8 @@
 # Technical Note: Production-Grade AI Code Agent Quality Control & Guardrails
 **Quick Nav:** [1. Summary](#1-executive-summary) · [2. Standards](#2-industry-standards--frameworks) · [3. 5-Layer Architecture](#3-the-5-layer-architecture) · [4. Blocking](#4-how-layers-block-failed-code) · [5. SDLC](#5-sdlc-positioning) · [6. Commit Proving](#6-manual-commit-quality-proving) · [7. Scaling](#7-scaling-across-enterprise-dev-teams) · [8. Q&A](#8-interview-qa-cheat-sheet) · [9. DoD Rule](#9-implementation-rule-trigger-to-gate-definition-of-done) · [10. Evidence](#10-verification-evidence) · [11. Lessons](#11-lessons-learned)
 ## 1. Executive Summary
-Production AI code agent safety cannot be achieved through prompt engineering alone. LLMs are probabilistic; therefore quality control must be **deterministic defense-in-depth**. The architecture wraps the agent in least-privilege boundaries, intercepts proposed writes in memory with AST and secret policies before they hit disk, enforces open-source lint/format standards (Ruff), and requires verifiable quality proofs at commit/CI time.
+_Last verified: 2026-11-24_
+Production AI code agent safety cannot be achieved through prompt engineering alone. LLMs are probabilistic; therefore quality control must be **deterministic defense-in-depth**. The architecture wraps the agent in least-privilege boundaries, intercepts proposed writes in memory with AST and secret policies before they hit disk, enforces open-source lint/format standards (Ruff), and requires verifiable quality proofs at commit/CI time. See [README.md §5](README.md#5-gateways-observability--autonomous-sdlc-app-agent) for the runtime gateway and `TokenCircuitBreaker` context.
 **Framing:** "You cannot prompt-engineer your way to production safety. We pair probabilistic LLM reasoning with deterministic enforcement."
 ## 2. Industry Standards & Frameworks
 ### 2.1 OWASP Top 10 for Agentic Applications (ASI Top 10)
@@ -18,6 +19,7 @@ Defines verification checklists (L1–L3) for tool qualification, input restrict
 ### 2.3 OWASP Agent Control Standard (ACS)
 Open framework for runtime enforcement—portable middleware hooks to block high-risk commands or unauthorized file access.
 ## 3. The 5-Layer Architecture
+**Non-Goals / Out-of-Scope:** This 5-layer model guards the agent's inputs, workspace scope, and generated code; it does not cover model weight integrity, training-data poisoning, or host OS compromise.
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
@@ -66,39 +68,40 @@ flowchart LR
 - Ensures agent treats external text as data, never executable instructions.
 ### 3.2 Layer 2 – Scope & Blast-Radius Control (`ScopeGuard`)
 `check(file_path, content)`:
-- **SCP001** Path traversal: blocks any path containing `..`
-- **SCP002** Protected paths: blocks `.git/`, `.env`, `secrets/`, `.github/workflows/`
-- **SCP003** Allowlist: blocks edits outside configured `allowed_prefixes`
-- **SCP004** Blast-radius cap: warns if file exceeds `max_lines_per_file` (default 800)
+- **SCP001** `[BLOCKING]` Path traversal: blocks any path containing `..`
+- **SCP002** `[BLOCKING]` Protected paths: blocks `.git/`, `.env`, `secrets/`, `.github/workflows/`
+- **SCP003** `[BLOCKING]` Allowlist: blocks edits outside configured `allowed_prefixes`
+- **SCP004** `[WARNING]` Blast-radius cap: warns if file exceeds `max_lines_per_file` (default 800)
 ### 3.3 Layer 3 – Pre-Write AST & Secret Gate (`ASTPolicyGate` + `SecretScanner`)
 **AST Policy Gate** — `ast.parse()` before disk write:
-- **AST001** Syntax error → BLOCKING
-- **AST002** `eval`/`exec`/`compile`/`__import__`
-- **AST003** `os.system`/`pickle.loads`/`yaml.load`
-- **AST004** `subprocess.*(..., shell=True)`
-- **AST005** Bare `except:` → WARNING
-- **AST006** Oversized function → WARNING
-- **AST007** SQL f-string interpolation (`ast.JoinedStr` with SQL keywords)
+- **AST001** `[BLOCKING]` Syntax error
+- **AST002** `[BLOCKING]` `eval`/`exec`/`compile`/`__import__`
+- **AST003** `[BLOCKING]` `os.system`/`pickle.loads`/`yaml.load`
+- **AST004** `[BLOCKING]` `subprocess.*(..., shell=True)`
+- **AST005** `[WARNING]` Bare `except:`
+- **AST006** `[WARNING]` Oversized function
+- **AST007** `[BLOCKING]` SQL f-string interpolation (`ast.JoinedStr` with SQL keywords)
 **Secret Scanner** — per non-comment line:
-- **SEC001** Private keys
-- **SEC002** AWS keys (`AKIA...`)
-- **SEC003** GitHub PATs (`ghp_...`)
-- **SEC004** API keys (`sk-...`)
-- **SEC005** Hardcoded credential assignments
+- **SEC001** `[BLOCKING]` Private keys
+- **SEC002** `[BLOCKING]` AWS keys (`AKIA...`)
+- **SEC003** `[BLOCKING]` GitHub PATs (`ghp_...`)
+- **SEC004** `[BLOCKING]` API keys (`sk-...`)
+- **SEC005** `[BLOCKING]` Hardcoded credential assignments
 ### 3.4 Layer 4 – Open-Source Standards Gate (`RuffStandardsGate`)
 - `ruff check --select E,W,F,I,B,S --output-format json`
   - PEP 8 (E/W), Pyflakes (F), isort (I), flake8-bugbear (B), flake8-bandit (S)
-- Maps F, S, E9 → `Severity.BLOCKING`; style/lint → `WARNING`
+- Ruff findings map `F`, `S`, `E9` → `Severity.BLOCKING`; style/lint → `WARNING`. Combined with the AST/SEC/SCP blocking codes above, see §4.1 for the full blocking set.
+- **Bandit (`S`) False-Positive Workflow:** Intentional exceptions (e.g., trusted `subprocess` calls) must use inline `# noqa: S603` with a brief rationale comment rather than blanket rule suppression.
 - `ruff format --check` → Black-compatible formatting (`RUFF-FMT`)
 ### 3.5 Layer 5 – Commit Proving & Orchestration (`QualityControlPipeline` + CLI)
 - `evaluate_files(files)` runs ScopeGuard, SecretScanner, ASTPolicyGate over `{file_path: content}`
 - Computes `risk_tier` (LOW → MEDIUM → HIGH → CRITICAL), generates `audit_id` (`qc-<sha256[:12]>`)
-- `report.to_agent_feedback()` formats BLOCKING findings with `file:line` + `remediation_hint` for self-healing
+- `report.to_agent_feedback()` formats BLOCKING findings with `file:line` + `remediation_hint` (e.g., `use yaml.safe_load()` for `AST003`) for self-healing
 - CLI `--staged --prove quality_proof.json` collects staged files, runs pipeline + Ruff, hashes into `diff_sha256`, writes `QualityProofAttestation` JSON, exits non-zero on blocking findings
 ## 4. How Layers Block Failed Code
 ### 4.1 Severity Classification
-- Critical security, syntax, scope, Ruff (F, S, E9) → `Severity.BLOCKING`
-- Style/maintainability → `Severity.WARNING` (reported, non-blocking unless promoted)
+- All AST codes except `AST005` and `AST006`, plus `SCP001`–`SCP003`, `SEC001`–`SEC005`, and Ruff (`F`, `S`, `E9`) → `Severity.BLOCKING`
+- Style/maintainability (`AST005`, `AST006`, `SCP004`, Ruff `E`/`W`/`I`/`B`) → `Severity.WARNING` (reported, non-blocking unless promoted)
 ### 4.2 In-Memory Pre-Write Blocking
 - `evaluate_files()` counts `blocking_count`; if > 0, `report.passed = False`, `risk_tier` → HIGH (CRITICAL if SecretScanner triggered)
 - Agent checks `if not report.passed:` before writing; feeds `to_agent_feedback()` back into prompt for self-healing
@@ -124,6 +127,7 @@ flowchart LR
 `.git/hooks/pre-commit` (executable):
 ```bash
 #!/usr/bin/env bash
+set -euo pipefail
 python -m scripts.agent_quality_gate --staged --prove .pytest_cache/quality_proof.json
 ```
 ### 6.2 Execution Flow on `git commit`
@@ -136,7 +140,7 @@ flowchart LR
   D -->|"No"| E["Write Proof (failed)<br/>Abort Commit (Exit 1)"]
   D -->|"Yes"| F["Write Proof (SHA-256)<br/>Create Commit (Exit 0)"]
 ```
-1. **Staged File Discovery** — `git diff --cached --name-only --diff-filter=ACM`
+1. **Staged File Discovery** — `git diff --cached --name-only --diff-filter=ACMR` (includes Added, Copied, Modified, and Renamed files)
 2. **Layer 4 Validation** — `RuffStandardsGate.inspect_paths(...)`
 3. **Failure & Non-Zero Exit** — any F/S/E9 → BLOCKING → `main()` returns 1
 4. **Commit Aborted** — Git aborts before commit object; after fix + re-stage, commit passes and writes verified attestation
@@ -152,7 +156,7 @@ repos:
         language: system
         pass_filenames: false
 ```
-`pre-commit install` wires it for every developer.
+`pre-commit install` wires it for every developer. *(The `pre-commit` framework invokes `entry` directly rather than through the shell, so the `set -euo pipefail` flags in §6.1 apply to the raw `.git/hooks/pre-commit` script only; the framework already aborts on non-zero exit.)*
 ## 7. Scaling Across Enterprise Dev Teams
 ### 7.1 Central Policy, Local Overrides
 - Ship shared org-wide baseline (secrets, AST security rules, Ruff/Bandit) as versioned package or GitHub Action
@@ -164,7 +168,7 @@ repos:
 - Roll out new rules in advisory mode first to measure false-positive rates
 - Promote high-confidence security/correctness rules to blocking
 ### 7.4 Runtime Cost & Blast-Radius Caps
-- Pair with `TokenCircuitBreaker` (per-request/per-issue token caps), `SlidingWindowRateLimiter`, sandboxed execution (ephemeral containers/microVMs, deny-by-default egress)
+- Pair with `TokenCircuitBreaker` (per-request/per-issue token caps), `SlidingWindowRateLimiter`, and sandboxed execution *(recommended / roadmap: ephemeral containers/microVMs, deny-by-default egress)*
 ## 8. Interview Q&A Cheat Sheet
 **Q: Why AST inspection instead of regex?**
 A: Regex misses context and produces noisy false positives. `ast.parse` deterministically catches `subprocess.run(..., shell=True)`, bare `except:`, and SQL f-strings with zero ambiguity.
@@ -175,14 +179,14 @@ A: Every gate run emits `QualityControlReport` + `QualityProofAttestation` with 
 **Q: Why deterministic + probabilistic?**
 A: Most effective pipelines pair probabilistic LLM reasoning (generation, contextual AI SAST) with deterministic enforcement (AST policies, sandboxes, strict CI/CD gates).
 **Q: Benchmarks?**
-A: Raw one-shot generation shows 40%–50%+ vulnerability density (OWASP Top 10 flaws) without guardrails.
+A: Raw one-shot LLM code generation commonly exhibits high vulnerability density (OWASP Top 10 flaws) without deterministic guardrails.
 ## 9. Implementation Rule: Trigger-to-Gate Definition of Done
 A workflow requirement is **only complete** when:
 1. **Wire the Trigger** — actual entry point (`.git/hooks/pre-commit`, `.pre-commit-config.yaml`, CI workflow) created, not just CLI/library
 2. **Verify End-to-End** — test the trigger itself, not only unit tests on the underlying module
 3. **Document** — update `README.md` with trigger setup and usage
-This rule is persisted globally as `trigger-to-gate-dod` skill (`~/.gemini/config/skills/trigger-to-gate-dod/SKILL.md`) and applies across all projects and code agents.
-## 10. Verification Evidence
+This rule is persisted globally as the `trigger-to-gate-dod` skill (e.g., `~/.gemini/config/skills/trigger-to-gate-dod/SKILL.md`, illustrative local path) and is portable across all projects and code agents.
+## 10. Verification Evidence *(Example Run)*
 ```bash
 pytest tests/test_quality_control.py -v          # -> 9 passed in 4.18s
 python -m scripts.agent_quality_gate agent/quality_control.py scripts/agent_quality_gate.py --prove .pytest_cache/quality_proof.json
@@ -193,7 +197,7 @@ python -m scripts.agent_quality_gate agent/quality_control.py scripts/agent_qual
 |------|---------|
 | `agent/quality_control.py` | `ASTPolicyGate`, `SecretScanner`, `PromptInjectionSanitizer`, `ScopeGuard`, `RuffStandardsGate`, `QualityControlPipeline`, `QualityProofAttestation` |
 | `scripts/agent_quality_gate.py` | CLI: `--staged`, `--commit <ref>`, `--prove <path>`, `--json`, `--allow-prefix` |
-| `tests/test_quality_control.py` | 9 unit tests |
+| `tests/test_quality_control.py` | Unit tests (9 tests as of 2026-11-24) |
 | `.pre-commit-config.yaml` | Team-wide hook |
 | `.git/hooks/pre-commit` | Local hook |
 | `README.md` §5.h | Docs |
