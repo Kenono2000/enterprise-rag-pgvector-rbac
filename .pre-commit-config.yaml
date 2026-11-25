@@ -1,0 +1,10 @@
+repos:
+  - repo: local
+    hooks:
+      - id: agent-quality-gate
+        name: AI Code Agent & Manual Commit Quality Gate
+        entry: python -m scripts.agent_quality_gate --staged --prove .pytest_cache/quality_proof.json
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
