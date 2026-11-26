@@ -1128,6 +1128,7 @@ def _render_rag_interface() -> None:
                 st.session_state.messages = []
         except Exception as exc:
             logger.warning("Could not load persisted chat history: %s", exc)
+            st.warning(f"Could not load persisted chat history: {exc}")
             st.session_state.messages = []
 
     st.subheader("📖 Faith & Knowledge Advisory Consultation")
@@ -1491,6 +1492,7 @@ def _render_rag_interface() -> None:
             )
         except Exception as exc:
             logger.warning("Could not persist conversation history: %s", exc)
+            st.warning(f"Could not persist conversation history: {exc}")
 
         # Opt-in shared team memory: persist this exchange to a shared thread
         # visible to the caller's roles, so the team (and other agents) can
