@@ -29,6 +29,12 @@
 
 ### Behavioral Enforcement
 - **Single-File Documentation Policy (CRITICAL)**: All project, architectural, runbook, and migration markdown documentation MUST reside exclusively in [`README.md`](file:///D:/src/enterprise-rag-pgvector-rbac/README.md). Never create separate documentation `.md` files in `docs/` or root directories—always consolidate and maintain all documentation directly inside `README.md`.
+- **Pre-Commit Ruff Gate (CRITICAL)**: After modifying any `.py` file, always run `python -m ruff check --select E,W,F,I,B,S <modified_files>` (fixing any `F401` unused imports, `F841` unused variables, or other blocking findings) before completing the task so pre-commit quality gates never fail.
+- **Global Rules & Skills Synced**:
+  - **Website Sync**: Whenever `README.md` or its Mermaid diagrams are updated, synchronize `c:\src\abyssium-studio\src\components\MermaidBlueprints.tsx` and run `npm run lint` + `npm run build`.
+  - **Minimal Markdown Whitespace**: Keep vertical whitespace to a minimum across all `.md` files (`markdown-minimal-whitespace` / `minimal-markdown`).
+  - **Slack Webhook & Anonymity**: Never mention `Antigravity` in Slack payloads; use Slack IDs (`<@U0B8AF6HGAJ>`) for mentions.
+  - **Trigger-to-Gate DoD & Performance**: Wire end-to-end workflow triggers (`trigger-to-gate-dod`) and back performance claims with before/after benchmarks (`prove-every-speedup`).
 - Whenever planning or executing engineering tasks, check task scope against relevant skills.
 - When generating or auditing code in this repository, strictly adhere to `code-reviewer` standards and verify RAG retrieval/prompts using `rag-evaluator`.
 - When coordinating multi-step or multi-agent workflows, follow `fleet-planner` patterns.

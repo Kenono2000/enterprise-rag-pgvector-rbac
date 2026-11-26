@@ -37,11 +37,9 @@ All SQL is parameterized; no string interpolation of user input.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
-import os
 import re
 import time
 import uuid
@@ -284,7 +282,6 @@ class SharedMemoryStore:
         roles = sanitize_roles_for_query(user_roles)
         if not roles:
             return []
-        safe_limit = max(1, min(limit, MAX_GET_THREAD_MESSAGES_LIMIT))
         try:
             pool = await DatabaseManager.get_pool()
             async with pool.acquire() as conn:
@@ -330,7 +327,6 @@ class SharedMemoryStore:
         roles = sanitize_roles_for_query(user_roles)
         if not roles:
             return []
-        safe_limit = max(1, min(limit, MAX_LIST_THREADS_LIMIT))
         try:
             pool = await DatabaseManager.get_pool()
             async with pool.acquire() as conn:
@@ -379,6 +375,11 @@ class SharedMemoryStore:
         roles = sanitize_roles_for_query(allowed_roles)
         if not roles:
             logger.warning("store_fact refused for key=%s: no valid allowed_roles (fail-closed).", key)
+            return None
+        from agent.quality_control import PromptInjectionSanitizer
+
+        if PromptInjectionSanitizer.detect(value):
+            logger.warning("store_fact refused for key=%s: potential memory injection (MINJA) detected.", key)
             return None
         safe_key = _safe_key(key)
         try:

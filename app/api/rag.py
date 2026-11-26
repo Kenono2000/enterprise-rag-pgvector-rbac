@@ -1,4 +1,4 @@
-"""
+""""
 app/api/rag.py
 --------------
 FastAPI router for the Zero-Trust RAG endpoint.
@@ -64,7 +64,7 @@ class Citation(BaseModel):
 class RAGQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    question: str = Field(..., json_schema_extra={"example": "How do i find out my purpose in life?"})
+    question: str = Field(..., json_schema_extra={"example": "What is my life purpose in God's eyes?"})
 
 
 class RAGResponse(BaseModel):

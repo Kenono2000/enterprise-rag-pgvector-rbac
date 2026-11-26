@@ -14,7 +14,7 @@ class HorizonAuth(BearerAuth):
         self.roles = roles
 
     def auth_flow(self, request):
-        request.headers["Authorization"] = f"Bearer {self.token.get_secret_value()}"
+        request.headers[""Authorization"] = f"Bearer {self.token.get_secret_value()}"
         request.headers["x-user-roles"] = json.dumps(self.roles)
         yield request
 
@@ -58,7 +58,7 @@ async def main():
             result = await client.call_tool(
                 "search_sdlc_context",
                 {
-                    "question": "How do i find out my purpose in life?",
+                    "question": "What is my life purpose in God's eyes?",
                     "user_role": '["finance_executive"]'
                 }
             )
