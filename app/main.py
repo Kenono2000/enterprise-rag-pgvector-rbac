@@ -394,6 +394,15 @@ async def query_rag(
     guarded by per-caller sliding-window rate limiting and token circuit breakers.
     """
     caller_key = user.email or user.sub or "anonymous"
+    ast_violations = [
+        v for v in PolicyEngine.verify_ast(request.question)
+        if not v.startswith("Syntax error in code:")
+    ]
+    if ast_violations:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"AST security violation: {'; '.join(ast_violations)}",
+        )
     allowed_rate, _rem_reqs, retry_after = api_rate_limiter.allow_request(caller_key)
     if not allowed_rate:
         raise HTTPException(
@@ -546,6 +555,15 @@ async def query_rag_stream(
     - {"event": "done", "confidence_score": 0.95}
     """
     caller_key = user.email or user.sub or "anonymous"
+    ast_violations = [
+        v for v in PolicyEngine.verify_ast(request.question)
+        if not v.startswith("Syntax error in code:")
+    ]
+    if ast_violations:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"AST security violation: {'; '.join(ast_violations)}",
+        )
     allowed_rate, _rem_reqs, retry_after = api_rate_limiter.allow_request(caller_key)
     if not allowed_rate:
         raise HTTPException(

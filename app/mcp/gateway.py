@@ -257,6 +257,26 @@ async def search_sdlc_context(
         )
         return res
 
+    from agent.guardrails import PolicyEngine
+
+    ast_violations = [
+        v for v in PolicyEngine.verify_ast(validated.question)
+        if not v.startswith("Syntax error in code:")
+    ]
+    if ast_violations:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        err = f"AST security violation: {'; '.join(ast_violations)}"
+        res = f"⛔ {err}"
+        tracer.record_mcp_tool_execution(
+            tool_name="search_sdlc_context",
+            parameters={"question": validated.question, **attribution},
+            result=res,
+            roles=roles,
+            duration_ms=duration_ms,
+            error=err,
+        )
+        return res
+
     allowed_rate, remaining_reqs, retry_after = mcp_rate_limiter.allow_request(caller_key)
     if not allowed_rate:
         duration_ms = round((time.perf_counter() - t_start) * 1000, 2)

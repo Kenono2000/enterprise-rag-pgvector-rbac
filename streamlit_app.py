@@ -1177,15 +1177,16 @@ def _render_rag_interface() -> None:
     # Render chat history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-        if msg.get("citations"):
-            with st.expander("📚 Sources & Citations", expanded=False):
-                for cit in msg["citations"]:
-                    st.markdown(f"- **{cit.get('title', 'Document')}** (Confidence: `{float(cit.get('similarity', 0.0)):.2f}`)")
-                    st.caption(cit.get("content", "")[:250] + "...")
-        if msg.get("sql"):
-            with st.expander("🔍 Executed RBAC Query", expanded=False):
-                st.code(msg["sql"], language="sql")
+            if msg["role"] == "assistant":
+                with st.expander("💬 Assistant Response", expanded=True):
+                    st.markdown(msg["content"])
+            else:
+                st.markdown(msg["content"])
+            if msg.get("citations"):
+                with st.expander("📚 Sources & Citations", expanded=False):
+                    for cit in msg["citations"]:
+                        st.markdown(f"- **{cit.get('title', 'Document')}** (Confidence: `{float(cit.get('similarity', 0.0)):.2f}`)")
+                        st.caption(cit.get("content", "")[:250] + "...")
 
     # Check token limits and emergency kill-switch state before rendering chat input
     caller_key = st.session_state.get("user_email") or st.session_state.get("user_sub") or "anonymous"
@@ -1207,29 +1208,7 @@ def _render_rag_interface() -> None:
             "Further questions are disabled. Disengage the Emergency Kill-Switch or reset token usage in the sidebar to re-enable chat."
         )
 
-    # Educational Architectural Deep Dive
-    with st.expander("🎓 Cryptographic Token & Session Architecture (Deep Dive)", expanded=False):
-        st.markdown(
-            """
-            ### 🛡️ Enterprise Token Architecture & Session Security
-            
-            This application implements the standard three-tier cryptographic security model:
-
-            | Token Type | Purpose | Standard Lifetime | Storage Location |
-            | :--- | :--- | :--- | :--- |
-            | **ID Token (OIDC)** | Cryptographic user identity & verified `app_roles` | 15–60 min | Streamlit Session State (In-Memory) |
-            | **Access Token (OAuth 2.0)** | Scoped authorization bearer token for APIs | 15–60 min | Ephemeral client memory |
-            | **Refresh Token (OAuth 2.0)** | Silent minting of new tokens without credentials | 30 days | Identity Provider DB / Server Session |
-
-            #### ⏱️ SessionIdleManager & Regulatory Compliance (SOC-2 / HIPAA)
-            1. **15-Minute Inactivity Timeout**: Monitors keyboard, mouse, and touch events in the browser. If 15 minutes of zero interaction elapse, the session is terminated and client credentials are wiped.
-            2. **12-Hour Absolute Session Ceiling**: Regardless of user activity, sessions cannot exceed 12 hours without re-authentication.
-            3. **Silent Token Refresh**: When the short-lived ID token approaches expiration, the client silently contacts Google's `/token` endpoint with the refresh token to extend access without interrupting the user.
-            4. **In-Database RBAC Defense**: Even with a valid cryptographic token, users can only access documents where `allowed_roles ?| $user_roles`.
-            """
-        )
-
-    # Clear button right above question textbox (below the architectural deep dive)
+    # Clear button right above question textbox
     _, col_clear = st.columns([5, 1])
     with col_clear:
         if st.button("🗑️ Clear", key="clear_chat_above_input", help="Reset and clear consultation conversation", use_container_width=True):
@@ -1257,6 +1236,16 @@ def _render_rag_interface() -> None:
     if prompt_input := st.chat_input(chat_placeholder, disabled=token_is_blocked):
         if token_is_blocked:
             st.error(f"⛔ Token consumption turned OFF: {block_reason}")
+            st.stop()
+
+        from agent.guardrails import PolicyEngine
+
+        ast_violations = [
+            v for v in PolicyEngine.verify_ast(prompt_input)
+            if not v.startswith("Syntax error in code:")
+        ]
+        if ast_violations:
+            st.error(f"⛔ AST security violation: {'; '.join(ast_violations)}")
             st.stop()
 
         t_start_chat = time.perf_counter()
@@ -1482,9 +1471,6 @@ def _render_rag_interface() -> None:
                             f"- **{row['title']}** (Chunk {row.get('chunk_index', 0)}, Confidence: `{float(row['similarity']):.2f}`{rrf_str})"
                         )
                         st.caption(row["content"][:250] + "...")
-            with st.expander("🔍 Executed RBAC Query (Hybrid & RRF)", expanded=False):
-                st.code(sql_query, language="sql")
-
         st.session_state.messages.append({
             "role": "assistant",
             "content": response_text,
@@ -1494,12 +1480,15 @@ def _render_rag_interface() -> None:
         # Persist updated conversation to database so it survives page reloads
         try:
             run_async(
-                DatabaseManager.save_workflow_checkpoint(
-                    thread_id=thread_id,
-                    checkpoint_id="latest",
-                    checkpoint_payload={"messages": st.session_state.messages},
-                    metadata={"caller_id": caller_key, "messages_count": len(st.session_state.messages)},
-                    checkpoint_ns="advisory_chat",
+                asyncio.wait_for(
+                    DatabaseManager.save_workflow_checkpoint(
+                        thread_id=thread_id,
+                        checkpoint_id="latest",
+                        checkpoint_payload={"messages": st.session_state.messages},
+                        metadata={"caller_id": caller_key, "messages_count": len(st.session_state.messages)},
+                        checkpoint_ns="advisory_chat",
+                    ),
+                    timeout=10.0,
                 )
             )
         except Exception as exc:
@@ -1512,42 +1501,49 @@ def _render_rag_interface() -> None:
             try:
                 shared_thread_key = f"team-advisory:{','.join(sorted(roles)) or 'engineer'}"
                 shared_tid = st.session_state.get("shared_thread_id")
-                if not shared_tid:
-                    # Reuse an existing shared thread for this role-set if present.
-                    existing = run_async(
-                        SharedMemoryStore.list_threads(user_roles=list(roles), limit=100)
-                    )
-                    match = next((t for t in existing if t.get("title") == shared_thread_key), None)
-                    shared_tid = match["thread_id"] if match else None
-                if not shared_tid:
-                    shared_tid = run_async(
-                        SharedMemoryStore.create_thread(
+
+                async def _persist_shared_memory(tid: Optional[str]) -> Optional[str]:
+                    if not tid:
+                        existing = await SharedMemoryStore.list_threads(
+                            user_roles=list(roles), limit=100
+                        )
+                        match = next(
+                            (t for t in existing if t.get("title") == shared_thread_key),
+                            None,
+                        )
+                        tid = match["thread_id"] if match else None
+                    if not tid:
+                        tid = await SharedMemoryStore.create_thread(
                             title=shared_thread_key,
                             allowed_roles=list(roles),
                             created_by=caller_key,
                         )
-                    )
-                    if shared_tid:
-                        st.session_state["shared_thread_id"] = shared_tid
-                if shared_tid:
-                    run_async(
-                        SharedMemoryStore.append_message(
-                            thread_id=shared_tid,
+                    if tid:
+                        await SharedMemoryStore.append_message(
+                            thread_id=tid,
                             message=prompt_input,
                             role="user",
                             metadata={"caller_sub": caller_key, "citations": len(citations)},
                         )
-                    )
-                    run_async(
-                        SharedMemoryStore.append_message(
-                            thread_id=shared_tid,
+                        await SharedMemoryStore.append_message(
+                            thread_id=tid,
                             message=response_text,
                             role="assistant",
                             metadata={"caller_sub": caller_key},
                         )
-                    )
+                    return tid
+
+                shared_tid = run_async(
+                    asyncio.wait_for(_persist_shared_memory(shared_tid), timeout=15.0)
+                )
+                if shared_tid:
+                    st.session_state["shared_thread_id"] = shared_tid
+                    st.caption(f"🧠 Saved to shared team memory (`{shared_tid[:8]}...`)")
+                else:
+                    st.warning("Shared team memory: could not create or locate a shared thread (check server logs for `create_thread` details).")
             except Exception as exc:
                 logger.warning("Could not persist to shared team memory: %s", exc)
+                st.warning(f"Could not persist to shared team memory: {exc}")
         st.rerun()
 
     # Centered Page Footer placed cleanly at the bottom

@@ -482,7 +482,8 @@ class PayloadPatchAgent:
             f"Issue Title: {title}\n"
             f"Issue Description: {body}\n"
         )
-        response = (await chat_completion(prompt)).strip()
+        coding_model = os.getenv("SDLC_CODING_MODEL", "gpt-4o")
+        response = (await chat_completion(prompt, model=coding_model)).strip()
         if response.startswith("```json"):
             response = response[7:]
         if response.endswith("```"):
@@ -521,7 +522,8 @@ class PayloadPatchAgent:
             f"Verification failed for issue '{issue.get('title', '')}'.\n"
             f"Failure Trace:\n{test_output[-2500:]}\n"
         )
-        response = (await chat_completion(prompt)).strip()
+        coding_model = os.getenv("SDLC_CODING_MODEL", "gpt-4o")
+        response = (await chat_completion(prompt, model=coding_model)).strip()
         if response.startswith("```json"):
             response = response[7:]
         if response.endswith("```"):

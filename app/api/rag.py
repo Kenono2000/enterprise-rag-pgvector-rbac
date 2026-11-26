@@ -166,6 +166,17 @@ async def query_rag(
     directly into the pgvector RBAC SQL filter — no post-processing step.
     """
     caller_key = user.email or user.sub or "anonymous"
+    from agent.guardrails import PolicyEngine
+
+    ast_violations = [
+        v for v in PolicyEngine.verify_ast(request.question)
+        if not v.startswith("Syntax error in code:")
+    ]
+    if ast_violations:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"AST security violation: {'; '.join(ast_violations)}",
+        )
     est_tokens = max(len(request.question.split()), (len(request.question) + 3) // 4)
     try:
         allowed, cur_tok, max_tok, enforce, err_reason = await DatabaseManager.check_token_limit(caller_key, est_tokens)
