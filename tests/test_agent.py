@@ -166,8 +166,8 @@ def test_webhook_signature():
     digest = hmac.new(webhook_key.encode(), body, hashlib.sha256).hexdigest()
     valid_sig = f"sha256={digest}"
 
-    assert verify_github_signature(body, valid_sig, secret) is True
-    assert verify_github_signature(body, "sha256=invalid", secret) is False
+    assert verify_github_signature(body, valid_sig, webhook_key) is True
+    assert verify_github_signature(body, "sha256=invalid", webhook_key) is False
     assert verify_github_signature(body, None, None) is True
 
 
