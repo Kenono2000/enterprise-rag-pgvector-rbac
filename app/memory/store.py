@@ -380,6 +380,11 @@ class SharedMemoryStore:
         if not roles:
             logger.warning("store_fact refused for key=%s: no valid allowed_roles (fail-closed).", key)
             return None
+        from agent.quality_control import PromptInjectionSanitizer
+
+        if PromptInjectionSanitizer.detect(value):
+            logger.warning("store_fact refused for key=%s: potential memory injection (MINJA) detected.", key)
+            return None
         safe_key = _safe_key(key)
         try:
             vec = embedding if embedding is not None else await _embed(value)
