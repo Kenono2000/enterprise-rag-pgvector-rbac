@@ -64,7 +64,7 @@ class Citation(BaseModel):
 class RAGQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    question: str = Field(..., json_schema_extra={"example": "hat is my life purpose in God's eyes?"})
+    question: str = Field(..., json_schema_extra={"example": "How do i find out my purpose in life?"})
 
 
 class RAGResponse(BaseModel):

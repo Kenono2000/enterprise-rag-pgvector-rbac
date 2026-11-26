@@ -78,7 +78,7 @@ class Citation(BaseModel):
 class RAGQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    question: str = Field(..., min_length=1, json_schema_extra={"example": "hat is my life purpose in God's eyes?"})
+    question: str = Field(..., min_length=1, json_schema_extra={"example": "How do i find out my purpose in life?"})
     mode: str = Field(default="hybrid", description="Retrieval mode: 'hybrid' (vector + full-text RRF) or 'dense'")
     thinking_budget: Optional[int] = Field(
         default=0,
@@ -1171,4 +1171,4 @@ if mcp_http_app is not None:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app.main:app", host=os.getenv("HOST", "127.0.0.1"), port=8000, reload=True)
