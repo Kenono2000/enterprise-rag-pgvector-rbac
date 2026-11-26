@@ -36,7 +36,6 @@ import asyncio
 import json
 import logging
 import os
-import urllib.parse
 from typing import Optional
 from dotenv import load_dotenv, find_dotenv
 
@@ -59,7 +58,7 @@ from app.auth import (
 import importlib
 import app.db.llm as _llm_module
 importlib.reload(_llm_module)
-from app.db.llm import generate_embedding, chat_completion, chat_completion_stream_sync
+from app.db.llm import generate_embedding, chat_completion_stream_sync
 from app.db import DatabaseManager
 from app.memory.store import SharedMemoryStore
 from app.observability import tracer
@@ -138,8 +137,8 @@ def _secret(key: str) -> Optional[str]:
     if not value:
         try:
             value = st.secrets.get(key) or st.secrets.get(key.upper())  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Secret lookup failed for %s: %s", key, exc)
     return value
 
 
@@ -399,8 +398,8 @@ def _get_browser_cookie(name: str) -> Optional[str]:
     try:
         if hasattr(st, "context") and hasattr(st.context, "cookies"):
             return st.context.cookies.get(name)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Cookie read failed for %s: %s", name, exc)
     return None
 
 
@@ -455,8 +454,8 @@ def _restore_session_from_cookie() -> bool:
                     p = verify_google_token(id_token)
                     token_exp = p.get("exp", 0)
                     session_data["roles"] = extract_roles(p)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Silent token refresh verification failed: %s", exc)
                 session_data["id_token"] = id_token
                 session_data["token_exp"] = token_exp
                 st.session_state["_cookie_to_set"] = encode_session_cookie(
@@ -699,8 +698,8 @@ def _render_sign_in_page() -> None:
 
                     now = _time.time()
                     st.session_state["authenticated"] = True
-                    st.session_state["id_token"] = "mock-dev-token-require-google-auth-false"
-                    st.session_state["access_token"] = "mock-dev-access-token"
+                    st.session_state["id_token"] = "mock-dev-token-require-google-auth-false"  # noqa: S105
+                    st.session_state["access_token"] = "mock-dev-access-token"  # noqa: S105
                     st.session_state["refresh_token"] = ""
                     st.session_state["token_exp"] = now + MAX_SESSION_SECONDS
                     st.session_state["token_iat"] = now
@@ -1278,7 +1277,6 @@ def _render_rag_interface() -> None:
 
                     # Incorporate prior conversational context for multi-turn inquiry awareness (from thread-safe snapshot)
                     prior_msgs = [m for m in current_messages_snapshot[:-1] if m.get("content")]
-                    recent_history_chunks = []
                     search_query = prompt_input
                     if prior_msgs:
                         last_few = prior_msgs[-6:]  # Up to last 3 user/assistant conversational turns

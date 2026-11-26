@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.db import DatabaseManager, generate_embedding, chat_completion, chat_completion_stream, get_vector_search_adapter
 from app.rag import ContextAssembler
 from app.auth import verify_google_token, extract_roles
+from agent.guardrails import PolicyEngine
 from app.auth.role_mapper import sanitize_roles_for_query
 from app.memory.store import SharedMemoryStore
 from app.observability import tracer

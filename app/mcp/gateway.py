@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict
 
 # Add the project root to sys.path to allow absolute imports of the 'app' package
 # when this file is run as a standalone script (e.g., by fastmcp inspect).
@@ -200,8 +200,8 @@ def _resolve_caller_attribution(auth_token: Optional[str] = None) -> Dict[str, s
                 "caller_sub": str(payload.get("sub") or payload.get("email") or "authenticated-user"),
                 "caller_email": str(payload.get("email") or "unknown"),
             }
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Token attribution lookup failed: %s", exc)
     return {"caller_sub": "anonymous", "caller_email": "anonymous"}
 
 
