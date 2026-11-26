@@ -28,7 +28,7 @@ import logging
 import os
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Security, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -209,9 +209,16 @@ async def query_rag(
     avg_confidence = round(
         sum(c.similarity_score for c in citations) / len(citations), 3
     )
-    context_chunks = "\n\n".join(
-        [f"[{r['title']}]: {r['content']}" for r in rows]
-    )
+    from agent.quality_control import PromptInjectionSanitizer
+
+    fenced_chunks = []
+    for r in rows:
+        raw_content = str(r.get("content") or "")
+        if PromptInjectionSanitizer.detect(raw_content):
+            logger.warning("Potential indirect prompt injection detected in RAG doc_id=%s", r.get("document_id"))
+        fenced = PromptInjectionSanitizer.fence_untrusted_text(raw_content, source=f"rag_{r.get('document_id', 'doc')}")
+        fenced_chunks.append(f"[{r['title']}]:\n{fenced}")
+    context_chunks = "\n\n".join(fenced_chunks)
 
     prompt = f"Answer strictly using context:\n\n{context_chunks}\n\nQuestion: {request.question}"
     answer_text = await chat_completion(prompt)

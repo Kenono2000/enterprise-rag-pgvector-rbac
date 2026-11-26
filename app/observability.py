@@ -9,6 +9,7 @@ Integrates with OpenTelemetry when configured, with structured metrics fallback.
 from __future__ import annotations
 
 import json
+import os
 import time
 import logging
 from typing import Any, Dict, List, Optional
@@ -191,7 +192,10 @@ class ObservabilityTracer:
 
         if self._otel_tracer:
             try:
-                capture_content = os.getenv("OTEL_GENAI_CAPTURE_CONTENT", "false").lower() == "true"
+                capture_content = (
+                    os.getenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT")
+                    or os.getenv("OTEL_GENAI_CAPTURE_CONTENT", "false")
+                ).lower() == "true"
                 with self._otel_tracer.start_span("rag_chat_completion") as span:
                     span.set_attribute("gen_ai.operation.name", "chat")
                     span.set_attribute("gen_ai.request.model", model)
@@ -230,11 +234,15 @@ class ObservabilityTracer:
 
         if self._otel_tracer:
             try:
-                capture_content = os.getenv("OTEL_GENAI_CAPTURE_CONTENT", "false").lower() == "true"
+                capture_content = (
+                    os.getenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT")
+                    or os.getenv("OTEL_GENAI_CAPTURE_CONTENT", "false")
+                ).lower() == "true"
                 span_name = f"mcp_tool.{tool_name}"
                 with self._otel_tracer.start_span(span_name) as span:
                     span.set_attribute("gen_ai.operation.name", "execute_tool")
                     span.set_attribute("gen_ai.tool.name", tool_name)
+                    span.set_attribute("mcp.method.name", "tools/call")
                     span.set_attribute("mcp.tool_name", tool_name)
                     span.set_attribute("mcp.roles", ",".join(roles) if roles else "none")
                     span.set_attribute("mcp.duration_ms", duration_ms)

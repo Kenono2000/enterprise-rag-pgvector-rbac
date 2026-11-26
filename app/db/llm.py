@@ -108,7 +108,7 @@ def _get_chat_model_or_deployment(default_model: str = "gpt-4o-mini") -> str:
     if is_databricks_backend():
         return os.getenv("DATABRICKS_CHAT_ENDPOINT", "databricks-meta-llama-3-1-8b-instruct")
     if is_gcp_backend():
-        return os.getenv("GCP_CHAT_MODEL", "gemini-1.5-flash")
+        return os.getenv("GCP_CHAT_MODEL", "gemini-3.8-flash")
     return default_model
 
 
@@ -128,15 +128,22 @@ async def generate_embedding(text: str, dimensions: int = 1536) -> list[float]:
     return [0.01 * (i % 5) for i in range(dimensions)]
 
 
+def _supports_sampling_params(model: str) -> bool:
+    """Return False for Anthropic Claude models (API 2026-10-21 rejects temperature/top_p/top_k with HTTP 400)."""
+    return "claude" not in (model or "").lower()
+
+
 async def chat_completion(prompt: str, model: str = "gpt-4o-mini", temperature: float = 0.0) -> str:
     client = get_openai_client()
     if client:
         target_model = _get_chat_model_or_deployment(model)
-        completion = await client.chat.completions.create(
-            model=target_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-        )
+        kwargs: dict = {
+            "model": target_model,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if _supports_sampling_params(target_model):
+            kwargs["temperature"] = temperature
+        completion = await client.chat.completions.create(**kwargs)
         return completion.choices[0].message.content
     return f"[Local Mock Response for]: {prompt[:50]}..."
 
@@ -146,12 +153,14 @@ async def chat_completion_stream(prompt: str, model: str = "gpt-4o-mini", temper
     client = get_openai_client()
     if client:
         target_model = _get_chat_model_or_deployment(model)
-        stream = await client.chat.completions.create(
-            model=target_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            stream=True,
-        )
+        kwargs: dict = {
+            "model": target_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": True,
+        }
+        if _supports_sampling_params(target_model):
+            kwargs["temperature"] = temperature
+        stream = await client.chat.completions.create(**kwargs)
         async for chunk in stream:
             if not chunk.choices:
                 continue
@@ -174,12 +183,14 @@ def chat_completion_stream_sync(prompt: str, model: str = "gpt-4o-mini", tempera
             api_version=azure_openai_api_version,
         )
         target_model = _get_chat_model_or_deployment(model)
-        stream = sync_client.chat.completions.create(
-            model=target_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            stream=True,
-        )
+        kwargs: dict = {
+            "model": target_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": True,
+        }
+        if _supports_sampling_params(target_model):
+            kwargs["temperature"] = temperature
+        stream = sync_client.chat.completions.create(**kwargs)
         for chunk in stream:
             if not chunk.choices:
                 continue
@@ -188,12 +199,14 @@ def chat_completion_stream_sync(prompt: str, model: str = "gpt-4o-mini", tempera
                 yield content
     elif openai_api_key:
         sync_client = OpenAI(api_key=openai_api_key)
-        stream = sync_client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            stream=True,
-        )
+        kwargs: dict = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": True,
+        }
+        if _supports_sampling_params(model):
+            kwargs["temperature"] = temperature
+        stream = sync_client.chat.completions.create(**kwargs)
         for chunk in stream:
             if not chunk.choices:
                 continue

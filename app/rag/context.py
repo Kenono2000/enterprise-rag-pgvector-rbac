@@ -17,7 +17,10 @@ All steps are deterministic and offline-testable; no network or LLM calls are ma
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, ConfigDict
 
@@ -54,6 +57,11 @@ class ContextAssembler:
         title = str(chunk.get("title") or chunk.get("document_id") or "Document").strip()
         chunk_index = int(chunk.get("chunk_index") or 0)
         content = str(chunk.get("content") or chunk.get("text") or "").strip()
+        from agent.quality_control import PromptInjectionSanitizer
+
+        if PromptInjectionSanitizer.detect(content):
+            logger.warning("Potential indirect prompt injection detected in RAG chunk title=%r chunk=%d", title, chunk_index)
+            content = PromptInjectionSanitizer.fence_untrusted_text(content, source=f"rag_{title}_c{chunk_index}")
         return f"[Doc: {title}, Chunk {chunk_index}]:\n{content}"
 
     @classmethod

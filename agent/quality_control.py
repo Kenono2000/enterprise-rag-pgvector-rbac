@@ -286,6 +286,9 @@ class PromptInjectionSanitizer:
         re.compile(r"(?i)you\s+are\s+now\s+(in\s+)?developer\s+mode"),
         re.compile(r"(?i)exfiltrate\s+.*(\.env|ssh|secret|token|key)"),
         re.compile(r"(?i)override\s+(all\s+)?(security|safety|guardrail)"),
+        re.compile(r"(?i)(<\|im_start\|>|\[INST\]|<<SYS>>)"),
+        re.compile(r"(?i)new\s+system\s+instructions\s*:"),
+        re.compile(r"(?i)call\s+(the\s+)?\w+\s+tool\s+with"),
     ]
 
     @classmethod
