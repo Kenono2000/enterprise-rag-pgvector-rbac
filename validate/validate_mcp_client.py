@@ -58,7 +58,7 @@ async def main():
             result = await client.call_tool(
                 "search_sdlc_context",
                 {
-                    "question": "How do i find out my purpose in life?",
+                    "question": "What is my life purpose in God's eyes?",
                     "user_role": '["finance_executive"]'
                 }
             )

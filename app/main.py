@@ -78,7 +78,7 @@ class Citation(BaseModel):
 class RAGQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    question: str = Field(..., min_length=1, json_schema_extra={"example": "How do i find out my purpose in life?"})
+    question: str = Field(..., min_length=1, json_schema_extra={"example": "What is my life purpose in God's eyes?"})
     mode: str = Field(default="hybrid", description="Retrieval mode: 'hybrid' (vector + full-text RRF) or 'dense'")
     thinking_budget: Optional[int] = Field(
         default=0,
