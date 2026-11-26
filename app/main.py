@@ -18,7 +18,7 @@ import json
 import time
 import asyncio
 import logging
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
@@ -26,8 +26,6 @@ from fastapi import FastAPI, Depends, Header, HTTPException, Security, Request, 
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, ConfigDict, Field
-
-from app.config import settings
 
 from app.db import DatabaseManager, generate_embedding, chat_completion, chat_completion_stream, get_vector_search_adapter
 from app.rag import ContextAssembler
@@ -80,7 +78,7 @@ class Citation(BaseModel):
 class RAGQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    question: str = Field(..., min_length=1, json_schema_extra={"example": "How do i find out my purpose in life?"})
+    question: str = Field(..., min_length=1, json_schema_extra={"example": "hat is my life purpose in God's eyes?"})
     mode: str = Field(default="hybrid", description="Retrieval mode: 'hybrid' (vector + full-text RRF) or 'dense'")
     thinking_budget: Optional[int] = Field(
         default=0,
@@ -666,8 +664,8 @@ async def query_rag_stream(
                 operation_type="rag_query_stream",
                 metadata={"mode": request.mode, "citations_count": len(citations)},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to record token consumption: %s", exc)
 
         yield f"data: {json.dumps({'event': 'done', 'confidence_score': avg_confidence})}\n\n"
 
@@ -1091,7 +1089,7 @@ async def memory_list_threads(
 # Autonomous SDLC GitHub Webhook Endpoint (Policy: never_ask_approval)
 # ---------------------------------------------------------------------------
 
-SDLC_WEBHOOK_TIMEOUT = float(os.getenv("SDLC_WEBHOOK_TIMEOUT_SECONDS", "60.0"))
+SDLC_WEBHOOK_TIMEOUT = float(os.getenv("SDLC_WEBHOOK_TIMEOUT_SECONDS", "180.0"))
 SDLC_TEST_TIMEOUT = float(os.getenv("SDLC_TEST_TIMEOUT_SECONDS", "30.0"))
 
 
