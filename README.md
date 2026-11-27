@@ -310,8 +310,8 @@ flowchart LR
 
 ### 5.f Tri-Paradigm SDLC Workflow (`agent/workflow.py`)
 - **5.f.1 LangGraph Checkpointing & Container Restart Resilience**: `PostgresCheckpointSaver` extends LangGraph state persistence, committing graph steps to PostgreSQL (`sdlc_workflow_checkpoints`) with time-travel inspection and multi-worker resume support. If a container or worker restarts mid-investigation, `load_workflow_checkpoint()` restores `AgentState` without conversation loss, while Git feature branches (`feature/AGENT-<ID>-<slug>`) and in-memory `file_snapshots` reconnect file state seamlessly.
-- **5.f.2 CrewAI Role Specialization & Multi-Model Tiering**: Orchestrates specialized agents across tiered LLMs: `arch-synthesizer` (Staff Architect, `inherit` frontier reasoning model), `cross-model-judge` (Lead Security Auditor, Gemini Pro `pro`), and `test-triager` (SRE & Pytest Diagnostician, Gemini Flash `flash`). Operates via zero-overhead `native_pydantic` models by default, with `USE_CREWAI_SDK=true` dynamically activating upstream `crewai.Crew` orchestration.
-- **5.f.3 Hermes Agent Lifelong Learning, GRPO Trajectories & Input/Skill Fencing**: Automatically distills verified successful patches into portable `SKILL.md` files in `.agent/skills/hermes-*/` for single-shot retrieval on future runs (`recall_relevant_skills`, filtering poisoned skills with `PromptInjectionSanitizer` against ASI06), while `PayloadPatchAgent.propose()` fences untrusted GitHub issue titles and bodies (ASI01). Exports ShareGPT-formatted RL trajectories with Atropos GRPO step rewards calculated from judge scores penalized by repair attempts (`reward = max(0.0, score - 0.25 * repairs)`).
+- **5.f.2 CrewAI Role Specialization & Multi-Model Tiering**: Orchestrates specialized agents across tiered LLMs: `arch-synthesizer` (Staff Architect, `inherit` frontier reasoning model), `cross-model-judge` (Lead Security Auditor, Gemini Pro `pro`), and `test-triager` (SRE & Pytest Diagnostician, Gemini Flash `flash`). Operates via zero-overhead `native_pydantic` models by default, with `USE_CREWAI_SDK=true` dynamically activating upstream `crewai.Crew` orchestration. Patch synthesis (`propose_patches`) and repair (`repair_patches`) use `SDLC_CODING_MODEL` (default `gpt-4o`), while general RAG/chat uses `gpt-4o-mini`.
+- **5.f.3 Hermes Agent Lifelong Learning, GRPO Trajectories & Input/Skill Fencing**: Automatically distills verified successful patches into portable `SKILL.md` files in `.agent/skills/hermes-*/` for single-shot retrieval on future runs (`recall_relevant_skills`, filtering poisoned skills with `PromptInjectionSanitizer` against ASI06), while `PayloadPatchAgent.propose()` fences untrusted GitHub issue titles and bodies (ASI01). Exports ShareGPT-formatted RL trajectories (`HermesTrajectoryRecord`, `human` → `gpt` turns) with Atropos GRPO step rewards (`reward = max(0.0, score - 0.25 * repairs)`, where `score` is the `pro` judge score `0.0`–`1.0` and `repairs` is the `repair_patches` retry count, incentivizing first-pass correctness). Trajectories are returned in-memory on successful `synthesize_hermes_skill` → `finalize` runs (triggered via `POST /webhooks/github`, MCP `run_sdlc_crew`, or `SDLCWorkflow().run(...)`) and can be written to JSONL via `record.model_dump_json()`.
 - **5.f.4 Autonomous Governance (`never_ask_approval`)**: Executes unattended without blocking at interrupt approval cards; execution is constrained by `asyncio.wait_for()` timeouts with deterministic error classification.
 
 ### 5.g Defense-in-Depth Guardrails (`agent/guardrails.py`)
@@ -331,11 +331,28 @@ flowchart LR
     style Runtime fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
 ```
 ### 5.h AI Code Agent Quality Control & Manual Commit Proving (`agent/quality_control.py`, `scripts/agent_quality_gate.py`)
-- **5.h.1 Pre-Write & Pre-Commit Gates**: `QualityControlPipeline` (`ASTPolicyGate`, `SecretScanner`, `PromptInjectionSanitizer`, `ScopeGuard`, `RuffStandardsGate`) and `python -m scripts.agent_quality_gate --staged --prove quality_proof.json` enforce fail-closed quality proving via `.pre-commit-config.yaml` (`tests/test_quality_control.py`, 9 tests). See [SAFEGUARD.md](SAFEGUARD.md) for full details.
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Runtime ["1. Runtime Request Guardrails"]
+        direction TB
+        Req["UI / API / MCP Request"] --> AST["PolicyEngine.verify_ast<br/>&amp; Pydantic extra=&quot;forbid&quot;"] --> RBAC["check_tool_permission<br/>+ SlidingWindow &amp; TokenBreaker"]
+    end
+    subgraph Commit ["2. Pre-Commit &amp; CI Gates"]
+        direction TB
+        Hook["agent_quality_gate.py<br/>--staged --prove"] --> Ruff["Ruff Blocking Gate<br/>F821/F401/F841/S105/S110"] --> Inv["test_architectural_invariants.py<br/>(6 Platform Invariants)"]
+    end
+    Runtime --> Commit
+    style Runtime fill:#eff6ff,stroke:#3b82f6,stroke-width:1.5px
+    style Commit fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
+```
+- **5.h.1 5-Layer `QualityControlPipeline`**: Enforces `PromptInjectionSanitizer` (Layer 1), `ScopeGuard` (Layer 2), `ASTPolicyGate` + `SecretScanner` (Layer 3), `RuffStandardsGate` (Layer 4, blocking `F821`/`F401`/`F841`/`S105`/`S110`), and `QualityControlPipeline` commit proving (Layer 5), aligned with OWASP ASI Top 10, AISVS, and ACS.
+- **5.h.2 Pre-Commit & CLI Proving**: `python -m scripts.agent_quality_gate --staged --prove quality_proof.json` runs via `.pre-commit-config.yaml` and `.git/hooks/pre-commit`, failing closed on any blocking finding and emitting a verifiable `quality_proof.json` attestation (`tests/test_quality_control.py`, 9 tests).
+- **5.h.3 RAG Question AST Guard**: `PolicyEngine.verify_ast` is also applied to user questions across FastAPI (`app/main.py`, `app/api/rag.py`), MCP (`app/mcp/gateway.py` `search_sdlc_context`), and Streamlit (`streamlit_app.py` `st.chat_input`), filtering out `"Syntax error in code:"` so natural-language queries pass while blocking actual AST execution payloads.
 
 ### 5.i Shared Chat + Agent Memory Workflow (`app/memory/store.py`)
 
-Free, self-hosted shared memory on the project's existing PostgreSQL + pgvector. Every message/fact is stored with an `allowed_roles` JSONB tag; every read is pre-filtered through the canonical `sanitize_roles_for_query()` and fails closed to empty when the caller resolves to zero roles.
+Free, self-hosted shared memory on the project's existing PostgreSQL + pgvector, exposed across Streamlit (`streamlit_app.py`), FastAPI (`app/main.py`), and MCP (`app/mcp/gateway.py`). Every message/fact is stored with an `allowed_roles` JSONB tag; every read is pre-filtered through the canonical `sanitize_roles_for_query()` and fails closed to empty when the caller resolves to zero roles. In Streamlit, `save_workflow_checkpoint` (10s timeout) and `_persist_shared_memory` (15s timeout, single `run_async` call) are bounded with `asyncio.wait_for` and surface `st.warning`/`st.caption` status in the UI.
 
 #### Diagram 7: Shared Chat & Agent Memory
 ```mermaid
@@ -390,3 +407,12 @@ flowchart LR
 2. **Rollback**: revert `RETRIEVAL_BACKEND` and restart — no data migration is needed because all four backends are read-only over the same ingested corpus.
 3. **RBAC verification**: run `pytest tests/test_role_sanitization_contract.py tests/test_architectural_invariants.py` after any backend change.
 4. **Token budget sanity**: confirm `/api/v1/tokens/usage` (§5.c) still records events after the switch.
+## 7. SDLC Webhook, Patching & Outbox
+### 7.a `sdlc_outbox_events` Transactional Outbox
+- Defined in `schema.sql` with `id`, `event_key` (unique idempotency key), `aggregate_type` (default `'sdlc_webhook'`), `payload` (`JSONB`), `status` (`'PENDING'` → `'PROCESSING'` → `'COMPLETED'` / `'FAILED'`), `locked_by`, `locked_at`, `attempts`, `created_at`, and `processed_at`.
+- `DatabaseManager` provides `enqueue_outbox_event()`, `claim_next_outbox_batch()` (`FOR UPDATE SKIP LOCKED`), and `complete_outbox_event()` in `app/db/manager.py` (currently exercised in `tests/test_database_schema.py`; no API route calls them directly).
+### 7.b `POST /webhooks/github` & Targeted Patching
+- **Endpoint**: `POST /webhooks/github` in `app/main.py` triggers `LangGraphSDLCWorkflow` when `X-GitHub-Event: issues` and `action == "opened"` (validating `X-Hub-Signature-256` if `GITHUB_WEBHOOK_SECRET` is set).
+- **Minimal Payload**: Requires `action`, `issue` (`number`, `title`, `body`), and `repository.full_name` (a real GitHub `owner/repo` is needed for PR creation; placeholder repos return `404: Not Found`).
+- **Timeout & Hot-Reload**: `SDLC_WEBHOOK_TIMEOUT_SECONDS` defaults to `180.0`s; `uvicorn app.main:app --reload --port 8000` hot-reloads code changes. `git commit --no-verify` is used in workflow finalization so pre-commit hooks do not stall the webhook.
+- **Targeted Patching (`agent/workflow.py`)**: `PatchProposal` supports `search`/`replace` (with `\r\n` → `\n` normalization and non-fatal skip on missing blocks), unified diffs (`_apply_unified_diff`), and full-file `content` fallback for new files. `PayloadPatchAgent.STATIC_SYSTEM_PREFIX` instructs `arch-synthesizer` to emit `search`/`replace` for existing files.
