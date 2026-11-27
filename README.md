@@ -244,26 +244,7 @@ flowchart LR
 - **5.b.6 MCP Manifest Hash Pinning & Tool-Poisoning Gate**: `compute_tool_manifest()` and `verify_tool_manifest_integrity()` compute a canonical SHA-256 digest over every registered tool's name, ACL roles, docstring, and strict JSON schema (pinned at startup or via `MCP_PINNED_MANIFEST_SHA256`), scan tool descriptions for OWASP ASI04 metadata injection, and expose `manifest_integrity` in `get_gateway_metadata`. `propose_patch` additionally enforces deterministic `PromptInjectionSanitizer`, `SecretScanner`/`PolicyEngine.scan_for_secrets()`, protected-path checks, and AST verification prior to accepting patches.
 - **5.b.7 FastAPI Co-Hosted Mount (`app/main.py`)**: The main app still mounts the shared MCP gateway at `/mcp` for local co-hosted development via `mcp.http_app(path="/mcp")` mounted at `"/"` **after every REST route** (Starlette matches in registration order, so the catch-all Mount must be last or it shadows `/api/v1/*`). The parent `lifespan` enters `mcp_http_app.router.lifespan_context` so FastMCP's `StreamableHTTPSessionManager` task group initializes — a plain `app.mount("/mcp", http_app())` both mis-routes the endpoint to `/mcp/mcp` (bare `/mcp` 307-redirects to a 404) and skips the sub-app lifespan ("Task group is not initialized", HTTP 500), which MCP hosts surface as a 30s connection timeout. Pinned by `tests/test_mcp_auth.py::TestFastMcpHttpMount`. The gateway is installed separately via `requirements-gateway.txt` so the CrewAI app install path stays free of the FastMCP dependency surface.
 
-### 5.c Managed Token Budget & Administrative Shutoff API (`app/main.py`)
-```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
-flowchart LR
-    subgraph Ledger ["1. Token Accounting"]
-        direction TB
-        Event["LLM Call Event"] --> DB["token_consumption_ledger<br/>&amp; token_managed_limits"]
-    end
-    subgraph Shutoff ["2. Kill-Switch Control"]
-        direction TB
-        API["REST /api/v1/tokens/limit<br/>or MCP policy://sdlc-budget"] --> Flag["enforce_limit /<br/>is_blocked = true"]
-    end
-    Ledger --> Shutoff
-    style Ledger fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
-    style Shutoff fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
-```
-- **5.c.1 Database-Backed Ledgers**: Tracks every token consumption event via `token_consumption_ledger` and enforces limits through `token_managed_limits`.
-- **5.c.2 Kill-Switching**: Allows administrators or authorized engineers to toggle `enforce_limit` or trip the emergency `is_blocked` kill-switch instantly via REST endpoints (`/api/v1/tokens/limit`) or the MCP `policy://sdlc-budget` resource.
-
-### 5.d Architectural Invariant Regression Suite (`tests/test_architectural_invariants.py`)
+### 5.c Architectural Invariant Regression Suite (`tests/test_architectural_invariants.py`)
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
 flowchart LR
@@ -286,6 +267,25 @@ Pins the six platform invariants so silent regressions fail CI first:
 4. **Event-loop-scoped pools**: `DatabaseManager.get_pool()` caches per loop, reuses within a loop, closes stale pools and recreates across loop changes (Streamlit rerun / worker restart).
 5. **Strict Pydantic V2**: `extra='forbid'` on all REST request/response models and all five MCP tool request models (422 on unknown fields).
 6. **Zero AST dynamic execution**: no builtin `eval`/`exec`/`compile`/`__import__` call sites and no `os.system`/`pickle.loads` attribute calls across `app/`, `agent/`, `libs/`, `sdlc_harness/`.
+
+### 5.d Managed Token Budget & Administrative Shutoff API (`app/main.py`)
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Ledger ["1. Token Accounting"]
+        direction TB
+        Event["LLM Call Event"] --> DB["token_consumption_ledger<br/>&amp; token_managed_limits"]
+    end
+    subgraph Shutoff ["2. Kill-Switch Control"]
+        direction TB
+        API["REST /api/v1/tokens/limit<br/>or MCP policy://sdlc-budget"] --> Flag["enforce_limit /<br/>is_blocked = true"]
+    end
+    Ledger --> Shutoff
+    style Ledger fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px
+    style Shutoff fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px
+```
+- **5.d.1 Database-Backed Ledgers**: Tracks every token consumption event via `token_consumption_ledger` and enforces limits through `token_managed_limits`.
+- **5.d.2 Kill-Switching**: Allows administrators or authorized engineers to toggle `enforce_limit` or trip the emergency `is_blocked` kill-switch instantly via REST endpoints (`/api/v1/tokens/limit`) or the MCP `policy://sdlc-budget` resource.
 
 ### 5.e Full-Stack OpenTelemetry (`app/observability.py`)
 ```mermaid
@@ -374,7 +374,7 @@ flowchart LR
 
 ## 6. Multi-Cloud & Runbook
 ### 6.a 🌐 Quad-Mode Retrieval Strategy
-`RETRIEVAL_BACKEND` selects one of four engines at runtime; all four satisfy the same `VectorSearchProvider` protocol (§5.d.3) and route through the canonical `sanitize_roles_for_query()` (§2.a.3), so RBAC semantics do not drift across clouds.
+`RETRIEVAL_BACKEND` selects one of four engines at runtime; all four satisfy the same `VectorSearchProvider` protocol (§5.c.3) and route through the canonical `sanitize_roles_for_query()` (§2.a.3), so RBAC semantics do not drift across clouds.
 | Backend | `RETRIEVAL_BACKEND` | Pre-filter mechanism | Native hybrid? |
 | :--- | :--- | :--- | :--- |
 | **pgvector** | `pgvector` (default) | GIN `allowed_roles ?| $N::text[]` + HNSW iterative scan | ✅ single-pass SQL CTE RRF (§4.3) |
