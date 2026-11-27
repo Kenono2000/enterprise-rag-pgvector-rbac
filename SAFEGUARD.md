@@ -208,3 +208,27 @@ python -m scripts.agent_quality_gate agent/quality_control.py scripts/agent_qual
 2. **Unused imports** (`tempfile`, `Iterable`) caught by Ruff F401 — validates the gate itself.
 3. **Trusted subprocess calls** annotated with `# noqa: S603` — demonstrates intentional, documented exceptions rather than blanket suppression.
 4. **Always update README** from new code change — docs drift is a quality defect.
+5. **Run Ruff blocking-code check directly** (`python -m ruff check --select F821,F401,F841,S110,S105 <files>`) so blocking findings are never masked by pre-existing `E501` line-length warnings.
+## 12. Extended Runtime & CI Guardrails
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25, 'padding': 8}}}%%
+flowchart LR
+    subgraph Runtime ["1. Runtime Request Guardrails"]
+        direction TB
+        Req["UI / API / MCP Request"] --> AST["PolicyEngine.verify_ast<br/>&amp; Pydantic extra=&quot;forbid&quot;"] --> RBAC["check_tool_permission<br/>+ SlidingWindow &amp; TokenBreaker"]
+    end
+    subgraph Commit ["2. Pre-Commit &amp; CI Gates"]
+        direction TB
+        Hook["agent_quality_gate.py<br/>--staged --prove"] --> Ruff["Ruff Blocking Gate<br/>F821/F401/F841/S105/S110"] --> Inv["test_architectural_invariants.py<br/>(6 Platform Invariants)"]
+    end
+    Runtime --> Commit
+    style Runtime fill:#eff6ff,stroke:#3b82f6,stroke-width:1.5px
+    style Commit fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px
+```
+1. **AST Guard on RAG Questions (`PolicyEngine.verify_ast`)**: Applied to user questions across FastAPI (`app/main.py`, `app/api/rag.py`), MCP (`app/mcp/gateway.py` `search_sdlc_context`), and Streamlit (`streamlit_app.py` `st.chat_input`). Filters out `"Syntax error in code:"` so natural-language queries pass while blocking actual AST execution/traversal payloads (`eval()`, `exec()`, `subprocess(shell=True)`).
+2. **MCP Gateway Runtime Guardrails (`app/mcp/gateway.py`)**:
+   - **Blast Radius Controls**: `SlidingWindowRateLimiter` (60 req/min per caller) and `TokenCircuitBreaker` (8,000 tokens/request, 50,000 tokens/issue, returning `token_budget_remaining`).
+   - **Strict Pydantic Schemas (`extra="forbid"`)**: Enforced across all FastAPI REST models (`app/main.py`, `app/api/rag.py`) and MCP tool schemas (`app/mcp/gateway.py`).
+   - **Fail-Closed Tool RBAC (`check_tool_permission`)**: Authenticated tokens resolving to zero roles (`[]`) are denied for restricted tools, preventing confused deputy exploits.
+   - **RFC 9728 & RFC 8707 Discovery (`get_gateway_metadata`)**: Exposes Protected Resource Metadata, `streamable-http` transport, `Mcp-Method`/`Mcp-Name` proxy reflection headers, and tool-level RBAC scope bindings.
+3. **Architectural Invariant Regression Suite (`tests/test_architectural_invariants.py`)**: Pins 6 CI invariants—in-DB RBAC pre-filtering (`allowed_roles ?| $N::text[]`), empty-role short-circuiting, `VectorSearchProvider` structural subtyping, event-loop scoped `asyncpg` pools, `extra="forbid"`, and zero AST dynamic execution violations.
