@@ -28,6 +28,7 @@ from app.db import chat_completion
 from app.observability import tracer
 from agent.guardrails import PolicyEngine, TokenCircuitBreaker
 from agent.parser import SDLCEvent, parse_github_webhook
+from agent.quality_control import PromptInjectionSanitizer
 
 logger = logging.getLogger("agent.workflow")
 
@@ -465,9 +466,13 @@ class PayloadPatchAgent:
         title = issue.get("title", "")
         body = issue.get("body", "")
         repo = payload.get("repository", {}).get("full_name", "")
+        if PromptInjectionSanitizer.detect(f"{title}\n{body}"):
+            logger.warning("Potential indirect prompt injection (ASI01) detected in GitHub issue title/body")
+        fenced_title = PromptInjectionSanitizer.fence_untrusted_text(title, source="github_issue_title")
+        fenced_body = PromptInjectionSanitizer.fence_untrusted_text(body, source="github_issue_body")
         role_header = SDLCCrewOrchestrator.format_role_prompt(
             SDLCCrewOrchestrator.ARCHITECT,
-            f"Synthesize patch for '{title}' in {repo}",
+            f"Synthesize patch for issue in {repo}",
         )
         skills_block = (
             "\n\nRECALLED HERMES SKILLS:\n" + "\n---\n".join(recalled_skills)
@@ -479,8 +484,8 @@ class PayloadPatchAgent:
             f"{self.STATIC_SYSTEM_PREFIX}\n\n"
             f"{role_header}{skills_block}\n\n"
             f"Repository: {repo}\n"
-            f"Issue Title: {title}\n"
-            f"Issue Description: {body}\n"
+            f"Issue Title:\n{fenced_title}\n"
+            f"Issue Description:\n{fenced_body}\n"
         )
         coding_model = os.getenv("SDLC_CODING_MODEL", "gpt-4o")
         response = (await chat_completion(prompt, model=coding_model)).strip()
@@ -803,6 +808,9 @@ class HermesSkillSynthesizer:
         for skill_md in sorted(skills_dir.glob("hermes-*/SKILL.md")):
             try:
                 text = skill_md.read_text(encoding="utf-8")
+                if PromptInjectionSanitizer.detect(text):
+                    logger.warning("Blocked poisoned Hermes skill file (ASI06): %s", skill_md)
+                    continue
                 lower = text.lower()
                 overlap = sum(1 for tok in tokens if tok in lower) if tokens else 1
                 if overlap > 0:

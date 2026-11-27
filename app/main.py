@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import json
 import time
+import hashlib
 import asyncio
 import logging
 from typing import List, Optional, Any
@@ -28,9 +29,10 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db import DatabaseManager, generate_embedding, chat_completion, chat_completion_stream, get_vector_search_adapter
-from app.rag import ContextAssembler
+from app.rag import ContextAssembler, RAGTriadEvaluator
 from app.auth import verify_google_token, extract_roles
 from agent.guardrails import PolicyEngine
+from agent.quality_control import SecretScanner
 from app.auth.role_mapper import sanitize_roles_for_query
 from app.memory.store import SharedMemoryStore
 from app.observability import tracer
@@ -495,10 +497,35 @@ async def query_rag(
     prompt = assembly.prompt
 
     gen_start = time.perf_counter()
-    answer_text = await chat_completion(prompt)
+    raw_answer_text = await chat_completion(prompt)
+    answer_text = SecretScanner.redact_secrets(raw_answer_text)
     gen_ms = round((time.perf_counter() - gen_start) * 1000, 2)
     p_tokens = len(prompt.split())
     c_tokens = len(answer_text.split())
+    triad_score = RAGTriadEvaluator.evaluate_triad(
+        question=request.question,
+        answer=answer_text,
+        context_chunks=rows,
+    )
+    tracer.record_rag_triad(
+        question=request.question,
+        answer=answer_text,
+        triad_score=triad_score,
+        roles=user.roles,
+        duration_ms=gen_ms,
+    )
+    query_sha = hashlib.sha256(request.question.encode("utf-8")).hexdigest()
+    doc_ids = [str(c.document_id) for c in citations]
+    chunk_idxs = [int(c.chunk_index or 0) for c in citations]
+    tracer.record_retrieval_audit(
+        caller_id=caller_key,
+        roles=user.roles,
+        query_sha256=query_sha,
+        document_ids=doc_ids,
+        chunk_indices=chunk_idxs,
+        retrieval_backend=backend,
+        triad_status=triad_score.status,
+    )
     tracer.record_generation(
         model="gpt-4o-mini",
         prompt_tokens=p_tokens,
@@ -522,7 +549,7 @@ async def query_rag(
         mode=f"{request.mode}:thinking-{thinking_budget}",
     )
 
-    # Persist token consumption ledger to database and update managed limits
+    # Persist token consumption ledger & retrieval audit log to database
     try:
         await DatabaseManager.record_token_consumption(
             caller_id=caller_key,
@@ -534,6 +561,19 @@ async def query_rag(
         )
     except Exception as exc:
         logger.debug("Database token ledger recording deferred: %s", exc)
+
+    try:
+        await DatabaseManager.record_rag_access_audit(
+            caller_id=caller_key,
+            roles=user.roles,
+            query_sha256=query_sha,
+            document_ids=doc_ids,
+            chunk_indices=chunk_idxs,
+            retrieval_backend=backend,
+            triad_status=triad_score.status,
+        )
+    except Exception as exc:
+        logger.debug("Database retrieval audit recording deferred: %s", exc)
 
     return RAGResponse(
         answer=answer_text,
@@ -656,10 +696,34 @@ async def query_rag_stream(
             yield f"data: {json.dumps({'event': 'token', 'token': token})}\n\n"
 
         gen_ms = round((time.perf_counter() - gen_start) * 1000, 2)
-        answer_text = "".join(full_answer)
+        answer_text = SecretScanner.redact_secrets("".join(full_answer))
         p_tokens = len(prompt.split())
         c_tokens = len(answer_text.split())
 
+        triad_score = RAGTriadEvaluator.evaluate_triad(
+            question=request.question,
+            answer=answer_text,
+            context_chunks=rows,
+        )
+        tracer.record_rag_triad(
+            question=request.question,
+            answer=answer_text,
+            triad_score=triad_score,
+            roles=user.roles,
+            duration_ms=gen_ms,
+        )
+        query_sha = hashlib.sha256(request.question.encode("utf-8")).hexdigest()
+        doc_ids = [str(c["document_id"]) for c in citations]
+        chunk_idxs = [int(c.get("chunk_index", 0)) for c in citations]
+        tracer.record_retrieval_audit(
+            caller_id=caller_key,
+            roles=user.roles,
+            query_sha256=query_sha,
+            document_ids=doc_ids,
+            chunk_indices=chunk_idxs,
+            retrieval_backend=backend,
+            triad_status=triad_score.status,
+        )
         tracer.record_generation(
             model="gpt-4o-mini",
             prompt_tokens=p_tokens,
@@ -685,6 +749,19 @@ async def query_rag_stream(
             )
         except Exception as exc:
             logger.warning("Failed to record token consumption: %s", exc)
+
+        try:
+            await DatabaseManager.record_rag_access_audit(
+                caller_id=caller_key,
+                roles=user.roles,
+                query_sha256=query_sha,
+                document_ids=doc_ids,
+                chunk_indices=chunk_idxs,
+                retrieval_backend=backend,
+                triad_status=triad_score.status,
+            )
+        except Exception as exc:
+            logger.debug("Database retrieval audit recording deferred: %s", exc)
 
         yield f"data: {json.dumps({'event': 'done', 'confidence_score': avg_confidence})}\n\n"
 

@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
@@ -106,7 +107,20 @@ class ASTPolicyGate:
         ("pickle", "loads"),
         ("pickle", "load"),
         ("yaml", "load"),
+        ("yaml", "unsafe_load"),
         ("marshal", "loads"),
+        ("marshal", "load"),
+        ("importlib", "import_module"),
+    }
+
+    FORBIDDEN_GETATTR_TARGETS: Set[str] = {
+        "system",
+        "popen",
+        "loads",
+        "load",
+        "eval",
+        "exec",
+        "__import__",
     }
 
     def __init__(self, max_function_lines: int = 120, max_nesting_depth: int = 5):
@@ -155,6 +169,25 @@ class ASTPolicyGate:
                     remediation_hint="Use safe, explicit alternatives instead of dynamic code execution.",
                 )
             )
+        elif (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+            and node.args[1].value in self.FORBIDDEN_GETATTR_TARGETS
+        ):
+            findings.append(
+                QualityFinding(
+                    rule_id="AST002",
+                    gate="ast_policy",
+                    severity=Severity.BLOCKING,
+                    message=f"Forbidden dynamic getattr resolution: `getattr(..., {node.args[1].value!r})`",
+                    file_path=file_path,
+                    line=node.lineno,
+                    remediation_hint="Avoid dynamic attribute resolution on dangerous execution primitives.",
+                )
+            )
         elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
             pair = (node.func.value.id, node.func.attr)
             if pair in self.FORBIDDEN_ATTR_CALLS:
@@ -181,6 +214,20 @@ class ASTPolicyGate:
                                 file_path=file_path,
                                 line=node.lineno,
                                 remediation_hint="Pass an argument list with `shell=False`.",
+                            )
+                        )
+            if pair[0] in {"requests", "httpx"} and pair[1] in {"get", "post", "put", "delete", "patch", "request"}:
+                for kw in node.keywords:
+                    if kw.arg == "verify" and isinstance(kw.value, ast.Constant) and kw.value.value is False:
+                        findings.append(
+                            QualityFinding(
+                                rule_id="AST008",
+                                gate="ast_policy",
+                                severity=Severity.BLOCKING,
+                                message=f"TLS certificate verification disabled in `{pair[0]}.{pair[1]}(verify=False)`.",
+                                file_path=file_path,
+                                line=node.lineno,
+                                remediation_hint="Enable TLS verification (`verify=True`) to prevent MitM attacks.",
                             )
                         )
 
@@ -274,10 +321,24 @@ class SecretScanner:
         return findings
 
 
+    @classmethod
+    def redact_secrets(cls, text: str) -> str:
+        """Redact known credential/key patterns from untrusted LLM or tool output (OWASP LLM02)."""
+        if not text:
+            return text
+        redacted = text
+        for rule_id, pattern, _msg in cls.PATTERNS:
+            if rule_id == "SEC005":
+                redacted = pattern.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
+            else:
+                redacted = pattern.sub(f"[REDACTED:{rule_id}]", redacted)
+        return redacted
+
+
 class PromptInjectionSanitizer:
     """
-    Detects and fences untrusted external text (issues, PRs, READMEs, tool outputs)
-    to mitigate OWASP ASI01 (Goal Hijack) and ASI06 (Memory/Context Poisoning).
+    Detects and fences untrusted external text (issues, PRs, READMEs, tool manifests/outputs)
+    to mitigate OWASP ASI01 (Goal Hijack), ASI04 (Tool Poisoning), and ASI06 (Memory/Context Poisoning).
     """
 
     INJECTION_PATTERNS: List[re.Pattern[str]] = [
@@ -289,14 +350,28 @@ class PromptInjectionSanitizer:
         re.compile(r"(?i)(<\|im_start\|>|\[INST\]|<<SYS>>)"),
         re.compile(r"(?i)new\s+system\s+instructions\s*:"),
         re.compile(r"(?i)call\s+(the\s+)?\w+\s+tool\s+with"),
+        re.compile(r"(?i)<\s*(IMPORTANT|instructions|system_override)\b[^>]*>"),
+        re.compile(r"(?i)(do\s+not\s+tell|hide\s+this\s+from)\s+the\s+user"),
+        re.compile(r"(?i)(silently\s+execute|before\s+calling\s+any\s+other\s+tool|bypass\s+rbac)"),
+        re.compile(r"(?i)!\[[^\]]*\]\(https?://[^\s)]*(secret|token|key|password|env)=[^)]+\)"),
     ]
+
+    _ZERO_WIDTH_RE: re.Pattern[str] = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff\u00ad]")
 
     @classmethod
     def detect(cls, text: str) -> List[str]:
-        """Return list of matched injection pattern descriptions."""
+        """Return list of matched injection pattern descriptions (normalizing zero-width & NFKC homoglyphs)."""
+        if not text:
+            return []
         matches: List[str] = []
+        if cls._ZERO_WIDTH_RE.search(text):
+            matches.append("zero_width_obfuscation")
+        stripped = cls._ZERO_WIDTH_RE.sub("", text)
+        normalized = unicodedata.normalize("NFKC", stripped)
+        if normalized != stripped and any(pat.search(normalized) and not pat.search(stripped) for pat in cls.INJECTION_PATTERNS):
+            matches.append("unicode_homoglyph_obfuscation")
         for pat in cls.INJECTION_PATTERNS:
-            if pat.search(text):
+            if pat.search(normalized):
                 matches.append(pat.pattern)
         return matches
 
@@ -472,7 +547,8 @@ class RuffStandardsGate:
             proc = subprocess.run(  # noqa: S603
                 [sys.executable, "-m", "ruff", "check", "--select", self.select, "--output-format", "json", *py_paths],
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=False,
             )
             if proc.stdout.strip():
@@ -499,7 +575,8 @@ class RuffStandardsGate:
                 fmt = subprocess.run(  # noqa: S603
                     [sys.executable, "-m", "ruff", "format", "--check", *py_paths],
                     capture_output=True,
-                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     check=False,
                 )
                 if fmt.returncode != 0:

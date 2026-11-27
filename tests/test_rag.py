@@ -204,3 +204,42 @@ def test_query_thinking_budget_negative_rejected(monkeypatch):
         headers={"X-User-Roles": '["engineer"]'},
     )
     assert response.status_code == 422
+
+
+def test_query_redacts_secrets_and_records_triad_and_audit(monkeypatch):
+    """Verify /api/v1/query redacts accidental secrets and records triad + audit telemetry."""
+    from app.observability import tracer
+
+    monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "false")
+    aws_dummy = "AKIA" + "1234567890ABCDEF"
+    with patch("app.main.generate_embedding", new_callable=AsyncMock) as mock_emb, \
+         patch("app.main.DatabaseManager.secure_search", new_callable=AsyncMock) as mock_search, \
+         patch("app.main.chat_completion", new_callable=AsyncMock) as mock_llm, \
+         patch("app.main.DatabaseManager.record_rag_access_audit", new_callable=AsyncMock) as mock_audit:
+
+        mock_emb.return_value = [0.1] * 1536
+        mock_search.return_value = [
+            {
+                "document_id": "doc-sec",
+                "title": "Engineering Standards",
+                "chunk_index": 0,
+                "content": "Never hardcode credentials in Engineering Standards.",
+                "allowed_roles": ["engineer"],
+                "similarity": 0.92,
+            }
+        ]
+        mock_llm.return_value = f"Never expose {aws_dummy} [Doc: Engineering Standards, Chunk 0]."
+
+        response = client.post(
+            "/api/v1/query",
+            json={"question": "What are the Engineering Standards on credentials?"},
+            headers={"X-User-Roles": '["engineer"]'},
+        )
+        assert response.status_code == 200
+        answer = response.json()["answer"]
+        assert aws_dummy not in answer
+        assert "[REDACTED:SEC002]" in answer
+        assert mock_audit.called
+        recent_events = [m.get("event") for m in tracer.get_recent_metrics(limit=15)]
+        assert "rag_triad_evaluation" in recent_events
+        assert "rag_access_audit" in recent_events

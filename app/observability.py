@@ -318,6 +318,50 @@ class ObservabilityTracer:
             except Exception as exc:
                 logger.debug("Failed exporting RAG triad evaluation to OTel: %s", exc)
 
+    def record_retrieval_audit(
+        self,
+        caller_id: str,
+        roles: List[str],
+        query_sha256: str,
+        document_ids: List[str],
+        chunk_indices: List[int],
+        retrieval_backend: str = "pgvector",
+        triad_status: str = "UNVERIFIED",
+    ) -> None:
+        """Record immutable retrieval provenance event for SOC 2 / EU AI Act traceability."""
+        data = {
+            "event": "rag_access_audit",
+            "caller_id": caller_id,
+            "roles": roles,
+            "query_sha256": query_sha256[:64],
+            "document_ids": list(document_ids),
+            "chunk_indices": list(chunk_indices),
+            "retrieval_backend": retrieval_backend,
+            "triad_status": triad_status,
+            "timestamp": time.time(),
+        }
+        self._metrics.append(data)
+        if len(self._metrics) > 1000:
+            self._metrics.pop(0)
+        logger.info(
+            "RAG ACCESS AUDIT caller=%s backend=%s docs=%s triad=%s",
+            caller_id,
+            retrieval_backend,
+            document_ids,
+            triad_status,
+        )
+        if self._otel_tracer:
+            try:
+                with self._otel_tracer.start_span("rag_access_audit") as span:
+                    span.set_attribute("audit.caller_id", caller_id)
+                    span.set_attribute("audit.roles", ",".join(roles))
+                    span.set_attribute("audit.query_sha256", query_sha256[:64])
+                    span.set_attribute("audit.document_ids", json.dumps(document_ids))
+                    span.set_attribute("audit.retrieval_backend", retrieval_backend)
+                    span.set_attribute("audit.triad_status", triad_status)
+            except Exception as exc:
+                logger.debug("Failed exporting RAG access audit to OTel: %s", exc)
+
     def get_recent_metrics(self, limit: int = 50) -> List[Dict[str, Any]]:
         return self._metrics[-limit:]
 

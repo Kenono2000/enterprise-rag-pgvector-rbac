@@ -19,7 +19,7 @@ def get_db_url():
         try:
             import streamlit as st
             url = st.secrets.get("DATABASE_URL")
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
     if url and url.startswith("postgres://"):
@@ -57,6 +57,29 @@ class DatabaseManager:
             except (OverflowError, ValueError):
                 quantized.append("0.0")
         return f"[{','.join(quantized)}]"
+
+    @classmethod
+    async def configure_rls_context(
+        cls,
+        conn: Any,
+        roles: List[str],
+        local: bool = False,
+    ) -> bool:
+        """
+        Bind sanitized caller roles into PostgreSQL session/transaction GUC
+        `app.current_user_roles` for kernel-level Row-Level Security (FORCE RLS).
+        """
+        sanitized = cls.sanitize_roles_for_query(roles)
+        roles_csv = ",".join(sanitized)
+        try:
+            await conn.execute(
+                "SELECT set_config('app.current_user_roles', $1, $2)",
+                roles_csv,
+                bool(local),
+            )
+            return True
+        except Exception:
+            return False
 
     @classmethod
     async def configure_iterative_scan(
@@ -151,7 +174,7 @@ class DatabaseManager:
             if cls._pool is not None:
                 try:
                     await cls._pool.close()
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
 
             db_url = get_db_url()
@@ -201,22 +224,30 @@ class DatabaseManager:
             else f"[{','.join(map(str, query_vector))}]"
         )
 
-        distance_expr = (
-            "c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)"
-            if halfvec_enabled
-            else "c.embedding <=> $1::vector"
-        )
-        sql = f"""
-            SELECT d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles, 
-                   1 - ({distance_expr}) as similarity
-            FROM document_chunks c
-            JOIN documents d ON c.document_id = d.id
-            WHERE d.allowed_roles ?| $2::text[]
-              AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
-            ORDER BY {distance_expr}
-            LIMIT $3
-        """
+        if halfvec_enabled:
+            sql = """
+                SELECT d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
+                       1 - (c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)) as similarity
+                FROM document_chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE d.allowed_roles ?| $2::text[]
+                  AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
+                ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)
+                LIMIT $3
+            """
+        else:
+            sql = """
+                SELECT d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
+                       1 - (c.embedding <=> $1::vector) as similarity
+                FROM document_chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE d.allowed_roles ?| $2::text[]
+                  AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
+                ORDER BY c.embedding <=> $1::vector
+                LIMIT $3
+            """
         async with pool.acquire() as conn:
+            await cls.configure_rls_context(conn, sanitized_roles)
             await cls.configure_iterative_scan(
                 conn,
                 max_scan_tuples=cls.scaled_scan_tuples(sanitized_roles),
@@ -257,93 +288,136 @@ class DatabaseManager:
             else f"[{','.join(map(str, query_vector))}]"
         )
 
-        dense_dist = (
-            "c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)"
-            if halfvec_enabled
-            else "c.embedding <=> $1::vector"
-        )
-        sparse_dist = (
-            "c.embedding::halfvec(1536) <=> $2::vector::halfvec(1536)"
-            if halfvec_enabled
-            else "c.embedding <=> $2::vector"
-        )
-
         # 1. Dense retrieval (HNSW halfvec cosine distance)
-        dense_sql = f"""
-            SELECT c.id::text as chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
-                   1 - ({dense_dist}) AS similarity
-            FROM document_chunks c
-            JOIN documents d ON c.document_id = d.id
-            WHERE d.allowed_roles ?| $2::text[]
-              AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
-            ORDER BY {dense_dist}
-            LIMIT $3
-        """
-
-        # 2. Sparse retrieval (Full-Text Search with ts_rank and robust fallback)
-        sparse_sql = f"""
-            SELECT c.id::text as chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
-                   ts_rank(c.tsv, plainto_tsquery('english', $1)) AS text_rank,
-                   1 - ({sparse_dist}) AS similarity
-            FROM document_chunks c
-            JOIN documents d ON c.document_id = d.id
-            WHERE d.allowed_roles ?| $3::text[]
-              AND (c.tsv @@ plainto_tsquery('english', $1) OR c.tsv @@ websearch_to_tsquery('english', $1))
-            ORDER BY text_rank DESC
-            LIMIT $4
-        """
-
-        fetch_limit = limit * 2
-
-        # 0. Single-pass SQL RRF: dense + sparse CTEs fused in-database via ROW_NUMBER() window ranks,
-        # eliminating cross-network serialization of both candidate sets. Falls back to Python RRF below.
-        cte_dist = (
-            "c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)"
-            if halfvec_enabled
-            else "c.embedding <=> $1::vector"
-        )
-        fused_sql = f"""
-            WITH dense AS (
-                SELECT c.id::text AS chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content,
-                       d.allowed_roles, 1 - ({cte_dist}) AS similarity,
-                       ROW_NUMBER() OVER (ORDER BY {cte_dist}) AS rnk
+        if halfvec_enabled:
+            dense_sql = """
+                SELECT c.id::text as chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
+                       1 - (c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)) AS similarity
                 FROM document_chunks c
                 JOIN documents d ON c.document_id = d.id
-                WHERE d.allowed_roles ?| $3::text[]
+                WHERE d.allowed_roles ?| $2::text[]
                   AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
-                ORDER BY {cte_dist}
-                LIMIT $4
-            ),
-            sparse AS (
-                SELECT c.id::text AS chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content,
-                       d.allowed_roles, 1 - ({cte_dist}) AS similarity,
-                       ts_rank(c.tsv, plainto_tsquery('english', $2)) AS text_rank,
-                       ROW_NUMBER() OVER (ORDER BY ts_rank(c.tsv, plainto_tsquery('english', $2)) DESC) AS rnk
+                ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)
+                LIMIT $3
+            """
+            sparse_sql = """
+                SELECT c.id::text as chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
+                       ts_rank(c.tsv, plainto_tsquery('english', $1)) AS text_rank,
+                       1 - (c.embedding::halfvec(1536) <=> $2::vector::halfvec(1536)) AS similarity
                 FROM document_chunks c
                 JOIN documents d ON c.document_id = d.id
                 WHERE d.allowed_roles ?| $3::text[]
-                  AND (c.tsv @@ plainto_tsquery('english', $2) OR c.tsv @@ websearch_to_tsquery('english', $2))
+                  AND (c.tsv @@ plainto_tsquery('english', $1) OR c.tsv @@ websearch_to_tsquery('english', $1))
                 ORDER BY text_rank DESC
                 LIMIT $4
-            )
-            SELECT COALESCE(dn.chunk_id_pk, sp.chunk_id_pk) AS chunk_id_pk,
-                   COALESCE(dn.document_id, sp.document_id) AS document_id,
-                   COALESCE(dn.title, sp.title) AS title,
-                   COALESCE(dn.chunk_index, sp.chunk_index) AS chunk_index,
-                   COALESCE(dn.content, sp.content) AS content,
-                   COALESCE(dn.allowed_roles, sp.allowed_roles) AS allowed_roles,
-                   COALESCE(dn.similarity, sp.similarity) AS similarity,
-                   COALESCE(sp.text_rank, 0.0) AS text_rank,
-                   dn.rnk AS dense_rank, sp.rnk AS sparse_rank,
-                   COALESCE($5::float8 / ($7::int + dn.rnk), 0.0)
-                     + COALESCE($6::float8 / ($7::int + sp.rnk), 0.0) AS rrf_score
-            FROM dense dn
-            FULL OUTER JOIN sparse sp ON dn.chunk_id_pk = sp.chunk_id_pk
-            ORDER BY rrf_score DESC
-            LIMIT $8
-        """
+            """
+            fused_sql = """
+                WITH dense AS (
+                    SELECT c.id::text AS chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content,
+                           d.allowed_roles, 1 - (c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)) AS similarity,
+                           ROW_NUMBER() OVER (ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)) AS rnk
+                    FROM document_chunks c
+                    JOIN documents d ON c.document_id = d.id
+                    WHERE d.allowed_roles ?| $3::text[]
+                      AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
+                    ORDER BY c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)
+                    LIMIT $4
+                ),
+                sparse AS (
+                    SELECT c.id::text AS chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content,
+                           d.allowed_roles, 1 - (c.embedding::halfvec(1536) <=> $1::vector::halfvec(1536)) AS similarity,
+                           ts_rank(c.tsv, plainto_tsquery('english', $2)) AS text_rank,
+                           ROW_NUMBER() OVER (ORDER BY ts_rank(c.tsv, plainto_tsquery('english', $2)) DESC) AS rnk
+                    FROM document_chunks c
+                    JOIN documents d ON c.document_id = d.id
+                    WHERE d.allowed_roles ?| $3::text[]
+                      AND (c.tsv @@ plainto_tsquery('english', $2) OR c.tsv @@ websearch_to_tsquery('english', $2))
+                    ORDER BY text_rank DESC
+                    LIMIT $4
+                )
+                SELECT COALESCE(dn.chunk_id_pk, sp.chunk_id_pk) AS chunk_id_pk,
+                       COALESCE(dn.document_id, sp.document_id) AS document_id,
+                       COALESCE(dn.title, sp.title) AS title,
+                       COALESCE(dn.chunk_index, sp.chunk_index) AS chunk_index,
+                       COALESCE(dn.content, sp.content) AS content,
+                       COALESCE(dn.allowed_roles, sp.allowed_roles) AS allowed_roles,
+                       COALESCE(dn.similarity, sp.similarity) AS similarity,
+                       COALESCE(sp.text_rank, 0.0) AS text_rank,
+                       dn.rnk AS dense_rank, sp.rnk AS sparse_rank,
+                       COALESCE($5::float8 / ($7::int + dn.rnk), 0.0)
+                         + COALESCE($6::float8 / ($7::int + sp.rnk), 0.0) AS rrf_score
+                FROM dense dn
+                FULL OUTER JOIN sparse sp ON dn.chunk_id_pk = sp.chunk_id_pk
+                ORDER BY rrf_score DESC
+                LIMIT $8
+            """
+        else:
+            dense_sql = """
+                SELECT c.id::text as chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
+                       1 - (c.embedding <=> $1::vector) AS similarity
+                FROM document_chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE d.allowed_roles ?| $2::text[]
+                  AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
+                ORDER BY c.embedding <=> $1::vector
+                LIMIT $3
+            """
+            sparse_sql = """
+                SELECT c.id::text as chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content, d.allowed_roles,
+                       ts_rank(c.tsv, plainto_tsquery('english', $1)) AS text_rank,
+                       1 - (c.embedding <=> $2::vector) AS similarity
+                FROM document_chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE d.allowed_roles ?| $3::text[]
+                  AND (c.tsv @@ plainto_tsquery('english', $1) OR c.tsv @@ websearch_to_tsquery('english', $1))
+                ORDER BY text_rank DESC
+                LIMIT $4
+            """
+            fused_sql = """
+                WITH dense AS (
+                    SELECT c.id::text AS chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content,
+                           d.allowed_roles, 1 - (c.embedding <=> $1::vector) AS similarity,
+                           ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1::vector) AS rnk
+                    FROM document_chunks c
+                    JOIN documents d ON c.document_id = d.id
+                    WHERE d.allowed_roles ?| $3::text[]
+                      AND (c.embedding_model = 'text-embedding-3-small' OR c.embedding_model IS NULL)
+                    ORDER BY c.embedding <=> $1::vector
+                    LIMIT $4
+                ),
+                sparse AS (
+                    SELECT c.id::text AS chunk_id_pk, d.document_id, d.title, c.chunk_index, c.content,
+                           d.allowed_roles, 1 - (c.embedding <=> $1::vector) AS similarity,
+                           ts_rank(c.tsv, plainto_tsquery('english', $2)) AS text_rank,
+                           ROW_NUMBER() OVER (ORDER BY ts_rank(c.tsv, plainto_tsquery('english', $2)) DESC) AS rnk
+                    FROM document_chunks c
+                    JOIN documents d ON c.document_id = d.id
+                    WHERE d.allowed_roles ?| $3::text[]
+                      AND (c.tsv @@ plainto_tsquery('english', $2) OR c.tsv @@ websearch_to_tsquery('english', $2))
+                    ORDER BY text_rank DESC
+                    LIMIT $4
+                )
+                SELECT COALESCE(dn.chunk_id_pk, sp.chunk_id_pk) AS chunk_id_pk,
+                       COALESCE(dn.document_id, sp.document_id) AS document_id,
+                       COALESCE(dn.title, sp.title) AS title,
+                       COALESCE(dn.chunk_index, sp.chunk_index) AS chunk_index,
+                       COALESCE(dn.content, sp.content) AS content,
+                       COALESCE(dn.allowed_roles, sp.allowed_roles) AS allowed_roles,
+                       COALESCE(dn.similarity, sp.similarity) AS similarity,
+                       COALESCE(sp.text_rank, 0.0) AS text_rank,
+                       dn.rnk AS dense_rank, sp.rnk AS sparse_rank,
+                       COALESCE($5::float8 / ($7::int + dn.rnk), 0.0)
+                         + COALESCE($6::float8 / ($7::int + sp.rnk), 0.0) AS rrf_score
+                FROM dense dn
+                FULL OUTER JOIN sparse sp ON dn.chunk_id_pk = sp.chunk_id_pk
+                ORDER BY rrf_score DESC
+                LIMIT $8
+            """
+
+        fetch_limit = limit * 2
         try:
             async with pool.acquire() as conn:
+                await cls.configure_rls_context(conn, sanitized_roles)
                 await cls.configure_iterative_scan(
                     conn,
                     max_scan_tuples=cls.scaled_scan_tuples(sanitized_roles),
@@ -369,10 +443,11 @@ class DatabaseManager:
                 }
                 for r in fused_rows
             ]
-        except Exception:
+        except Exception:  # noqa: S110
             pass  # Fall back to dual-query Python RRF (e.g. missing tsv column or older Postgres)
 
         async with pool.acquire() as conn:
+            await cls.configure_rls_context(conn, sanitized_roles)
             await cls.configure_iterative_scan(
                 conn,
                 max_scan_tuples=cls.scaled_scan_tuples(sanitized_roles),
@@ -573,6 +648,7 @@ class DatabaseManager:
 
         pool = await cls.get_pool()
         async with pool.acquire() as conn:
+            await cls.configure_rls_context(conn, clean_roles)
             query = """
                 SELECT d.id, d.document_id, d.title, d.file_hash, d.allowed_roles, d.created_at,
                        COUNT(c.id) AS chunk_count
@@ -684,7 +760,7 @@ class DatabaseManager:
                 if isinstance(record.get(field), str):
                     try:
                         record[field] = json.loads(record[field])
-                    except Exception:
+                    except Exception:  # noqa: S110
                         pass
             return record
 
@@ -720,7 +796,7 @@ class DatabaseManager:
                     if isinstance(record.get(field), str):
                         try:
                             record[field] = json.loads(record[field])
-                        except Exception:
+                        except Exception:  # noqa: S110
                             pass
                 results.append(record)
             return results
@@ -795,7 +871,7 @@ class DatabaseManager:
                     if isinstance(item.get("payload"), str):
                         try:
                             item["payload"] = json.loads(item["payload"])
-                        except Exception:
+                        except Exception:  # noqa: S110
                             pass
                     results.append(item)
                 return results
@@ -1109,3 +1185,35 @@ class DatabaseManager:
                     fetch_limit,
                 )
             return [dict(r) for r in rows]
+
+    @classmethod
+    async def record_rag_access_audit(
+        cls,
+        caller_id: str,
+        roles: List[str],
+        query_sha256: str,
+        document_ids: List[str],
+        chunk_indices: List[int],
+        retrieval_backend: str = "pgvector",
+        triad_status: str = "UNVERIFIED",
+    ) -> bool:
+        """Persist compliance provenance record into append-only rag_access_audit_log."""
+        pool = await cls.get_pool()
+        cid = (caller_id or "anonymous").strip() or "anonymous"
+        async with pool.acquire() as conn:
+            res = await conn.execute(
+                """
+                INSERT INTO rag_access_audit_log (
+                    caller_id, roles, query_sha256, document_ids, chunk_indices, retrieval_backend, triad_status
+                )
+                VALUES ($1, $2::jsonb, $3, $4::jsonb, $5::jsonb, $6, $7)
+                """,
+                cid,
+                json.dumps(roles),
+                query_sha256[:64],
+                json.dumps(document_ids),
+                json.dumps(chunk_indices),
+                retrieval_backend,
+                triad_status,
+            )
+            return "INSERT" in str(res)

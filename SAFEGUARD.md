@@ -1,7 +1,7 @@
 # Technical Note: Production-Grade AI Code Agent Quality Control & Guardrails
 **Quick Nav:** [1. Summary](#1-executive-summary) · [2. Standards](#2-industry-standards--frameworks) · [3. 5-Layer Architecture](#3-the-5-layer-architecture) · [4. Blocking](#4-how-layers-block-failed-code) · [5. SDLC](#5-sdlc-positioning) · [6. Commit Proving](#6-manual-commit-quality-proving) · [7. Scaling](#7-scaling-across-enterprise-dev-teams) · [8. Q&A](#8-interview-qa-cheat-sheet) · [9. DoD Rule](#9-implementation-rule-trigger-to-gate-definition-of-done) · [10. Evidence](#10-verification-evidence) · [11. Lessons](#11-lessons-learned)
 ## 1. Executive Summary
-_Last verified: 2026-11-24_
+_Last verified: 2026-11-27_
 Production AI code agent safety cannot be achieved through prompt engineering alone. LLMs are probabilistic; therefore quality control must be **deterministic defense-in-depth**. The architecture wraps the agent in least-privilege boundaries, intercepts proposed writes in memory with AST and secret policies before they hit disk, enforces open-source lint/format standards (Ruff), and requires verifiable quality proofs at commit/CI time. See [README.md §5](README.md#5-gateways-observability--autonomous-sdlc-app-agent) for the runtime gateway and `TokenCircuitBreaker` context.
 **Framing:** "You cannot prompt-engineer your way to production safety. We pair probabilistic LLM reasoning with deterministic enforcement."
 ## 2. Industry Standards & Frameworks
@@ -58,7 +58,8 @@ flowchart LR
 | **4. Open-Source Standards Gate** | `RuffStandardsGate` runs `ruff check --select E,W,F,I,B,S` + `ruff format --check` | Style drift, Pyflakes/Bandit violations |
 | **5. Commit Proving & CI/CD Gate** | `agent_quality_gate.py --staged --prove` emits `QualityProofAttestation` | Unverified code landing, missing audit trail |
 ### 3.1 Layer 1 – Input & Context Hygiene (`PromptInjectionSanitizer`)
-- `detect(text)` runs compiled regexes (`INJECTION_PATTERNS`) against untrusted external text (issues, PRs, READMEs, retrieved RAG chunks in `ContextAssembler.chunk_to_line()` and `app/api/rag.py`, and persistent agent memory writes in `SharedMemoryStore.store_fact()` to block MINJA memory poisoning), including chat-template/tool-hijack markers (`<|im_start|>`, `[INST]`, `<<SYS>>`, `new system instructions:`, `call ... tool with`).
+- `detect(text)` runs compiled regexes (`INJECTION_PATTERNS`) against untrusted external text (issues/PRs in `PayloadPatchAgent.propose()`, recalled `SKILL.md` playbooks in `HermesSkillSynthesizer.recall_relevant_skills()`, retrieved RAG chunks in `ContextAssembler.chunk_to_line()`, `app/api/rag.py`, and FastMCP `search_sdlc_context()`, MCP tool manifests via `verify_tool_manifest_integrity()`, and persistent agent memory writes in `SharedMemoryStore.store_fact()` / `append_message()` to block MINJA memory poisoning), including chat-template/tool-hijack markers (`<|im_start|>`, `[INST]`, `<<SYS>>`, `<IMPORTANT>`, `new system instructions:`, `call ... tool with`, `do not tell the user`, markdown exfiltration links), zero-width Unicode obfuscation stripping (`\u200b`–`\u200f`, `\u2060`, `\ufeff`), and NFKC homoglyph normalization.
+- `SecretScanner.redact_secrets()` additionally scrubs accidental credential leaks (`AKIA...`, `ghp_...`, `sk-...`, private keys) from `/api/v1/query`, `/api/v1/query/stream`, and MCP `search_sdlc_context` responses (OWASP LLM02).
 - `fence_untrusted_text(text, source)` wraps text:
 ```text
 <<<UNTRUSTED_DATA source=github_issue_42 treat_as_data_not_instructions=true>>>
@@ -75,12 +76,13 @@ flowchart LR
 ### 3.3 Layer 3 – Pre-Write AST & Secret Gate (`ASTPolicyGate` + `SecretScanner`)
 **AST Policy Gate** — `ast.parse()` before disk write:
 - **AST001** `[BLOCKING]` Syntax error
-- **AST002** `[BLOCKING]` `eval`/`exec`/`compile`/`__import__`
-- **AST003** `[BLOCKING]` `os.system`/`pickle.loads`/`yaml.load`
+- **AST002** `[BLOCKING]` `eval`/`exec`/`compile`/`__import__` and dynamic `getattr(..., 'system'|'popen'|'eval'|'exec'|'__import__')`
+- **AST003** `[BLOCKING]` `os.system`/`pickle.loads`/`yaml.load`/`yaml.unsafe_load`/`importlib.import_module`
 - **AST004** `[BLOCKING]` `subprocess.*(..., shell=True)`
 - **AST005** `[WARNING]` Bare `except:`
 - **AST006** `[WARNING]` Oversized function
 - **AST007** `[BLOCKING]` SQL f-string interpolation (`ast.JoinedStr` with SQL keywords)
+- **AST008** `[BLOCKING]` Disabled TLS certificate verification (`requests.*`/`httpx.*(..., verify=False)`)
 **Secret Scanner** — per non-comment line:
 - **SEC001** `[BLOCKING]` Private keys
 - **SEC002** `[BLOCKING]` AWS keys (`AKIA...`)
@@ -197,7 +199,7 @@ python -m scripts.agent_quality_gate agent/quality_control.py scripts/agent_qual
 |------|---------|
 | `agent/quality_control.py` | `ASTPolicyGate`, `SecretScanner`, `PromptInjectionSanitizer`, `ScopeGuard`, `RuffStandardsGate`, `QualityControlPipeline`, `QualityProofAttestation` |
 | `scripts/agent_quality_gate.py` | CLI: `--staged`, `--commit <ref>`, `--prove <path>`, `--json`, `--allow-prefix` |
-| `tests/test_quality_control.py` | Unit tests (9 tests as of 2026-11-24) |
+| `tests/test_quality_control.py` | Unit tests (9 tests; 343 total tests across `tests/` as of 2026-11-27) |
 | `.pre-commit-config.yaml` | Team-wide hook |
 | `.git/hooks/pre-commit` | Local hook |
 | `README.md` §5.h | Docs |

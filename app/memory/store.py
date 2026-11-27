@@ -234,8 +234,18 @@ class SharedMemoryStore:
         """
         if not thread_id or not message:
             return None
+        from agent.quality_control import PromptInjectionSanitizer
+
+        stored_message = message
+        msg_metadata = dict(metadata or {})
+        if PromptInjectionSanitizer.detect(message):
+            logger.warning("Potential indirect prompt injection detected in shared chat message thread=%s", thread_id)
+            msg_metadata["injection_detected"] = True
+            stored_message = PromptInjectionSanitizer.fence_untrusted_text(
+                message, source=f"shared_chat_{thread_id}"
+            )
         try:
-            vec = embedding if embedding is not None else await _embed(message)
+            vec = embedding if embedding is not None else await _embed(stored_message)
             pool = await DatabaseManager.get_pool()
             async with pool.acquire() as conn:
                 # RBAC invariant: the thread governs visibility; we only insert
@@ -258,9 +268,9 @@ class SharedMemoryStore:
                     msg_id,
                     thread_id,
                     role,
-                    message,
+                    stored_message,
                     _format_vector(vec),
-                    json.dumps(metadata or {}, default=str),
+                    json.dumps(msg_metadata, default=str),
                 )
             return msg_id
         except Exception as exc:
@@ -633,6 +643,7 @@ class SharedMemoryStore:
         try:
             if ef_search is None:
                 ef_search = DatabaseManager.scaled_ef_search(roles)
+            await DatabaseManager.configure_rls_context(conn, roles)
             await DatabaseManager.configure_iterative_scan(
                 conn,
                 max_scan_tuples=DatabaseManager.scaled_scan_tuples(roles),

@@ -363,3 +363,100 @@ VALUES
     ('anonymous', 25000, 0, TRUE, FALSE),
     ('legacy-header-user', 50000, 0, TRUE, FALSE)
 ON CONFLICT (caller_id) DO NOTHING;
+
+-- ============================================================================
+-- 7. Compliance Retrieval Audit Log & Kernel Row-Level Security (PG16 RLS)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS rag_access_audit_log (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    caller_id VARCHAR(128) NOT NULL,
+    roles JSONB NOT NULL DEFAULT '[]'::jsonb,
+    query_sha256 CHAR(64) NOT NULL,
+    document_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    chunk_indices JSONB NOT NULL DEFAULT '[]'::jsonb,
+    retrieval_backend VARCHAR(32) NOT NULL DEFAULT 'pgvector',
+    triad_status VARCHAR(16) NOT NULL DEFAULT 'UNVERIFIED',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_audit_caller_time
+    ON rag_access_audit_log (caller_id, created_at DESC);
+
+-- Defense-in-depth PostgreSQL 16 Row-Level Security (fail-closed on empty/unset app.current_user_roles)
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE documents FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS rls_documents_select ON documents;
+CREATE POLICY rls_documents_select ON documents
+    FOR SELECT
+    USING (
+        allowed_roles ?| string_to_array(NULLIF(current_setting('app.current_user_roles', true), ''), ',')
+    );
+DROP POLICY IF EXISTS rls_documents_write ON documents;
+CREATE POLICY rls_documents_write ON documents
+    FOR ALL
+    USING (current_setting('app.rls_mode', true) IS DISTINCT FROM 'read_only')
+    WITH CHECK (true);
+
+ALTER TABLE document_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE document_chunks FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS rls_document_chunks_select ON document_chunks;
+CREATE POLICY rls_document_chunks_select ON document_chunks
+    FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM documents d
+            WHERE d.id = document_chunks.document_id
+              AND d.allowed_roles ?| string_to_array(NULLIF(current_setting('app.current_user_roles', true), ''), ',')
+        )
+    );
+DROP POLICY IF EXISTS rls_document_chunks_write ON document_chunks;
+CREATE POLICY rls_document_chunks_write ON document_chunks
+    FOR ALL
+    USING (current_setting('app.rls_mode', true) IS DISTINCT FROM 'read_only')
+    WITH CHECK (true);
+
+ALTER TABLE shared_chat_threads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE shared_chat_threads FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS rls_shared_threads_select ON shared_chat_threads;
+CREATE POLICY rls_shared_threads_select ON shared_chat_threads
+    FOR SELECT
+    USING (
+        allowed_roles ?| string_to_array(NULLIF(current_setting('app.current_user_roles', true), ''), ',')
+    );
+DROP POLICY IF EXISTS rls_shared_threads_write ON shared_chat_threads;
+CREATE POLICY rls_shared_threads_write ON shared_chat_threads
+    FOR ALL
+    USING (current_setting('app.rls_mode', true) IS DISTINCT FROM 'read_only')
+    WITH CHECK (true);
+
+ALTER TABLE shared_chat_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE shared_chat_messages FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS rls_shared_messages_select ON shared_chat_messages;
+CREATE POLICY rls_shared_messages_select ON shared_chat_messages
+    FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM shared_chat_threads t
+            WHERE t.thread_id = shared_chat_messages.thread_id
+              AND t.allowed_roles ?| string_to_array(NULLIF(current_setting('app.current_user_roles', true), ''), ',')
+        )
+    );
+DROP POLICY IF EXISTS rls_shared_messages_write ON shared_chat_messages;
+CREATE POLICY rls_shared_messages_write ON shared_chat_messages
+    FOR ALL
+    USING (current_setting('app.rls_mode', true) IS DISTINCT FROM 'read_only')
+    WITH CHECK (true);
+
+ALTER TABLE agent_memories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_memories FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS rls_agent_memories_select ON agent_memories;
+CREATE POLICY rls_agent_memories_select ON agent_memories
+    FOR SELECT
+    USING (
+        allowed_roles ?| string_to_array(NULLIF(current_setting('app.current_user_roles', true), ''), ',')
+    );
+DROP POLICY IF EXISTS rls_agent_memories_write ON agent_memories;
+CREATE POLICY rls_agent_memories_write ON agent_memories
+    FOR ALL
+    USING (current_setting('app.rls_mode', true) IS DISTINCT FROM 'read_only')
+    WITH CHECK (true);

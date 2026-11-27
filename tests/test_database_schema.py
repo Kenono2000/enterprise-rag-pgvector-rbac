@@ -333,7 +333,6 @@ async def test_database_manager_halfvec_and_workflow_checkpoints():
 
 def test_format_halfvec_nan_inf_sanitization():
     """Verify NaN and Infinity float values in input vectors serialize to safe '0.0' literals."""
-    import math
     vector_with_anomalies = [0.5, float("nan"), float("inf"), float("-inf"), -0.25]
     result = DatabaseManager.format_halfvec(vector_with_anomalies, dimensions=5)
     elements = result.strip("[]").split(",")
@@ -434,4 +433,59 @@ def test_sanitize_roles_for_query_is_shared_contract():
         "engineer",
         "engineer",
     ]
+
+
+def test_schema_sql_enforces_pg16_force_rls_and_audit_log():
+    """Verify schema.sql enables FORCE ROW LEVEL SECURITY and compliance audit logging."""
+    schema_path = Path(__file__).resolve().parent.parent / "schema.sql"
+    sql_text = schema_path.read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS rag_access_audit_log" in sql_text
+    assert "idx_rag_audit_caller_time" in sql_text
+    for table in (
+        "documents",
+        "document_chunks",
+        "shared_chat_threads",
+        "shared_chat_messages",
+        "agent_memories",
+    ):
+        assert f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;" in sql_text
+        assert f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY;" in sql_text
+    assert "current_setting('app.current_user_roles', true)" in sql_text
+
+
+@pytest.mark.asyncio
+async def test_configure_rls_context_and_record_rag_access_audit():
+    """Verify DatabaseManager binds app.current_user_roles and writes audit logs."""
+    mock_conn = AsyncMock()
+    mock_conn.execute = AsyncMock(return_value="INSERT 0 1")
+
+    class MockPoolAcquire:
+        async def __aenter__(self):
+            return mock_conn
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value = MockPoolAcquire()
+
+    ok_rls = await DatabaseManager.configure_rls_context(
+        mock_conn, ["engineer", "'; DROP TABLE documents;--"], local=True
+    )
+    assert ok_rls is True
+    assert "set_config('app.current_user_roles'" in mock_conn.execute.call_args[0][0]
+    assert mock_conn.execute.call_args[0][1] == "engineer"
+    assert mock_conn.execute.call_args[0][2] is True
+
+    with patch.object(DatabaseManager, "get_pool", new_callable=AsyncMock, return_value=mock_pool):
+        logged = await DatabaseManager.record_rag_access_audit(
+            caller_id="alice@acme.com",
+            roles=["engineer"],
+            query_sha256="a" * 64,
+            document_ids=["DOC-1"],
+            chunk_indices=[0],
+            retrieval_backend="pgvector",
+            triad_status="PASS",
+        )
+    assert logged is True
 

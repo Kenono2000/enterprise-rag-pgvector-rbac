@@ -1,10 +1,11 @@
+import hashlib
 import os
 import sys
 import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional, List, Tuple, Dict
+from typing import Any, Optional, List, Tuple, Dict
 
 # Add the project root to sys.path to allow absolute imports of the 'app' package
 # when this file is run as a standalone script (e.g., by fastmcp inspect).
@@ -22,7 +23,9 @@ from app.auth.jwks import verify_google_token
 from app.auth.role_mapper import extract_roles
 from app.memory.store import SharedMemoryStore
 from app.observability import tracer
-from agent.guardrails import SlidingWindowRateLimiter, TokenCircuitBreaker
+from app.rag import ContextAssembler
+from agent.guardrails import PolicyEngine, SlidingWindowRateLimiter, TokenCircuitBreaker
+from agent.quality_control import PromptInjectionSanitizer, SecretScanner
 
 logger = logging.getLogger(__name__)
 
@@ -335,13 +338,23 @@ async def search_sdlc_context(
         )
         return res
 
-    context_chunks = "\n\n".join([f"[{r['title']}]: {r['content']}" for r in rows])
-
-    prompt = f"Answer strictly using context:\n\n{context_chunks}\n\nQuestion: {validated.question}"
-    answer_text = await chat_completion(prompt)
+    assembly = ContextAssembler.assemble(rows, validated.question)
+    raw_answer = await chat_completion(assembly.prompt)
+    answer_text = SecretScanner.redact_secrets(raw_answer)
 
     citations = [f"- {r['title']} (similarity: {round(float(r['similarity']), 3)})" for r in rows]
     citations_text = "\n".join(citations)
+
+    query_sha = hashlib.sha256(validated.question.encode("utf-8")).hexdigest()
+    tracer.record_retrieval_audit(
+        caller_id=caller_key,
+        roles=list(roles or []),
+        query_sha256=query_sha,
+        document_ids=[str(r.get("document_id", "")) for r in rows],
+        chunk_indices=[int(r.get("chunk_index", 0)) for r in rows],
+        retrieval_backend=backend,
+        triad_status="MCP_FENCED",
+    )
 
     result_text = f"{answer_text}\n\nCitations:\n{citations_text}\n\n[Authorized Roles Evaluated: {roles}]"
     duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
@@ -452,6 +465,30 @@ async def propose_patch(
             roles=[submitter],
             duration_ms=duration_ms,
             error=token_err,
+        )
+        return err_msg
+
+    # Deterministic patch security gate: block prompt injection, secrets, path traversal, and dangerous AST calls
+    patch_violations: List[str] = []
+    if PromptInjectionSanitizer.detect(validated.patch_content):
+        patch_violations.append("Indirect prompt injection pattern detected in patch_content.")
+    patch_violations.extend(PolicyEngine.verify_protected_path(validated.branch_name))
+    patch_violations.extend(PolicyEngine.scan_for_secrets(validated.patch_content))
+    patch_violations.extend(
+        v for v in PolicyEngine.verify_ast(validated.patch_content)
+        if not v.startswith("Syntax error in code:")
+    )
+    if patch_violations:
+        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
+        err_detail = f"Patch security gate failed: {'; '.join(patch_violations)}"
+        err_msg = f"⛔ {err_detail}"
+        tracer.record_mcp_tool_execution(
+            tool_name="propose_patch",
+            parameters={"branch_name": validated.branch_name, "caller_sub": submitter},
+            result=err_msg,
+            roles=[submitter],
+            duration_ms=duration_ms,
+            error=err_detail,
         )
         return err_msg
 
@@ -1211,16 +1248,6 @@ async def memory_cleanup(
     - user_roles: Optional fallback roles (only honored if REQUIRE_GOOGLE_AUTH=false).
     """
     t_start = time.perf_counter()
-    if "admin" not in (user_roles or []) and "engineer" not in (user_roles or []):
-        duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
-        err = "Forbidden: Admin or Engineer role required to run shared-memory cleanup."
-        attribution = _resolve_caller_attribution(auth_token)
-        tracer.record_mcp_tool_execution(
-            tool_name="memory_cleanup",
-            parameters={"older_than_days": older_than_days, **attribution},
-            result=err, roles=None, duration_ms=duration_ms, error=err,
-        )
-        return f"⛔ {err}"
     roles, error = _resolve_tool_roles(auth_token, user_roles)
     attribution = _resolve_caller_attribution(auth_token)
     caller_key = attribution["caller_sub"]
@@ -1304,10 +1331,10 @@ async def memory_store_summary(
     - user_roles: Optional fallback roles (only honored if REQUIRE_GOOGLE_AUTH=false).
     """
     t_start = time.perf_counter()
-    validated_roles = allowed_roles or list(user_roles or [])
     roles, error = _resolve_tool_roles(auth_token, user_roles)
     attribution = _resolve_caller_attribution(auth_token)
     caller_key = attribution["caller_sub"]
+    validated_roles = allowed_roles or list(roles or [])
 
     if error:
         duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
@@ -1476,6 +1503,7 @@ async def get_gateway_metadata(
             "max_tokens_per_request": mcp_token_breaker.max_tokens_per_request,
             "max_tokens_per_issue": mcp_token_breaker.max_tokens_per_issue,
         },
+        "manifest_integrity": verify_tool_manifest_integrity(),
         "caller_attribution": attribution,
     }
     duration_ms = round((time.perf_counter() - t_start) * 1000, 2)
@@ -1511,6 +1539,91 @@ def get_budget_policy() -> str:
             "memory_store_summary",
         ],
     })
+
+
+_TOOL_REQUEST_MODELS: Dict[str, type[BaseModel]] = {
+    "search_sdlc_context": MCPSearchRequest,
+    "list_documents": MCPListDocumentsRequest,
+    "propose_patch": MCPPatchRequest,
+    "run_sdlc_crew": MCPSDLCCrewRequest,
+    "recall_hermes_skills": MCPHermesSkillRequest,
+    "memory_chat": MCPMemoryChatRequest,
+    "memory_recall": MCPMemoryRecallRequest,
+    "memory_store_fact": MCPMemoryFactRequest,
+    "memory_list_threads": MCPListDocumentsRequest,
+}
+
+
+def compute_tool_manifest(
+    extra_descriptions: Optional[Dict[str, str]] = None,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Build a deterministic canonical manifest of every registered MCP tool
+    (name, required roles, docstring/description, and strict JSON schema)
+    and return `(manifest, sha256_hex)` to prevent MCP rug pulls (ASI04).
+    """
+    tool_funcs = {
+        "search_sdlc_context": search_sdlc_context,
+        "list_documents": list_documents,
+        "propose_patch": propose_patch,
+        "run_sdlc_crew": run_sdlc_crew,
+        "recall_hermes_skills": recall_hermes_skills,
+        "get_gateway_metadata": get_gateway_metadata,
+        "memory_chat": memory_chat,
+        "memory_recall": memory_recall,
+        "memory_store_fact": memory_store_fact,
+        "memory_list_threads": memory_list_threads,
+        "memory_cleanup": memory_cleanup,
+        "memory_store_summary": memory_store_summary,
+    }
+    manifest: List[Dict[str, Any]] = []
+    for name in sorted(TOOL_REQUIRED_ROLES.keys()):
+        fn = tool_funcs.get(name)
+        default_desc = (getattr(fn, "description", None) or getattr(fn, "__doc__", None) or "").strip()
+        desc = (extra_descriptions or {}).get(name, default_desc)
+        model_cls = _TOOL_REQUEST_MODELS.get(name)
+        manifest.append({
+            "name": name,
+            "required_roles": sorted(TOOL_REQUIRED_ROLES[name]),
+            "description": desc,
+            "schema": model_cls.model_json_schema() if model_cls else None,
+        })
+    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return manifest, digest
+
+
+_BASELINE_MANIFEST_SHA256: str = compute_tool_manifest()[1]
+
+
+def verify_tool_manifest_integrity(
+    expected_sha256: Optional[str] = None,
+    extra_descriptions: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """
+    Verify MCP tool manifest against tool poisoning (ASI04 metadata injection)
+    and runtime rug-pull schema/description drift via SHA-256 hash pinning.
+    """
+    manifest, actual_sha = compute_tool_manifest(extra_descriptions=extra_descriptions)
+    pinned_sha = (
+        expected_sha256
+        or os.getenv("MCP_PINNED_MANIFEST_SHA256")
+        or _BASELINE_MANIFEST_SHA256
+    ).strip()
+    poisoned_tools: List[Dict[str, Any]] = []
+    for entry in manifest:
+        hits = PromptInjectionSanitizer.detect(entry.get("description") or "")
+        if hits:
+            poisoned_tools.append({"tool": entry["name"], "matches": hits})
+    hash_match = actual_sha == pinned_sha
+    verified = hash_match and not poisoned_tools
+    return {
+        "verified": verified,
+        "hash_match": hash_match,
+        "manifest_sha256": actual_sha,
+        "pinned_sha256": pinned_sha,
+        "poisoned_tools": poisoned_tools,
+    }
 
 
 def run_server(
